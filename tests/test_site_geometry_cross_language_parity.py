@@ -26,7 +26,9 @@ import numpy as np
 import pytest
 
 from minimappr.core.geo import LocalCoordinateFrame
+from minimappr.core.sensor_world_position import body_to_world_quaternion_wxyz
 from minimappr.models import GeoPoint, NodeOrientation
+from minimappr.sidecar_site_geometry import build_site_geometry_snapshot
 from minimappr.spatial_audio.geometry import orientation_rotation_matrix
 from tests.rust_sidecar_binary import build_rust_sidecar_binary, cargo_is_available
 
@@ -199,4 +201,41 @@ def test_resolved_placements_match_python_frames() -> None:
     assert automatic["resolutions"][1] == {"untrusted_reason": "node_position_untrusted_no_override"}
     np.testing.assert_allclose(
         automatic_frame.geo_to_local(gps_b), automatic["resolutions"][0]["position_m"], rtol=0.0, atol=NEAR_TOLERANCE_M
+    )
+
+
+def test_python_orientation_only_placement_keeps_gps_position_and_pins_rotation_in_rust() -> None:
+    """P3's orientation-only entry (operator yaw on an automatically positioned
+    node) resolves in Rust to the node's GPS in the site frame plus the
+    operator's rotation, never the packet's."""
+    origin = SITE_ORIGINS[0]
+    flat_frame = LocalCoordinateFrame(origin=origin, mode="flat")
+    operator_orientation = NodeOrientation(yaw_deg=35.0)
+    snapshot = build_site_geometry_snapshot(
+        node_rows=[
+            {
+                "id": "planar",
+                "position_m": [0.0, 0.0, 0.0],
+                "mobility": "stationary",
+                "effective_position_filter": "kde",
+                "orientation": operator_orientation.model_dump(mode="json"),
+                "overrides": {"orientation": operator_orientation.model_dump(mode="json")},
+            }
+        ],
+        estimator_states_by_node_id={},
+        coordinate_frame=flat_frame,
+    )
+    gps = flat_frame.local_to_geo((37.0, -22.0, 1.5))
+    fix = _fix(gps)
+    (resolved,) = _run_oracle(
+        [{"kind": "resolve_placements", "push": snapshot.to_push_body(1), "nodes": [{"node_id": "planar", "fix": fix}]}]
+    )
+    (placed,) = resolved["resolutions"]
+    assert placed["position_source"] == "reported_gps"
+    np.testing.assert_allclose(placed["position_m"], flat_frame.geo_to_local(gps), rtol=0.0, atol=NEAR_TOLERANCE_M)
+    np.testing.assert_allclose(
+        placed["body_to_world_quaternion_wxyz"],
+        body_to_world_quaternion_wxyz(operator_orientation),
+        rtol=0.0,
+        atol=ROTATION_TOLERANCE,
     )

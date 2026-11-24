@@ -43,6 +43,39 @@ pub enum SolveBufferScope {
     AutomaticSiteCluster,
 }
 
+/// Why a node solved alone (`buffer_scope` `node_local`) instead of joining a
+/// cluster buffer; `solve_provenance.node_local_routing_reason`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeLocalRoutingReason {
+    /// 2-3 channels without offsets, so no world placement is possible.
+    NodeArrayGeometryUnusable,
+    /// No trusted world position: a `fallback_static` (or missing) fix and no
+    /// pushed placement. Two nodes at one built-in point cannot form a baseline.
+    NodePositionUntrustedNoOverride,
+    /// The manifest carries only half of the explicit cluster fields.
+    ExplicitClusterIncomplete,
+    /// Fewer declared sensors than an SRP solve needs.
+    ExplicitClusterBelowMinimumSensors,
+    /// Some of the node's channels are not in the declared sensor list.
+    NodeChannelsMissingFromExplicitCluster,
+}
+
+impl NodeLocalRoutingReason {
+    /// The wire spelling, for logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NodeArrayGeometryUnusable => "node_array_geometry_unusable",
+            Self::NodePositionUntrustedNoOverride => "node_position_untrusted_no_override",
+            Self::ExplicitClusterIncomplete => "explicit_cluster_incomplete",
+            Self::ExplicitClusterBelowMinimumSensors => "explicit_cluster_below_minimum_sensors",
+            Self::NodeChannelsMissingFromExplicitCluster => {
+                "node_channels_missing_from_explicit_cluster"
+            }
+        }
+    }
+}
+
 /// Geodetic -> local ENU conversion. Rust implements exactly the projection
 /// Python's `LocalCoordinateFrame` is configured with (`flat` / `geodetic`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -203,6 +236,8 @@ pub struct SolveProvenance {
     pub cluster_id: Option<String>,
     /// Node whose packet produced the manifest (not necessarily every contributor).
     pub reporting_node_id: String,
+    /// Why the reporting node solved node-local; null for cluster solves.
+    pub node_local_routing_reason: Option<NodeLocalRoutingReason>,
     pub coordinate_frame: SolveCoordinateFrame,
     /// Bumps whenever any sensor position in the layout changes (GPS included).
     pub layout_revision: u64,
@@ -238,9 +273,15 @@ impl NodePlacementSource {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NodePlacement {
-    /// Node origin in site ENU metres about `site_origin`.
-    pub position_m: [f64; 3],
-    pub position_std_m: f64,
+    /// Node origin in site ENU metres about `site_origin`. Absent = an
+    /// orientation-only placement: the node's position stays its reported GPS
+    /// and only `body_to_world_quaternion_wxyz` is pinned (an operator
+    /// orientation override on an automatically positioned node).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_m: Option<[f64; 3]>,
+    /// 1-sigma accuracy of `position_m`; only meaningful with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_std_m: Option<f64>,
     pub placement_source: NodePlacementSource,
     /// Body -> world rotation (w, x, y, z); absent means identity. Sensor world
     /// position = position_m + R * sensor_offset.
@@ -303,6 +344,16 @@ mod tests {
             serde_json::to_value(SolveExclusionReason::PairBaselineBelowMinimum).unwrap(),
             "pair_baseline_below_minimum"
         );
+        let routing_reasons = [
+            NodeLocalRoutingReason::NodeArrayGeometryUnusable,
+            NodeLocalRoutingReason::NodePositionUntrustedNoOverride,
+            NodeLocalRoutingReason::ExplicitClusterIncomplete,
+            NodeLocalRoutingReason::ExplicitClusterBelowMinimumSensors,
+            NodeLocalRoutingReason::NodeChannelsMissingFromExplicitCluster,
+        ];
+        for reason in routing_reasons {
+            assert_eq!(serde_json::to_value(reason).unwrap(), reason.as_str());
+        }
     }
 
     /// Same JSON as the example in `docs/localization_solve_contract.md`.
@@ -314,6 +365,7 @@ mod tests {
             "buffer_scope": "automatic_site_cluster",
             "cluster_id": "auto-gps",
             "reporting_node_id": "planar-a",
+            "node_local_routing_reason": null,
             "coordinate_frame": {
                 "frame_id": "site-7",
                 "kind": "site_enu",
@@ -427,6 +479,10 @@ mod tests {
                     "position_m": [6.0, 0.0, 1.5],
                     "position_std_m": 0.4,
                     "placement_source": "stationary_estimate"
+                },
+                "planar-gps": {
+                    "placement_source": "operator_override",
+                    "body_to_world_quaternion_wxyz": [0.9537, 0.0, 0.0, 0.3007]
                 }
             }
         });
@@ -435,6 +491,9 @@ mod tests {
             push.node_placements["point-b"].body_to_world_quaternion_wxyz,
             None
         );
+        let orientation_only = &push.node_placements["planar-gps"];
+        assert_eq!(orientation_only.position_m, None);
+        assert_eq!(orientation_only.position_std_m, None);
         assert_eq!(serde_json::to_value(&push).unwrap(), body);
     }
 }

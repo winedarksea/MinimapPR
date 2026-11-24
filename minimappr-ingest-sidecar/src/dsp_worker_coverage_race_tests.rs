@@ -441,12 +441,13 @@ async fn cluster_growth_while_pending_solves_with_the_parked_geometry() {
 }
 
 #[tokio::test]
-async fn backlog_batch_decides_only_after_newest_first_backfill() {
+async fn backlog_batch_decides_only_after_out_of_order_backfill() {
     // One poll batch holds node b's frames 25 and 26 and node a's trigger
-    // frame 25. Production processes it newest-first: b26 (silent, so it does
-    // not trigger), then a25 (triggers), then b25. Mid-batch, b's buffer end is
-    // already past the window while frame 25 is still a hole; deciding there
-    // solved on node a alone. The decision must wait for the batch boundary.
+    // frame 25, arriving b26 (silent, so it does not trigger, and reordered
+    // ahead of b25 on the network), then a25 (triggers), then b25. Mid-batch,
+    // b's buffer end is already past the window while frame 25 is still a
+    // hole; deciding there solved on node a alone. The decision must wait for
+    // the batch boundary.
     const TRIGGER_FRAME: usize = 25;
     const BELOW_SIGNAL_RMS_GATE: f32 = 0.01;
     let config = DspWorkerConfig {
@@ -464,9 +465,9 @@ async fn backlog_batch_decides_only_after_newest_first_backfill() {
     let batch_received_ns = system_now_ns();
     let mut batch = Vec::new();
     for (arrival_rank, node_id, frame_index, silent) in [
-        (1, NODE_B, TRIGGER_FRAME, false),
+        (1, NODE_B, TRIGGER_FRAME + 1, true),
         (2, NODE_A, TRIGGER_FRAME, false),
-        (3, NODE_B, TRIGGER_FRAME + 1, true),
+        (3, NODE_B, TRIGGER_FRAME, false),
     ] {
         let mut manifest = harness
             .frame_manifest(node_id, frame_index, positions.clone(), silent)

@@ -308,16 +308,6 @@ ARRIVAL_ORDERS = {
 }
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=StoredDetectionContractViolation,
-    reason=(
-        "localization overhaul milestone 1: Rust drops the planar node from the mixed auto-GPS cluster, "
-        "Python maps cluster pair indices onto the reporter's channels, stored event time is not the "
-        "packet-derived window centre, geometry ignores the planar orientation and site origin, and the "
-        "stored-detection localization_solve fields do not exist yet"
-    ),
-)
 @pytest.mark.parametrize("localization_solver", ["rust", "python_cartesian"])
 @pytest.mark.parametrize("arrival_order_name", sorted(ARRIVAL_ORDERS))
 def test_mixed_planar_and_point_cluster_stores_an_exact_detection(

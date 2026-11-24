@@ -2,30 +2,55 @@
 //! the solve-sensor cap, the rate guard and buffer reconcile plans.
 
 use super::*;
+use crate::dsp_geometry_config::SiteGeometryState;
 use crate::localization_solve_config::LocalizationSolveConfig;
+use minimappr_core::localization_sensor_entry::{
+    CoordinateProjection, GeodeticOrigin, SolveExclusionReason,
+};
 use minimappr_core::sirith_array_geometry::SIRITH_PLANAR_MIC_OFFSETS_M;
+use minimappr_core::site_frame_projection::local_enu_to_geodetic;
 
-const SECOND_NS: u128 = 1_000_000_000;
+pub(super) const SECOND_NS: u128 = 1_000_000_000;
 const STALE_SECONDS: f64 = 120.0;
-const RATE_HZ: u32 = 16_000;
-const SITE_LAT: f64 = 45.0;
-const SITE_LON: f64 = -93.0;
-/// Metres per degree of latitude on the legacy 6,371 km sphere.
-const METRES_PER_DEGREE_LAT: f64 = 6_371_000.0 * std::f64::consts::PI / 180.0;
+pub(super) const RATE_HZ: u32 = 16_000;
+pub(super) const SITE_ORIGIN: GeodeticOrigin = GeodeticOrigin {
+    lat: 45.0,
+    lon: -93.0,
+    alt_m: 0.0,
+};
 
-fn registry_with_cap(max_solve_sensors: usize) -> ClusterSensorRegistry {
-    ClusterSensorRegistry::new(&LocalizationSolveConfig {
-        localization_max_solve_sensors: max_solve_sensors,
-        localization_sensor_registry_stale_seconds: STALE_SECONDS,
-        ..LocalizationSolveConfig::default()
-    })
+/// The registry plus the site geometry the worker would hand it.
+pub(super) struct RegistryUnderTest {
+    pub(super) registry: ClusterSensorRegistry,
+    pub(super) site_geometry: SiteGeometryState,
 }
 
-fn registry() -> ClusterSensorRegistry {
+impl RegistryUnderTest {
+    fn tracked_sensor_count(&self) -> usize {
+        self.registry.tracked_sensor_count()
+    }
+
+    fn evict_stale_sensors(&mut self, now_ns: u128) {
+        self.registry.evict_stale_sensors(now_ns);
+    }
+}
+
+fn registry_with_cap(max_solve_sensors: usize) -> RegistryUnderTest {
+    RegistryUnderTest {
+        registry: ClusterSensorRegistry::new(&LocalizationSolveConfig {
+            localization_max_solve_sensors: max_solve_sensors,
+            localization_sensor_registry_stale_seconds: STALE_SECONDS,
+            ..LocalizationSolveConfig::default()
+        }),
+        site_geometry: SiteGeometryState::default(),
+    }
+}
+
+pub(super) fn registry() -> RegistryUnderTest {
     registry_with_cap(LocalizationSolveConfig::default().localization_max_solve_sensors)
 }
 
-fn manifest(node: Option<serde_json::Value>) -> DspManifest {
+pub(super) fn manifest(node: Option<serde_json::Value>) -> DspManifest {
     let mut manifest: DspManifest = serde_json::from_value(serde_json::json!({
         "manifest_id": "m", "manifest_type": "raw_journal_append", "created_ns": 0,
         "source_handles": [], "promotion_ready": false
@@ -36,10 +61,15 @@ fn manifest(node: Option<serde_json::Value>) -> DspManifest {
 }
 
 /// Node JSON with a GPS fix `north_m` north of the site point.
-fn gps_node(offsets: &[[f32; 3]], north_m: f64) -> serde_json::Value {
+pub(super) fn gps_node(offsets: &[[f32; 3]], north_m: f64) -> serde_json::Value {
+    let fix = local_enu_to_geodetic(
+        &SITE_ORIGIN,
+        CoordinateProjection::FlatWgs84Series,
+        [0.0, north_m, 0.0],
+    );
     serde_json::json!({
         "sensor_offsets_m": offsets,
-        "position_geo": {"lat": SITE_LAT + north_m / METRES_PER_DEGREE_LAT, "lon": SITE_LON, "alt_m": 0.0}
+        "position_geo": {"lat": fix.lat, "lon": fix.lon, "alt_m": fix.alt_m}
     })
 }
 
@@ -49,8 +79,8 @@ fn planar_gps_node(north_m: f64) -> serde_json::Value {
     node
 }
 
-fn route(
-    registry: &mut ClusterSensorRegistry,
+pub(super) fn route(
+    registry: &mut RegistryUnderTest,
     node_id: &str,
     manifest: &DspManifest,
     channel_count: usize,
@@ -58,22 +88,29 @@ fn route(
     now_ns: u128,
 ) -> NodeRoutingOutcome {
     let stream_key = format!("{node_id}__audio_main__0001");
-    registry.route_node(&NodeRoutingRequest {
-        stream_key: &stream_key,
-        manifest,
-        channel_count,
-        sample_rate_hz,
-        now_ns,
-    })
+    registry.registry.route_node(
+        &NodeRoutingRequest {
+            stream_key: &stream_key,
+            manifest,
+            channel_count,
+            sample_rate_hz,
+            now_ns,
+        },
+        &mut registry.site_geometry,
+    )
 }
 
-fn route_planar(registry: &mut ClusterSensorRegistry, north_m: f64, now_ns: u128) -> SensorRoute {
+pub(super) fn route_planar(
+    registry: &mut RegistryUnderTest,
+    north_m: f64,
+    now_ns: u128,
+) -> SensorRoute {
     let manifest = manifest(Some(planar_gps_node(north_m)));
     route(registry, "planar-a", &manifest, 5, RATE_HZ, now_ns).route
 }
 
-fn route_point(
-    registry: &mut ClusterSensorRegistry,
+pub(super) fn route_point(
+    registry: &mut RegistryUnderTest,
     node_id: &str,
     north_m: f64,
     sample_rate_hz: u32,
@@ -83,11 +120,11 @@ fn route_point(
     route(registry, node_id, &manifest, 1, sample_rate_hz, now_ns).route
 }
 
-fn ids(route: &SensorRoute) -> Vec<&str> {
+pub(super) fn ids(route: &SensorRoute) -> Vec<&str> {
     route.buffer_sensor_ids.iter().map(String::as_str).collect()
 }
 
-const PLANAR_AND_POINT_IDS: [&str; 6] = [
+pub(super) const PLANAR_AND_POINT_IDS: [&str; 6] = [
     "planar-a:ch0",
     "planar-a:ch1",
     "planar-a:ch2",
@@ -225,7 +262,7 @@ fn node_without_a_position_solves_node_local_with_its_own_offsets_and_a_reason()
     assert_eq!(route.layout.buffer_scope, SolveBufferScope::NodeLocal);
     assert_eq!(
         route.layout.node_local_routing_reason,
-        Some(NodeLocalRoutingReason::NodePositionUntrusted)
+        Some(NodeLocalRoutingReason::NodePositionUntrustedNoOverride)
     );
     let expected_offsets: Vec<[f32; 3]> = SIRITH_PLANAR_MIC_OFFSETS_M.to_vec();
     assert_eq!(route.layout.positions_m, expected_offsets);

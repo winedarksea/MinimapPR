@@ -78,25 +78,3 @@ fn rate_mismatched_channel_is_cleared_before_solve_and_render() {
     assert_eq!(windows[2], Vec::<f32>::new());
     assert_eq!(windows[0].len(), 4);
 }
-
-#[test]
-fn provenance_reports_the_snapshot_and_its_exclusions() {
-    let layout = two_node_layout(48_000);
-    let provenance = layout.solve_provenance(
-        SolveAttemptKind::EventTriggerAbsoluteRms,
-        &[0, 1],
-        1_500_000_000,
-        0.064,
-    );
-    assert_eq!(provenance.layout_revision, 3);
-    assert_eq!(provenance.reporting_node_id, "planar-a");
-    assert_eq!(provenance.sensors.len(), 3);
-    assert_eq!(provenance.active_sensor_indices, [0, 1]);
-    assert_eq!(provenance.excluded_sensors.len(), 1);
-    assert_eq!(
-        provenance.excluded_sensors[0].reason,
-        SolveExclusionReason::SampleRateMismatch
-    );
-    assert_eq!(provenance.window_center_time_ns, 1_500_000_000);
-    assert_eq!(provenance.solve_sample_rate_hz, RATE_HZ);
-}

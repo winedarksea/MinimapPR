@@ -1,54 +1,6 @@
-//! Automatic-GPS site frame (until the R2 geometry push) plus the sound-speed
-//! and buffer-timeline helpers ingest uses.
+//! Sound-speed and buffer-timeline helpers ingest uses.
 
 use super::*;
-
-/// R2 seam: the frame automatic-GPS sensor positions are expressed in until
-/// the geometry push lands. Mirrors the pinned `SiteGeometryState` surface
-/// (`coordinate_frame`, `geometry_push_revision`, origin adoption on the
-/// first trusted fix) so the integration can swap the type wholesale.
-#[derive(Default)]
-pub(super) struct AutomaticSiteFrame {
-    origin: Option<ReportedGpsPosition>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct ReportedGpsPosition {
-    pub(super) lat_deg: f64,
-    pub(super) lon_deg: f64,
-    pub(super) alt_m: f64,
-}
-
-impl AutomaticSiteFrame {
-    pub(super) fn coordinate_frame(
-        &self,
-    ) -> minimappr_core::localization_sensor_entry::SolveCoordinateFrame {
-        minimappr_core::localization_sensor_entry::SolveCoordinateFrame {
-            frame_id: None,
-            kind:
-                minimappr_core::localization_sensor_entry::CoordinateFrameKind::SidecarAutomaticEnu,
-            origin: self.origin.map(|origin| {
-                minimappr_core::localization_sensor_entry::GeodeticOrigin {
-                    lat: origin.lat_deg,
-                    lon: origin.lon_deg,
-                    alt_m: origin.alt_m,
-                }
-            }),
-            // The legacy spherical projection is not a contract projection.
-            projection: None,
-        }
-    }
-
-    pub(super) fn geometry_push_revision(&self) -> Option<u64> {
-        None
-    }
-
-    /// Node origin in the automatic frame; the first fix seen becomes the origin.
-    pub(super) fn local_position_m(&mut self, fix: ReportedGpsPosition) -> [f64; 3] {
-        let origin = *self.origin.get_or_insert(fix);
-        gps_position_to_local_m(fix, origin)
-    }
-}
 
 pub(super) fn resolve_effective_sound_speed_mps(
     config: &DspWorkerConfig,
@@ -125,37 +77,4 @@ pub(super) fn resolve_buffer_end_time_ns(
                 .and_then(|buffer| buffer.time_for_sample_index(sample_index))
         })
         .unwrap_or(fallback_end_time_ns)
-}
-
-pub(super) fn reported_gps_position(node: &serde_json::Value) -> Option<ReportedGpsPosition> {
-    let position = node.get("position_geo")?;
-    let lat_deg = position.get("lat")?.as_f64()?;
-    let lon_deg = position.get("lon")?.as_f64()?;
-    let alt_m = position
-        .get("alt_m")
-        .and_then(serde_json::Value::as_f64)
-        .unwrap_or(0.0);
-    if !lat_deg.is_finite()
-        || !lon_deg.is_finite()
-        || !alt_m.is_finite()
-        || !(-90.0..=90.0).contains(&lat_deg)
-        || !(-180.0..=180.0).contains(&lon_deg)
-    {
-        return None;
-    }
-    Some(ReportedGpsPosition {
-        lat_deg,
-        lon_deg,
-        alt_m,
-    })
-}
-
-fn gps_position_to_local_m(position: ReportedGpsPosition, origin: ReportedGpsPosition) -> [f64; 3] {
-    let radians_per_degree = std::f64::consts::PI / 180.0;
-    let east_m = (position.lon_deg - origin.lon_deg)
-        * radians_per_degree
-        * EARTH_RADIUS_M
-        * origin.lat_deg.to_radians().cos();
-    let north_m = (position.lat_deg - origin.lat_deg) * radians_per_degree * EARTH_RADIUS_M;
-    [east_m, north_m, position.alt_m - origin.alt_m]
 }

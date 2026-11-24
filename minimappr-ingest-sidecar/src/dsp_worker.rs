@@ -34,7 +34,6 @@ const MIN_BIRDNET_CLASSIFICATION_WINDOW_SECONDS: f64 = 15.0;
 const DEFAULT_BIRDNET_CLASSIFICATION_WINDOW_SECONDS: f64 = 30.0;
 const DEFAULT_CLASSIFIER_RENDER_OVERLAP_SECONDS: f64 = 2.0;
 const AUTOMATIC_GPS_CLUSTER_ID: &str = "auto-gps";
-const EARTH_RADIUS_M: f64 = 6_371_000.0;
 /// SRP-PHAT needs at least this many channels in the localization buffer.
 pub(crate) const MIN_SRP_CHANNEL_COUNT: usize = 4;
 const NANOSECONDS_PER_MILLISECOND_F64: f64 = 1_000_000.0;
@@ -45,6 +44,8 @@ pub(crate) use minimappr_core::sirith_array_geometry::SIRITH_MIC_POSITIONS_M;
 
 #[path = "dsp_array_geometry.rs"]
 mod dsp_array_geometry;
+#[path = "dsp_automatic_cluster_placement.rs"]
+mod dsp_automatic_cluster_placement;
 #[path = "dsp_buffer_channel_reconcile.rs"]
 mod dsp_buffer_channel_reconcile;
 #[path = "dsp_buffer_sensor_set.rs"]
@@ -55,6 +56,8 @@ mod dsp_cluster_sensor_registry;
 mod dsp_compute_payload;
 #[path = "dsp_coverage_integration.rs"]
 mod dsp_coverage_integration;
+#[path = "dsp_covered_event_solve.rs"]
+mod dsp_covered_event_solve;
 #[path = "dsp_dispatch_gates.rs"]
 mod dsp_dispatch_gates;
 #[path = "dsp_manifest_buffering.rs"]
@@ -75,10 +78,12 @@ mod dsp_window_geometry;
 mod explicit_cluster_sensor_list;
 
 use self::dsp_array_geometry::*;
+pub(crate) use self::dsp_automatic_cluster_placement::*;
 pub(crate) use self::dsp_buffer_channel_reconcile::*;
 pub(crate) use self::dsp_buffer_sensor_set::*;
 pub(crate) use self::dsp_cluster_sensor_registry::*;
 pub(crate) use self::dsp_compute_payload::*;
+use self::dsp_covered_event_solve::*;
 use self::dsp_manifest_buffering::*;
 pub(crate) use self::dsp_manifest_publish::*;
 pub(crate) use self::dsp_node_array_geometry_gate::*;
@@ -172,6 +177,8 @@ pub struct DspWorker {
     /// Localizations held until every streaming cluster member covers the
     /// window (coverage race fix). At most one pending per buffer key.
     deferred_localizations: DeferredLocalizationScheduler,
+    /// Latest event-triggered solve per buffer, which a covering render repeats.
+    recent_event_trigger_solves: RecentEventTriggerSolves,
 }
 
 impl DspWorker {
@@ -222,6 +229,7 @@ impl DspWorker {
             dsp_event_publisher: None,
             diagnostics: None,
             deferred_localizations,
+            recent_event_trigger_solves: RecentEventTriggerSolves::default(),
         }
     }
 
@@ -410,14 +418,14 @@ impl DspWorker {
             let ingested_payload = self.ingest_one(manifest, pending_backlog_depth).await;
             // A newer candidate can supersede (and so release) a parked one.
             let ready_payloads = self.take_ready_deferred_localizations(false).await;
-            for payload in ingested_payload.into_iter().chain(ready_payloads) {
-                self.note_stage_attempts(&payload).await;
+            for mut payload in ingested_payload.into_iter().chain(ready_payloads) {
+                self.prepare_dispatch(&mut payload).await;
                 dispatch(payload);
             }
         }
         // Batch boundary (also the idle poll tick): decide parked windows.
-        for payload in self.take_ready_deferred_localizations(true).await {
-            self.note_stage_attempts(&payload).await;
+        for mut payload in self.take_ready_deferred_localizations(true).await {
+            self.prepare_dispatch(&mut payload).await;
             dispatch(payload);
         }
     }
@@ -513,6 +521,7 @@ impl DspWorker {
             self.buffer_channel_sensor_ids.remove(key);
             self.sensor_registry.forget_buffer(key);
             self.deferred_localizations.forget(key);
+            self.recent_event_trigger_solves.forget(key);
             self.last_classifier_render_ns_by_stream.remove(key);
             self.last_localization_ns_by_stream.remove(key);
             self.last_trigger_ns_by_stream.remove(key);
@@ -542,6 +551,15 @@ impl DspWorker {
     async fn note_window_underrun_drop(&self) {
         let mut st = self.state.write().await;
         st.total_window_underrun_drops = st.total_window_underrun_drops.saturating_add(1);
+    }
+
+    /// Last step before a payload leaves for compute, in dispatch order: a
+    /// covering render takes over the event solve, then attempts are counted.
+    async fn prepare_dispatch(&mut self, payload: &mut ComputePayload) {
+        let buffers = self.buffers.get(&payload.stream_key).map(Vec::as_slice);
+        self.recent_event_trigger_solves
+            .remember_or_attach(payload, buffers);
+        self.note_stage_attempts(payload).await;
     }
 
     async fn note_stage_attempts(&self, payload: &ComputePayload) {
@@ -588,6 +606,10 @@ mod dsp_worker_solve_manifest_inspection;
 #[cfg(test)]
 #[path = "dsp_worker_mixed_cluster_solve_tests.rs"]
 mod dsp_worker_mixed_cluster_solve_tests;
+
+#[cfg(test)]
+#[path = "dsp_worker_covered_render_solve_tests.rs"]
+mod dsp_worker_covered_render_solve_tests;
 
 #[cfg(test)]
 #[path = "dsp_worker_sample_rate_guard_tests.rs"]

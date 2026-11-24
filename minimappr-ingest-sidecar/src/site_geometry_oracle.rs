@@ -148,8 +148,16 @@ fn run_resolve_placements_case(case: ResolvePlacementsCase) -> OracleResult<Valu
                 NodePlacementResolution::Placed {
                     position_m,
                     position_source,
+                    body_to_world_quaternion_wxyz,
                     ..
-                } => json!({"position_m": position_m, "position_source": position_source}),
+                } => {
+                    let mut placed =
+                        json!({"position_m": position_m, "position_source": position_source});
+                    if let Some(quaternion) = body_to_world_quaternion_wxyz {
+                        placed["body_to_world_quaternion_wxyz"] = json!(quaternion);
+                    }
+                    placed
+                }
                 NodePlacementResolution::Untrusted { reason } => {
                     json!({"untrusted_reason": reason})
                 }

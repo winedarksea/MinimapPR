@@ -30,6 +30,7 @@ from tests.rust_sidecar_e2e_helpers import (
     POLL_INTERVAL_SECONDS,
     configure_full_app_with_rust_sidecar,
     fake_sidecar_classifier_command_json,
+    http_json,
     pick_free_tcp_port,
     post_binary_ingest,
     replay_dsp_event_manifests,
@@ -83,6 +84,9 @@ DETECTION_WAIT_SECONDS = 15.0
 # After the first detection, later renders/merges still have time to land.
 DETECTION_SETTLE_SECONDS = 3.0
 DETECTIONS_QUERY_LIMIT = 50
+# The orientation override reaches the sidecar on the geometry publisher's own
+# task; streaming starts only once the sidecar has applied it.
+GEOMETRY_PUSH_WAIT_SECONDS = 10.0
 
 APP_ENVIRONMENT = {
     "MINIMAPPR_SITE_ORIGIN_SOURCE": "manual",
@@ -197,6 +201,19 @@ def _register_planar_node_orientation(client: TestClient, scene: AcousticScene) 
     assert patch.status_code == 200, patch.text
 
 
+def _wait_for_sidecar_orientation_placement(sidecar_port: int) -> None:
+    """The operator configures the node before it streams: wait until the
+    sidecar has applied a push carrying the planar node's placement."""
+    deadline = time.monotonic() + GEOMETRY_PUSH_WAIT_SECONDS
+    applied: dict | list = {}
+    while time.monotonic() < deadline:
+        applied = http_json(sidecar_port, "/api/v1/dsp/geometry")
+        if isinstance(applied, dict) and int(applied.get("node_placement_count") or 0) >= 1:
+            return
+        time.sleep(POLL_INTERVAL_SECONDS)
+    raise AssertionError(f"sidecar never applied the planar orientation placement: {applied}")
+
+
 def _uploads_by_node(scene: AcousticScene, capture_start_packet_time_ns: int) -> dict[str, list[bytes]]:
     source = band_limited_noise_burst(
         sample_rate_hz=SAMPLE_RATE_HZ,
@@ -283,6 +300,7 @@ def run_scene_through_full_app(
     )
     with TestClient(app) as client:
         _register_planar_node_orientation(client, scene)
+        _wait_for_sidecar_orientation_placement(sidecar_port)
         result.first_upload_receipt_time_ns = time.time_ns()
         capture_start_packet_time_ns = result.first_upload_receipt_time_ns - PACKET_TIME_BEHIND_RECEIPT_NS
         result.emission_packet_time_ns = capture_start_packet_time_ns + int(round(PRE_ROLL_SECONDS * 1e9))

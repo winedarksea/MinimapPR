@@ -11,6 +11,7 @@ from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest, l
 from minimappr.api.rust_localization_solve_contract import (
     CoordinateFrameKind,
     CoordinateProjection,
+    NodeLocalRoutingReason,
     NodeTimeQuality,
     SensorPositionSource,
     SolveAttemptKind,
@@ -39,6 +40,7 @@ def test_contract_doc_example_parses_field_for_field() -> None:
     assert provenance.buffer_scope is SolveBufferScope.AUTOMATIC_SITE_CLUSTER
     assert provenance.cluster_id == "auto-gps"
     assert provenance.reporting_node_id == "planar-a"
+    assert provenance.node_local_routing_reason is None
     frame = provenance.coordinate_frame
     assert frame.frame_id == "site-7"
     assert frame.kind is CoordinateFrameKind.SITE_ENU
@@ -73,6 +75,13 @@ def test_contract_doc_example_parses_field_for_field() -> None:
     assert provenance.window_center_time_ns == 1764000000016000000
     assert provenance.window_seconds == 0.032
     assert provenance.solve_sample_rate_hz == 16000
+
+
+def test_node_local_routing_reason_parses() -> None:
+    payload = contract_doc_example_solve_provenance()
+    payload["node_local_routing_reason"] = "node_position_untrusted_no_override"
+    provenance = parse_solve_provenance(payload)
+    assert provenance.node_local_routing_reason is NodeLocalRoutingReason.NODE_POSITION_UNTRUSTED_NO_OVERRIDE
 
 
 def test_pair_tdoas_parse_with_and_without_contract_additions() -> None:
@@ -134,6 +143,8 @@ def _break(mutator):
         _break(lambda p: p["excluded_pairs"][0].update(reason="weak_clock")),
         _break(lambda p: p.update(window_center_time_ns=1.5e18)),
         _break(lambda p: p.update(layout_revision=True)),
+        _break(lambda p: p.pop("node_local_routing_reason")),
+        _break(lambda p: p.update(node_local_routing_reason="node_position_untrusted")),
     ],
 )
 def test_contract_violations_raise(broken_provenance) -> None:

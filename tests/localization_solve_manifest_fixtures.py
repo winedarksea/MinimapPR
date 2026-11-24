@@ -1,8 +1,7 @@
 """Manifest fragments built per ``docs/localization_solve_contract.md``.
 
-The sidecar does not emit ``solve_provenance`` yet (milestone 1 / R6), so the
-Python side is built and tested against payloads constructed from the contract
-doc. ``contract_doc_example_solve_provenance`` is the doc's section-9 example
+Python-side tests build payloads from the contract doc rather than a running
+sidecar. ``contract_doc_example_solve_provenance`` is the doc's section-9 example
 verbatim; ``mixed_cluster_solve_localization_payload`` builds a planar + point
 cluster solve in either node arrival order.
 """
@@ -23,6 +22,7 @@ CONTRACT_DOC_EXAMPLE_SOLVE_PROVENANCE: dict[str, Any] = {
     "buffer_scope": "automatic_site_cluster",
     "cluster_id": "auto-gps",
     "reporting_node_id": "planar-a",
+    "node_local_routing_reason": None,
     "coordinate_frame": {
         "frame_id": "site-7",
         "kind": "site_enu",
@@ -155,6 +155,7 @@ def mixed_cluster_solve_localization_payload(
         "buffer_scope": "automatic_site_cluster",
         "cluster_id": MIXED_CLUSTER_ID,
         "reporting_node_id": reporting_node_id,
+        "node_local_routing_reason": None,
         "coordinate_frame": {
             "frame_id": frame_id,
             "kind": frame_kind,

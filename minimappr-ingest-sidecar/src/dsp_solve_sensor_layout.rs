@@ -7,45 +7,14 @@
 
 use std::collections::BTreeMap;
 
-use super::*;
 use crate::srp_phat::HalfSpace;
+pub(crate) use minimappr_core::localization_sensor_entry::NodeLocalRoutingReason;
 use minimappr_core::localization_sensor_entry::{
-    ExcludedSensor, SolveBufferScope, SolveCoordinateFrame, SolveExclusionReason, SolveProvenance,
-    SolveSensorEntry, SOLVE_PROVENANCE_SCHEMA_VERSION,
+    ExcludedSensor, SolveBufferScope, SolveCoordinateFrame, SolveExclusionReason, SolveSensorEntry,
 };
 
 /// Sensor ids are `<node_id>:ch<channel_index>` on both sides of the wire.
 const SENSOR_ID_CHANNEL_SEPARATOR: &str = ":ch";
-
-/// Why a node solves alone instead of joining a cluster buffer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum NodeLocalRoutingReason {
-    /// 2-3 channels without offsets, so no world placement is possible.
-    NodeArrayGeometryUnusable,
-    /// No trusted world position for the node (no GPS fix, no placement).
-    NodePositionUntrusted,
-    /// The manifest carries only half of the explicit cluster fields.
-    ExplicitClusterIncomplete,
-    /// Fewer declared sensors than an SRP solve needs.
-    ExplicitClusterBelowMinimumSensors,
-    /// Some of the node's channels are not in the declared sensor list.
-    NodeChannelsMissingFromExplicitCluster,
-}
-
-impl NodeLocalRoutingReason {
-    #[cfg_attr(not(test), expect(dead_code, reason = "published by milestone 1 (R6)"))]
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::NodeArrayGeometryUnusable => "node_array_geometry_unusable",
-            Self::NodePositionUntrusted => "node_position_untrusted",
-            Self::ExplicitClusterIncomplete => "explicit_cluster_incomplete",
-            Self::ExplicitClusterBelowMinimumSensors => "explicit_cluster_below_minimum_sensors",
-            Self::NodeChannelsMissingFromExplicitCluster => {
-                "node_channels_missing_from_explicit_cluster"
-            }
-        }
-    }
-}
 
 #[derive(Clone, Debug)]
 pub(crate) struct SolveSensorLayout {
@@ -58,7 +27,6 @@ pub(crate) struct SolveSensorLayout {
     pub(crate) buffer_scope: SolveBufferScope,
     pub(crate) cluster_id: Option<String>,
     pub(crate) reporting_node_id: String,
-    #[cfg_attr(not(test), expect(dead_code, reason = "published by milestone 1 (R6)"))]
     pub(crate) node_local_routing_reason: Option<NodeLocalRoutingReason>,
     /// Sensors in the buffer that this solve must not use, sorted by index.
     pub(crate) excluded_sensors: Vec<ExcludedSensor>,
@@ -161,37 +129,6 @@ impl SolveSensorLayout {
             .zip(&self.positions_m)
             .map(|(sensor, position)| (sensor.sensor_id.clone(), *position))
             .collect()
-    }
-
-    /// Minimal `localization.solve_provenance` for this layout. R6 owns the
-    /// full emitter (pair exclusions, node timing); this fills the geometry
-    /// half so a cross-node solve can be read by sensor id today.
-    pub(crate) fn solve_provenance(
-        &self,
-        attempt_kind: SolveAttemptKind,
-        active_sensor_indices: &[usize],
-        window_center_time_ns: i128,
-        window_seconds: f64,
-    ) -> SolveProvenance {
-        SolveProvenance {
-            schema_version: SOLVE_PROVENANCE_SCHEMA_VERSION,
-            solve_id: uuid::Uuid::new_v4().to_string(),
-            attempt_kind,
-            buffer_scope: self.buffer_scope,
-            cluster_id: self.cluster_id.clone(),
-            reporting_node_id: self.reporting_node_id.clone(),
-            coordinate_frame: self.coordinate_frame.clone(),
-            layout_revision: self.layout_revision,
-            geometry_push_revision: self.geometry_push_revision,
-            sensors: self.sensors.clone(),
-            active_sensor_indices: active_sensor_indices.to_vec(),
-            excluded_sensors: self.excluded_sensors.clone(),
-            excluded_pairs: Vec::new(),
-            node_timing: Vec::new(),
-            window_center_time_ns: i64::try_from(window_center_time_ns).unwrap_or(i64::MAX),
-            window_seconds,
-            solve_sample_rate_hz: self.solve_sample_rate_hz,
-        }
     }
 }
 

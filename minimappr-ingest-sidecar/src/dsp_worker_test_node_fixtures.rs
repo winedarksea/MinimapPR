@@ -13,6 +13,7 @@ use minimappr_core::{
         CoordinateProjection, GeodeticOrigin, NodePlacement, NodePlacementSource, SiteGeometryPush,
     },
     sirith_array_geometry::SIRITH_PLANAR_MIC_OFFSETS_M,
+    site_frame_projection::local_enu_to_geodetic,
 };
 
 pub(super) const FIXTURE_SAMPLE_RATE_HZ: u32 = 16_000;
@@ -24,8 +25,6 @@ const FIXTURE_STREAM_START_NS: u64 = 1_000_000_000;
 const SOURCE_PRE_ROLL_SAMPLES: usize = 16_000;
 const SOURCE_PEAK_AMPLITUDE: f32 = 0.3;
 const SOURCE_NOISE_SEED: u32 = 0x5eed_1234;
-/// Mean Earth radius of the sidecar's legacy automatic-GPS projection.
-const LEGACY_AUTOMATIC_GPS_EARTH_RADIUS_M: f64 = 6_371_000.0;
 pub(super) const FIXTURE_SITE_ORIGIN: GeodeticOrigin = GeodeticOrigin {
     lat: 45.0,
     lon: -93.0,
@@ -123,18 +122,14 @@ impl FixtureNode {
             .collect()
     }
 
-    /// GPS fix that the sidecar's automatic projection maps back onto
-    /// `site_position_m` relative to `FIXTURE_SITE_ORIGIN`.
+    /// GPS fix that projects back onto `site_position_m` about
+    /// `FIXTURE_SITE_ORIGIN` with Python's default (flat) projection.
     pub(super) fn reported_gps(&self) -> GeodeticOrigin {
-        let origin = FIXTURE_SITE_ORIGIN;
-        let [east_m, north_m, up_m] = self.site_position_m;
-        GeodeticOrigin {
-            lat: origin.lat + (north_m / LEGACY_AUTOMATIC_GPS_EARTH_RADIUS_M).to_degrees(),
-            lon: origin.lon
-                + (east_m / (LEGACY_AUTOMATIC_GPS_EARTH_RADIUS_M * origin.lat.to_radians().cos()))
-                    .to_degrees(),
-            alt_m: origin.alt_m + up_m,
-        }
+        local_enu_to_geodetic(
+            &FIXTURE_SITE_ORIGIN,
+            CoordinateProjection::FlatWgs84Series,
+            self.site_position_m,
+        )
     }
 
     /// `node_context.node` as the ingest backend embeds it: body offsets,
@@ -156,8 +151,8 @@ impl FixtureNode {
 
     pub(super) fn operator_placement(&self, position_std_m: f64) -> NodePlacement {
         NodePlacement {
-            position_m: self.site_position_m,
-            position_std_m,
+            position_m: Some(self.site_position_m),
+            position_std_m: Some(position_std_m),
             placement_source: NodePlacementSource::OperatorOverride,
             body_to_world_quaternion_wxyz: Some(self.body_to_world_quaternion_wxyz()),
         }

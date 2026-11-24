@@ -2111,7 +2111,20 @@ fn merge_pending_manifests_prioritizes_fresh_disk_when_channel_is_busy() {
 
     assert_eq!(merged.len(), 4);
     assert!(merged_ids.contains(&"disk-fresh"));
-    assert_eq!(merged[0].manifest_id, "disk-fresh");
+    assert!(
+        !merged_ids.contains(&"channel-old-1"),
+        "the oldest manifest waits"
+    );
+    assert_eq!(
+        merged_ids,
+        [
+            "channel-old-2",
+            "channel-old-3",
+            "channel-old-4",
+            "disk-fresh"
+        ],
+        "the selection is processed in arrival order"
+    );
 }
 
 #[test]

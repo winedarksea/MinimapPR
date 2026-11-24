@@ -200,16 +200,33 @@ impl SiteGeometryState {
         node_id: &str,
         reported_fix: Option<&ReportedNodeFix>,
     ) -> NodePlacementResolution {
+        let mut pushed_orientation_only = None;
         if let SiteGeometryFrame::Pushed { push, .. } = &self.frame {
             if let Some(placement) = push.node_placements.get(node_id) {
-                return NodePlacementResolution::Placed {
-                    position_m: placement.position_m,
-                    position_std_m: Some(placement.position_std_m),
-                    position_source: placement.placement_source.sensor_position_source(),
-                    body_to_world_quaternion_wxyz: placement.body_to_world_quaternion_wxyz,
-                };
+                match placement.position_m {
+                    Some(position_m) => {
+                        return NodePlacementResolution::Placed {
+                            position_m,
+                            position_std_m: placement.position_std_m,
+                            position_source: placement.placement_source.sensor_position_source(),
+                            body_to_world_quaternion_wxyz: placement.body_to_world_quaternion_wxyz,
+                        };
+                    }
+                    // Orientation-only placement: the position falls through to GPS.
+                    None => pushed_orientation_only = placement.body_to_world_quaternion_wxyz,
+                }
             }
         }
+        self.resolve_reported_fix(reported_fix, pushed_orientation_only)
+    }
+
+    /// Raw GPS projected into the frame in effect. `pushed_orientation` (an
+    /// orientation-only placement) wins over the node's reported orientation.
+    fn resolve_reported_fix(
+        &mut self,
+        reported_fix: Option<&ReportedNodeFix>,
+        pushed_orientation: Option<[f64; 4]>,
+    ) -> NodePlacementResolution {
         // Two nodes at one built-in point cannot form a baseline, so a node
         // without a trusted fix stays node-local until Python places it.
         let Some(fix) = reported_fix.filter(|fix| is_trusted_gps_fix(fix)) else {
@@ -237,7 +254,8 @@ impl SiteGeometryState {
             position_m: projector.geodetic_to_local_enu_m(fix.lat_deg, fix.lon_deg, fix.alt_m),
             position_std_m: fix.reported_accuracy_m,
             position_source: SensorPositionSource::ReportedGps,
-            body_to_world_quaternion_wxyz: fix.reported_body_to_world_quaternion_wxyz,
+            body_to_world_quaternion_wxyz: pushed_orientation
+                .or(fix.reported_body_to_world_quaternion_wxyz),
         }
     }
 }
@@ -277,17 +295,31 @@ pub fn validate_site_geometry_push(push: &SiteGeometryPush) -> Result<(), SiteGe
         if node_id.trim().is_empty() {
             return Err(invalid("node_id must not be empty".to_string()));
         }
-        if !placement.position_m.iter().all(|axis| axis.is_finite()) {
-            return Err(invalid(format!(
-                "position_m must be finite (got {:?})",
-                placement.position_m
-            )));
+        match placement.position_m {
+            Some(position_m) if !position_m.iter().all(|axis| axis.is_finite()) => {
+                return Err(invalid(format!(
+                    "position_m must be finite (got {position_m:?})"
+                )));
+            }
+            None if placement.position_std_m.is_some() => {
+                return Err(invalid(
+                    "position_std_m without position_m has nothing to describe".to_string(),
+                ));
+            }
+            None if placement.body_to_world_quaternion_wxyz.is_none() => {
+                return Err(invalid(
+                    "a placement needs position_m, body_to_world_quaternion_wxyz or both"
+                        .to_string(),
+                ));
+            }
+            _ => {}
         }
-        if !placement.position_std_m.is_finite() || placement.position_std_m < 0.0 {
-            return Err(invalid(format!(
-                "position_std_m must be finite and >= 0 (got {})",
-                placement.position_std_m
-            )));
+        if let Some(position_std_m) = placement.position_std_m {
+            if !position_std_m.is_finite() || position_std_m < 0.0 {
+                return Err(invalid(format!(
+                    "position_std_m must be finite and >= 0 (got {position_std_m})"
+                )));
+            }
         }
         if let Some(quaternion) = placement.body_to_world_quaternion_wxyz {
             let norm = quaternion.iter().map(|c| c * c).sum::<f64>().sqrt();
@@ -305,10 +337,6 @@ pub fn validate_site_geometry_push(push: &SiteGeometryPush) -> Result<(), SiteGe
 /// `metadata.gps.position_source`, `orientation`). `None` without a usable
 /// `position_geo`. A missing `position_source` counts as GPS: legacy payloads
 /// omit it and the sidecar has always solved them on their GPS.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "called by R1's sensor-registry adapter")
-)]
 pub fn reported_node_fix_from_node_context(node: &serde_json::Value) -> Option<ReportedNodeFix> {
     let position = node.get("position_geo")?;
     let lat_deg = position.get("lat")?.as_f64()?;
