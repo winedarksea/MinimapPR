@@ -257,6 +257,7 @@ def build_pipeline_graph(
             # --- end Field Mode W3-attribution ---
             if omni_min_rms is not None:
                 gate_params.append(_param("Omni min RMS", float(omni_min_rms)))
+            gate_params.extend(_settings_params(settings, _LOCALIZATION_OVERHAUL_GATE_PARAM_SPECS))
             add_node(
                 id=gate_id,
                 stage=PipelineStageKind.GATE,
@@ -398,6 +399,7 @@ def build_pipeline_graph(
                 "localization_coverage_total_cap_seconds",
                 suffix=" s",
             ),
+            *_settings_params(settings, _LOCALIZATION_OVERHAUL_SOLVE_PARAM_SPECS),
         ],
         status=_solve_status(metrics, fusion_available),
         link="/settings/config#localization",
@@ -565,6 +567,7 @@ def build_pipeline_graph(
             ),
             *_field_mode_tracker_params(tc, settings),
             *_field_mode_entity_params(settings),  # Field Mode W3-entity
+            *_settings_params(settings, _LOCALIZATION_OVERHAUL_TRACKING_PARAM_SPECS),
         ],
         status=_track_status(metrics, fusion_available),
         link="/settings/config#tracking",
@@ -665,6 +668,46 @@ def build_pipeline_graph(
         nodes=graph_nodes,
         edges=graph_edges,
     )
+
+
+# --- localization overhaul --- (label, settings key, display suffix)
+_LOCALIZATION_OVERHAUL_GATE_PARAM_SPECS: tuple[tuple[str, str, str], ...] = (
+    ("Sidecar relative trigger", "localization_trigger_noise_floor_relative_enabled", ""),
+    ("Sidecar trigger over floor", "localization_trigger_noise_floor_relative_db", " dB"),
+)
+_LOCALIZATION_OVERHAUL_SOLVE_PARAM_SPECS: tuple[tuple[str, str, str], ...] = (
+    ("Max solve sensors", "localization_max_solve_sensors", ""),
+    ("Min pair baseline", "localization_min_pair_baseline_m", " m"),
+    ("Solver floor over noise", "localization_solver_floor_relative_db", " dB"),
+    ("Max timeline residual", "localization_cross_node_max_timeline_residual_seconds", " s"),
+    ("Clock class uncertainty", "localization_clock_class_uncertainty_seconds", ""),
+    ("Unknown clock uncertainty", "localization_clock_unknown_uncertainty_seconds", " s"),
+    ("Timestamp step threshold", "localization_timestamp_step_threshold_seconds", " s"),
+    ("Step recovery holdoff", "localization_timestamp_step_recovery_holdoff_seconds", " s"),
+    ("Sensor registry stale", "localization_sensor_registry_stale_seconds", " s"),
+    ("Geometry push move threshold", "sidecar_geometry_push_estimate_move_threshold_m", " m"),
+    ("Geometry reconcile interval", "sidecar_geometry_reconcile_interval_seconds", " s"),
+    ("Duplicate merge max separation", "localized_handoff_duplicate_merge_max_separation_m", " m"),
+)
+_LOCALIZATION_OVERHAUL_TRACKING_PARAM_SPECS: tuple[tuple[str, str, str], ...] = (
+    ("Tracking mode by category", "tracking_mode_by_category", ""),
+    ("Observation queue max", "position_observation_queue_max_items", ""),
+    ("Unclassified track policy", "position_observation_unclassified_track_policy", ""),
+)
+_LOCALIZATION_OVERHAUL_CLASSIFICATION_PARAM_SPECS: tuple[tuple[str, str, str], ...] = (
+    ("Point-network clip", "point_network_clip_classification_enabled", ""),
+)
+
+
+def _settings_params(settings, specs: tuple[tuple[str, str, str], ...]) -> list[PipelineParam]:
+    params: list[PipelineParam] = []
+    for label, setting_key, suffix in specs:
+        value = getattr(settings, setting_key)
+        if isinstance(value, dict):
+            value = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        params.append(_param(label, value, setting_key, suffix=suffix))
+    return params
+# --- end localization overhaul ---
 
 
 # --- Field Mode W2-tracker ---
@@ -1033,6 +1076,7 @@ def _add_classifiers(*, routing, settings, gate_ids, beam_id, add_node, add_edge
         enabled=priority_enabled,
         params=[
             _param("Ordering", priority_enabled, "classification_priority_enabled"),
+            *_settings_params(settings, _LOCALIZATION_OVERHAUL_CLASSIFICATION_PARAM_SPECS),
             _param(
                 "Track radius",
                 float(settings.classification_priority_track_radius_m),

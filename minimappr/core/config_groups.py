@@ -53,6 +53,9 @@ CONFIG_STAGE_GROUPS: tuple[tuple[str, str, PipelineStageKind | None, tuple[str, 
             "omni_scan_interval_seconds",
             "omni_scan_window_seconds",
             "omni_scan_min_rms",
+            # --- localization overhaul --- Rust sidecar trigger
+            "localization_trigger_noise_floor_relative_enabled",
+            "localization_trigger_noise_floor_relative_db",
         ),
     ),
     (
@@ -173,6 +176,18 @@ CONFIG_STAGE_GROUPS: tuple[tuple[str, str, PipelineStageKind | None, tuple[str, 
             "onset_window_label_reconciliation_enabled",
             "onset_window_label_reconciliation_timeout_seconds",
             # --- end Field Mode W3-attribution ---
+            # --- localization overhaul --- solve geometry, pair admission, clock evidence
+            "localization_max_solve_sensors",
+            "localization_min_pair_baseline_m",
+            "localization_cross_node_max_timeline_residual_seconds",
+            "localization_clock_class_uncertainty_seconds",
+            "localization_clock_unknown_uncertainty_seconds",
+            "localization_timestamp_step_threshold_seconds",
+            "localization_timestamp_step_recovery_holdoff_seconds",
+            "localization_solver_floor_relative_db",
+            "localization_sensor_registry_stale_seconds",
+            "sidecar_geometry_push_estimate_move_threshold_m",
+            "sidecar_geometry_reconcile_interval_seconds",
         ),
     ),
     (
@@ -246,6 +261,7 @@ CONFIG_STAGE_GROUPS: tuple[tuple[str, str, PipelineStageKind | None, tuple[str, 
             "classification_priority_corroboration_weight",
             "detection_min_confidence",
             "taxonomy_config_path",
+            "point_network_clip_classification_enabled",  # localization overhaul
         ),
     ),
     (
@@ -322,6 +338,10 @@ CONFIG_STAGE_GROUPS: tuple[tuple[str, str, PipelineStageKind | None, tuple[str, 
             "birdnet_v3_label_migration_enabled",
             "birdnet_two_threshold_require_tracker_companions",
             # --- end Field Mode W3-birdnet-cutover ---
+            # --- localization overhaul --- one position observation per solve
+            "tracking_mode_by_category",
+            "position_observation_queue_max_items",
+            "position_observation_unclassified_track_policy",
         ),
     ),
     (
@@ -339,6 +359,7 @@ CONFIG_STAGE_GROUPS: tuple[tuple[str, str, PipelineStageKind | None, tuple[str, 
             "fusion_backpressure_drop_policy",
             "fusion_report_window_localized_emission_cap",
             "fusion_offline_replay_mode",
+            "localized_handoff_duplicate_merge_max_separation_m",  # localization overhaul
         ),
     ),
     # --- Field Mode W3-entity ---

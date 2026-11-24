@@ -53,6 +53,7 @@ from minimappr.classifiers.birdnet_threshold_set import birdnet_cutover_setting_
 from minimappr.classifiers.birdnet_v3_label_migration import birdnet_v3_rule_transform
 # --- end Field Mode W3-birdnet-cutover ---
 from minimappr.core.config_groups import group_flat_config
+from minimappr.core.localization_overhaul_config import localization_overhaul_flat_config_entries
 from minimappr.core.pipeline_graph import build_pipeline_graph
 from minimappr.config import (
     FusionConfig,
@@ -3314,6 +3315,7 @@ async def get_config(request: Request) -> dict:
         "fusion_report_window_localized_emission_cap": settings.fusion_report_window_localized_emission_cap,
         "fusion_drop_on_backpressure": settings.fusion_drop_on_backpressure,
         "fusion_offline_replay_mode": settings.fusion_offline_replay_mode,
+        **localization_overhaul_flat_config_entries(settings),
         "rules_config_path": str(settings.rules_config_path),
         "taxonomy_config_path": str(settings.taxonomy_config_path),
         "site_origin": {

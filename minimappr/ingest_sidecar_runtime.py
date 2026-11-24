@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import functools
 import json
 import os
@@ -19,7 +20,12 @@ import urllib.request
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from minimappr.config import IngestSidecarProcessConfig, IngestSidecarStartupConfig
+from minimappr.config import IngestSidecarProcessConfig, IngestSidecarStartupConfig, Settings
+from minimappr.core.localization_overhaul_config import (
+    RUST_FORWARDED_LOCALIZATION_SETTING_KEYS,
+    sidecar_environment_value,
+    sidecar_environment_variable_name,
+)
 
 
 class IngestSidecarRuntimeState:
@@ -142,6 +148,28 @@ def sidecar_coverage_wait_environment(settings) -> dict[str, str]:
     }
 
 
+def _settings_dataclass_default(setting_key: str) -> object:
+    settings_field = Settings.__dataclass_fields__[setting_key]
+    if settings_field.default_factory is not dataclasses.MISSING:
+        return settings_field.default_factory()
+    return settings_field.default
+
+
+def sidecar_localization_solve_environment(settings) -> dict[str, str]:
+    """Env handoff for the sidecar's solve geometry, clock and trigger knobs.
+
+    Partial settings objects (test doubles) fall back to the Settings dataclass
+    defaults so the sidecar never sees a value Python would not have used.
+    """
+    environment: dict[str, str] = {}
+    for setting_key in RUST_FORWARDED_LOCALIZATION_SETTING_KEYS:
+        value = getattr(settings, setting_key, None)
+        if value is None:
+            value = _settings_dataclass_default(setting_key)
+        environment[sidecar_environment_variable_name(setting_key)] = sidecar_environment_value(value)
+    return environment
+
+
 def _sidecar_classifier_command_json(
     settings,
     *,
@@ -218,6 +246,7 @@ def build_ingest_sidecar_environment(
         # every streaming member node covers the window, with the same
         # stall-budget / total-cap meaning as sensor_span_coverage_wait.py.
         **sidecar_coverage_wait_environment(settings),
+        **sidecar_localization_solve_environment(settings),
         # Fallbacks track the Settings defaults: a 50 Hz high-pass capped at the
         # array's spatial aliasing limit, not the retired 300-3500 Hz profile.
         "MINIMAPPR_LOCALIZATION_BAND_MIN_HZ": str(
