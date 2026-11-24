@@ -32,7 +32,21 @@
 #define LWIP_RAW                    1
 #define TCP_WND                     (8 * TCP_MSS)
 #define TCP_MSS                     1460
-#define TCP_SND_BUF                 (32 * TCP_MSS)
+// Send buffer bounds bytes in flight. The CYW43439 shares one packet pool
+// between TX and RX: with 32*MSS in flight it runs out and drops inbound ACKs
+// (wl counter rxnobuf), which collapses TCP to RTO-paced bursts (~2.5 Mbit/s
+// vs ~14 Mbit/s at 8*MSS; docs/pico2w_cyw43_capacity_results.md).
+#ifndef MMPR_NODECFG_TCP_SND_BUF_MSS
+#define MMPR_NODECFG_TCP_SND_BUF_MSS 8
+#endif
+#define TCP_SND_BUF                 (MMPR_NODECFG_TCP_SND_BUF_MSS * TCP_MSS)
+// lwIP's RTO floor is ~3 slow-timer ticks (2 * TCP_TMR_INTERVAL each), i.e.
+// 1.5 s at lwIP's 250 ms default even on a few-ms LAN RTT; 25 ms gives ~150 ms,
+// short enough for the publish queue to ride out a recovery.
+#ifndef MMPR_NODECFG_TCP_TMR_INTERVAL_MS
+#define MMPR_NODECFG_TCP_TMR_INTERVAL_MS 25
+#endif
+#define TCP_TMR_INTERVAL            MMPR_NODECFG_TCP_TMR_INTERVAL_MS
 #define TCP_SND_QUEUELEN            ((4 * (TCP_SND_BUF) + (TCP_MSS - 1)) / (TCP_MSS))
 #define LWIP_NETIF_STATUS_CALLBACK  1
 #define LWIP_NETIF_LINK_CALLBACK    1

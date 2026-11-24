@@ -227,16 +227,28 @@ constexpr size_t clampSize(size_t value, size_t lo, size_t hi) {
 
 // --- Intent knobs (primary tunables) ---
 static constexpr uint32_t kTargetRingMs = 200;             // capture-side DMA absorb window
-static constexpr uint32_t kTargetQueueMs = 300;            // publish-side jitter buffer
+#ifndef MMPR_NODECFG_TARGET_QUEUE_MS
+#define MMPR_NODECFG_TARGET_QUEUE_MS 1000
+#endif
+// Publish-side jitter buffer. It must outlast a TCP loss-recovery stall (RTO
+// floor ~3 * 2 * TCP_TMR_INTERVAL, doubled per lost retransmission) or the
+// queue overflows; capped by kAudioBufferRamCeiling and the 96-slot limit.
+static constexpr uint32_t kTargetQueueMs = MMPR_NODECFG_TARGET_QUEUE_MS;
 static constexpr size_t kTargetPublishBytes = 28u * 1024u; // amortize HTTP overhead per round-trip
 // Hard ceiling for ring + queue + active batch on the RP2350's 520 KiB SRAM.
 // Reduced when BLE is enabled: the CYW43439 is a shared Wi-Fi/BLE part and
-// enabling BLE pulls btstack + HCI buffers into RP2350 SRAM, so audio must leave
-// heapFreeBytes telemetry is not currently populated, so an over-commit surfaces
-// only as a bad_alloc -> watchdog reboot, not a graceful signal.
-static constexpr size_t kAudioBufferRamCeiling =
-    (MMPR_ENABLE_BLE_SCAN == 1 ? 240u : 300u) * 1024u;
-static constexpr uint32_t kAssumedFloorKbitPerSec = 1500;  // conservative CYW43 goodput, for timeout sizing
+// enabling BLE pulls btstack + HCI buffers into RP2350 SRAM. An over-commit
+// surfaces as bad_alloc -> watchdog reboot, so watch heap_free_bytes (now
+// populated on RP2350). Bench 2026-11-23: 173-253 KiB was still free at the old
+// 240 KiB ceiling; at 360 KiB 43-62 KiB stays free (TDM and synthetic, BLE on
+// or off -- BLE off did not free measurably more), so one ceiling serves both.
+#ifndef MMPR_NODECFG_AUDIO_BUFFER_RAM_CEILING_KB
+#define MMPR_NODECFG_AUDIO_BUFFER_RAM_CEILING_KB 360
+#endif
+static constexpr size_t kAudioBufferRamCeiling = MMPR_NODECFG_AUDIO_BUFFER_RAM_CEILING_KB * 1024u;
+// Measured sustained CYW43439 TCP goodput, BLE scan on, near AP, worst 60 s run
+// (docs/pico2w_cyw43_capacity_results.md, Stage 1). Was an unmeasured 1500.
+static constexpr uint32_t kAssumedFloorKbitPerSec = 9000;
 
 // --- Raw data-rate inputs (both TDM and I2S-mono capture at this rate/frame) ---
 static constexpr uint32_t kDerivSampleRateHz = MMPR_NODECFG_AUDIO_SAMPLE_RATE_HZ;
@@ -247,8 +259,12 @@ static constexpr uint32_t kDerivChannels =
 
 static constexpr size_t kDerivPacketSlotBytes =
     static_cast<size_t>(kDerivFrameSamples) * kDerivChannels * sizeof(int16_t);
-static constexpr size_t kDerivRingFrameBytes =
-    static_cast<size_t>(kDerivFrameSamples) * kDerivChannels * sizeof(uint32_t);
+// Synthetic audio has no DMA ring (SyntheticAudioSource generates on demand and
+// the TDM/I2S sources are never begun), so it reserves no ring RAM; that is
+// what lets 5-8 synthetic channels fit the budget.
+static constexpr size_t kDerivRingFrameBytes = kUseSyntheticAudio
+    ? 0u
+    : static_cast<size_t>(kDerivFrameSamples) * kDerivChannels * sizeof(uint32_t);
 
 // Ring frames: capture-side absorb window, clamped to the PIO ring limit [8, 32].
 static constexpr uint32_t kAudioRingFramesAuto = detail::clampU32(
@@ -269,7 +285,14 @@ static constexpr uint32_t kAudioQueueSlotsWant = detail::clampU32(
     8u, 96u);
 static constexpr size_t kDerivRingBytes =
     static_cast<size_t>(kAudioRingFramesAuto) * kDerivRingFrameBytes;
-static constexpr size_t kDerivActiveBatchBytes = kPublishBatchFramesAuto * kDerivPacketSlotBytes;
+// Budget the batch size that will actually be used, so a -D batch override
+// shrinks the queue instead of tripping the RAM static_assert below.
+#ifdef MMPR_NODECFG_PUBLISH_BATCH_FRAMES
+static constexpr size_t kDerivBatchFrames = MMPR_NODECFG_PUBLISH_BATCH_FRAMES;
+#else
+static constexpr size_t kDerivBatchFrames = kPublishBatchFramesAuto;
+#endif
+static constexpr size_t kDerivActiveBatchBytes = kDerivBatchFrames * kDerivPacketSlotBytes;
 static constexpr size_t kDerivQueueBudgetBytes =
     kAudioBufferRamCeiling > (kDerivRingBytes + kDerivActiveBatchBytes)
         ? (kAudioBufferRamCeiling - kDerivRingBytes - kDerivActiveBatchBytes)
@@ -281,14 +304,18 @@ static constexpr uint32_t kAudioQueueSlotsAuto = detail::clampU32(
     kAudioQueueSlotsWant < kAudioQueueSlotsFit ? kAudioQueueSlotsWant : kAudioQueueSlotsFit,
     4u, 96u);
 
-// HTTP timeout: time to push one batch at the assumed floor goodput, doubled for
-// margin plus a fixed setup allowance, clamped [150, 850] ms. Kept short so a
-// stalled publish is abandoned quickly and the next fresh batch goes out.
+// HTTP timeout: time to push one batch at the floor goodput, doubled plus a
+// setup allowance, but never below kHttpTimeoutFloorMs. A timeout tcp_abort()s
+// the connection; set below lwIP's RTO floor (~3 * 2 * TCP_TMR_INTERVAL = 1.5 s
+// at the 250 ms default) it turned every unrepaired segment loss into an abort
+// + reconnect + queue overflow spiral (the field's ~45 % loss, reproduced on the
+// bench 2026-11-23 with the old [150, 850] ms clamp).
+static constexpr uint32_t kHttpTimeoutFloorMs = 2000;
 static constexpr uint32_t kHttpTimeoutSendMs = static_cast<uint32_t>(
     (static_cast<uint64_t>(kPublishBatchFramesAuto) * kDerivPacketSlotBytes * 8ull) /
     (kAssumedFloorKbitPerSec == 0 ? 1u : kAssumedFloorKbitPerSec));
 static constexpr uint32_t kHttpTimeoutMsAuto =
-    detail::clampU32(kHttpTimeoutSendMs * 2u + 120u, 150u, 850u);
+    detail::clampU32(kHttpTimeoutSendMs * 2u + 120u, kHttpTimeoutFloorMs, 4000u);
 
 // Final values: derived by default, overridable via -D for bring-up/bench work.
 #ifdef MMPR_NODECFG_AUDIO_RING_FRAMES
@@ -358,9 +385,21 @@ static constexpr size_t kMaxPacketSamplesPerChannel = MMPR_NODECFG_AUDIO_FRAME_S
 // --- Node identity ---
 // Prefix only — the full node ID is built at runtime by appending the chip's
 // unique board ID (last 4 hex digits) so each physical device is distinct.
-static constexpr const char* kNodeIdPrefix = "sirith-tetra-";
+// Synthetic builds get their own prefix so a bench stream pointed at a live
+// server never overwrites the real node's record (geometry, history).
+static constexpr const char* kNodeIdPrefix = kUseSyntheticAudio ? "bench-pico-" : "sirith-tetra-";
 // Audio mode is expected to be chosen per board/configuration
-static constexpr mmpr::NodeType kNodeType = kUseTdmAudio ? mmpr::NodeType::kSirithTetra : mmpr::NodeType::kPoint;
+// Synthetic mode advertises an N-sensor array so the real server accepts it
+// (it requires frame.channels == len(sensor_offsets_m)): the tetra geometry at
+// 4 channels, otherwise a planar ring (see sirith_tetrahedral.cpp).
+static constexpr mmpr::NodeType kNodeType = kUseTdmAudio
+    ? mmpr::NodeType::kSirithTetra
+    : (kUseSyntheticAudio
+           ? (MMPR_NODECFG_AUDIO_CHANNELS == 4 ? mmpr::NodeType::kSirithTetra : mmpr::NodeType::kSirithPlanar)
+           : mmpr::NodeType::kPoint);
+static constexpr bool kAdvertiseArrayGeometry = kUseTdmAudio || kUseSyntheticAudio;
+static constexpr float kSyntheticRingRadiusM = 0.03f;
+static constexpr size_t kMaxSyntheticChannels = 8;
 static constexpr bool kNodeHasFallbackGeoPosition = true;
 static constexpr float kNodeFallbackLatitudeDeg = 44.98698840878797f;
 static constexpr float kNodeFallbackLongitudeDeg = -93.2579197515542f;
@@ -435,14 +474,15 @@ static constexpr const char* kI2sMonoCapabilities[] = {
 };
 #endif
 
-static constexpr const char* const* kCapabilities = kUseTdmAudio ? kTdmCapabilities : kI2sMonoCapabilities;
-static constexpr size_t kCapabilityCount = kUseTdmAudio
+static constexpr const char* const* kCapabilities =
+    kAdvertiseArrayGeometry ? kTdmCapabilities : kI2sMonoCapabilities;
+static constexpr size_t kCapabilityCount = kAdvertiseArrayGeometry
     ? (sizeof(kTdmCapabilities) / sizeof(kTdmCapabilities[0]))
     : (sizeof(kI2sMonoCapabilities) / sizeof(kI2sMonoCapabilities[0]));
 
 static constexpr const char* kHardwareName = kUseTdmAudio
     ? "sirith_tetra_pico2w_tdm"
-    : "sirith_tetra_pico2w_i2s_mono";
+    : (kUseSyntheticAudio ? "sirith_tetra_pico2w_synthetic" : "sirith_tetra_pico2w_i2s_mono");
 static constexpr const mmpr::Vec3* kSensorOffsetsM = kUseTdmAudio ? kPhysicalSensorOffsetsM : kPointSensorOffsetsM;
 static constexpr size_t kSensorOffsetCount = kUseTdmAudio
     ? (sizeof(kPhysicalSensorOffsetsM) / sizeof(kPhysicalSensorOffsetsM[0]))
@@ -643,6 +683,9 @@ static_assert(
 static_assert(
     MMPR_NODECFG_TDM_ENABLE_WORD_DIAGNOSTICS == 0 || MMPR_NODECFG_TDM_ENABLE_WORD_DIAGNOSTICS == 1,
     "MMPR_NODECFG_TDM_ENABLE_WORD_DIAGNOSTICS must be 0 or 1");
+static_assert(
+    !kUseSyntheticAudio || (MMPR_NODECFG_AUDIO_CHANNELS >= 1 && MMPR_NODECFG_AUDIO_CHANNELS <= kMaxSyntheticChannels),
+    "synthetic audio supports 1-8 channels");
 static_assert(kAudioSampleRateHz >= 12000 && kAudioSampleRateHz <= 96000, "audio sample rate must be 12-96 kHz");
 static_assert(kAudioFrameSamples > 0 && kAudioFrameSamples <= 4096, "audio frame samples out of supported range");
 static_assert(kAudioRingFrames > 0 && kAudioRingFrames <= 32, "audio ring frames must be 1-32");
@@ -653,8 +696,9 @@ static_assert(kPublishBatchByteBudget >= 4096 && kPublishBatchByteBudget <= 3276
 // must fit under the RAM ceiling. Derivation guarantees this; the assert also
 // guards any manual -D override that would blow the budget.
 static_assert(
-    (static_cast<size_t>(kAudioFrameSamples) * static_cast<size_t>(kActiveAudioChannels) * sizeof(uint32_t) *
-         static_cast<size_t>(kAudioRingFrames)) +
+    (kUseSyntheticAudio ? 0u
+                        : static_cast<size_t>(kAudioFrameSamples) * static_cast<size_t>(kActiveAudioChannels) *
+                              sizeof(uint32_t) * static_cast<size_t>(kAudioRingFrames)) +
         (static_cast<size_t>(kMaxPacketSamplesPerChannel) * static_cast<size_t>(kActiveAudioChannels) *
          sizeof(int16_t) *
          (static_cast<size_t>(kAudioQueueSlots) +

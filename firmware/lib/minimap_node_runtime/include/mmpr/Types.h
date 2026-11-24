@@ -143,6 +143,14 @@ struct PublishResult {
   PublishFailureStage failureStage = PublishFailureStage::kNone;
   int32_t lwipError = 0;
   uint32_t latencyMs = 0;
+  // latencyMs split: request start -> last request byte ACKed (includes any
+  // connect), then last ACK -> response complete. Separates a link limit
+  // (upload) from a protocol/server limit (serverWait). uploadComplete is
+  // false when the request never got all bytes ACKed (e.g. timed out mid-send).
+  bool uploadComplete = false;
+  uint32_t uploadMs = 0;
+  uint32_t serverWaitMs = 0;
+  uint32_t bytesAcked = 0;
   std::string responseBody;
 };
 

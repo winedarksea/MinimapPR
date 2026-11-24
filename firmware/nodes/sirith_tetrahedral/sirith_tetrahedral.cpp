@@ -201,13 +201,41 @@ void buildOrderedOffsetsFromSlotMap(float measuredWorldHeadingDeg) {
   }
 }
 
+// Synthetic-mode geometry: one offset per channel so the server's
+// channels == len(sensor_offsets_m) check passes. 4 channels reuse the real
+// tetra; any other count is an evenly spaced planar ring. Filled in main().
+mmpr::Vec3 gSyntheticSensorOffsets[nodecfg::kMaxSyntheticChannels] = {};
+
+void buildSyntheticSensorOffsets() {
+  constexpr float kTwoPi = 6.28318530717958647692f;
+  const size_t count = nodecfg::kActiveAudioChannels;
+  for (size_t channel = 0; channel < count && channel < nodecfg::kMaxSyntheticChannels; ++channel) {
+    if (count == kTetraMicCount) {
+      gSyntheticSensorOffsets[channel] = nodecfg::kPhysicalSensorOffsetsM[channel];
+      continue;
+    }
+    const float angle = kTwoPi * static_cast<float>(channel) / static_cast<float>(count);
+    gSyntheticSensorOffsets[channel] = {
+        nodecfg::kSyntheticRingRadiusM * std::cos(angle),
+        nodecfg::kSyntheticRingRadiusM * std::sin(angle),
+        0.0f,
+    };
+  }
+}
+
 const mmpr::Vec3* selectedSensorOffsets() {
-  return nodecfg::kUseTdmAudio ? gTetraSensorOffsetsOrdered : nodecfg::kPointSensorOffsetsM;
+  if (nodecfg::kUseTdmAudio) {
+    return gTetraSensorOffsetsOrdered;
+  }
+  return nodecfg::kUseSyntheticAudio ? gSyntheticSensorOffsets : nodecfg::kPointSensorOffsetsM;
 }
 
 size_t selectedSensorCount() {
-  return nodecfg::kUseTdmAudio
-      ? (sizeof(gTetraSensorOffsetsOrdered) / sizeof(gTetraSensorOffsetsOrdered[0]))
+  if (nodecfg::kUseTdmAudio) {
+    return sizeof(gTetraSensorOffsetsOrdered) / sizeof(gTetraSensorOffsetsOrdered[0]);
+  }
+  return nodecfg::kUseSyntheticAudio
+      ? static_cast<size_t>(nodecfg::kActiveAudioChannels)
       : (sizeof(nodecfg::kPointSensorOffsetsM) / sizeof(nodecfg::kPointSensorOffsetsM[0]));
 }
 
@@ -462,6 +490,9 @@ void setupOptionalPeripherals() {
 
 int main() {
   initNodeId();
+  if (nodecfg::kUseSyntheticAudio) {
+    buildSyntheticSensorOffsets();
+  }
   stdio_init_all();
   sleep_ms(300);
   mmpr::FailureSnapshot::initializeForBoot();
@@ -477,7 +508,7 @@ int main() {
   std::printf(
       "[sirith-pico] booting id=%s mode=%s hardware=%s channels=%u\n",
       gNodeDescriptor.id,
-      nodecfg::kUseTdmAudio ? "tdm4" : "i2s_mono",
+      nodecfg::kUseTdmAudio ? "tdm4" : (nodecfg::kUseSyntheticAudio ? "synthetic" : "i2s_mono"),
       nodecfg::kHardwareName,
       static_cast<unsigned>(nodecfg::kActiveAudioChannels));
   if (nodecfg::kBareBoardValidationMode) {
@@ -535,7 +566,7 @@ int main() {
         static_cast<int>(nodecfg::kAudioTdmCaptureBitOffset),
         dataPinBiasName(nodecfg::kAudioTdmDataPinBias),
         static_cast<unsigned>(nodecfg::kAudioTdmEnableWordDiagnostics ? 1u : 0u));
-  } else {
+  } else if (!nodecfg::kUseSyntheticAudio) {
     std::printf(
         "[sirith-pico] mono-I2S point mode channel=%s offset=[0,0,0] edge=%s bit_offset=%d bias=%s diag=%u\n",
         nodecfg::kI2sMonoChannelSide == nodecfg::I2sMonoChannelSide::kRight ? "right" : "left",

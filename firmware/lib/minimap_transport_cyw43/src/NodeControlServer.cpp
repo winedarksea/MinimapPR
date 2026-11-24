@@ -332,7 +332,11 @@ bool NodeControlServer::prepareStatsBody(char* bodyBuffer, size_t bodyBufferByte
       "\"last_publish_status\":%d,\"last_publish_failure_stage\":%u,"
       "\"last_publish_lwip_error\":%ld,\"consecutive_publish_failures\":%u,"
       "\"publish_latency_last_ms\":%u,\"publish_latency_ewma_ms\":%u,"
-      "\"publish_latency_max_ms\":%u,\"wifi_rssi_dbm\":%d,\"heap_free_bytes\":%lu,"
+      "\"publish_latency_max_ms\":%u,"
+      "\"publish_upload_last_ms\":%u,\"publish_upload_ewma_ms\":%u,\"publish_upload_max_ms\":%u,"
+      "\"publish_server_wait_last_ms\":%u,\"publish_server_wait_ewma_ms\":%u,"
+      "\"publish_server_wait_max_ms\":%u,\"bytes_sent\":%llu,"
+      "\"wifi_rssi_dbm\":%d,\"heap_free_bytes\":%lu,"
       "\"boot_id\":%lu}",
       static_cast<unsigned long long>(stats.framesCaptured),
       static_cast<unsigned long long>(stats.framesPublished),
@@ -361,6 +365,13 @@ bool NodeControlServer::prepareStatsBody(char* bodyBuffer, size_t bodyBufferByte
       static_cast<unsigned>(stats.publishLatencyLastMs),
       static_cast<unsigned>(stats.publishLatencyEwmaMs),
       static_cast<unsigned>(stats.publishLatencyMaxMs),
+      static_cast<unsigned>(stats.publishUploadLastMs),
+      static_cast<unsigned>(stats.publishUploadEwmaMs),
+      static_cast<unsigned>(stats.publishUploadMaxMs),
+      static_cast<unsigned>(stats.publishServerWaitLastMs),
+      static_cast<unsigned>(stats.publishServerWaitEwmaMs),
+      static_cast<unsigned>(stats.publishServerWaitMaxMs),
+      static_cast<unsigned long long>(stats.bytesSent),
       static_cast<int>(stats.wifiRssiDbm),
       static_cast<unsigned long>(stats.heapFreeBytes),
       static_cast<unsigned long>(stats.bootId));

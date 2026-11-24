@@ -42,6 +42,13 @@ struct RunnerStats {
   uint32_t publishLatencyLastMs = 0;
   uint32_t publishLatencyEwmaMs = 0;
   uint32_t publishLatencyMaxMs = 0;
+  uint32_t publishUploadLastMs = 0;
+  uint32_t publishUploadEwmaMs = 0;
+  uint32_t publishUploadMaxMs = 0;
+  uint32_t publishServerWaitLastMs = 0;
+  uint32_t publishServerWaitEwmaMs = 0;
+  uint32_t publishServerWaitMaxMs = 0;
+  uint64_t bytesSent = 0;  // request bytes ACKed by the receiver, all publishes
   uint32_t ringFramesHighWater = 0;
   uint32_t ringFramesCapacity = 0;
   int8_t wifiRssiDbm = 0;

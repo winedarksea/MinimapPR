@@ -232,3 +232,6 @@ data/models/eval_report.json
 *.db
 *.db-wal
 *.db-shm
+
+# Local bench run outputs (Pico capacity bench); results are summarised in docs/
+bench_results/

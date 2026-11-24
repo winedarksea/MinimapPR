@@ -28,6 +28,15 @@ bool deadlineReached(uint32_t nowMs, uint32_t deadlineMs) {
   return static_cast<int32_t>(nowMs - deadlineMs) >= 0;
 }
 
+// last / EWMA (alpha 1/8, seeded by the first sample) / max for a latency metric.
+void recordLatencySample(uint32_t sampleMs, uint32_t& lastMs, uint32_t& ewmaMs, uint32_t& maxMs) {
+  lastMs = sampleMs;
+  if (sampleMs > maxMs) {
+    maxMs = sampleMs;
+  }
+  ewmaMs = ewmaMs == 0 ? sampleMs : ((ewmaMs * 7u) + sampleMs + 4u) / 8u;
+}
+
 }  // namespace
 
 NodeRunner::NodeRunner(
@@ -429,12 +438,11 @@ void NodeRunner::refreshSlowTelemetry(uint32_t nowMs) {
     clock_.maintain(nowMonotonicUs());
     stats_.lastHoldoverMaintenanceDurationUs = static_cast<uint32_t>(nowMonotonicUs() - startedUs);
   }
-  // Transport-health telemetry, sampled here and nowhere else. Both are cheap
-  // on transports that implement them and free on those that do not:
-  // IUplinkTransport::linkRssiDbm() defaults to 0, and HttpFramePublisher
-  // deliberately does not override it -- cyw43_wifi_get_rssi() is a blocking SPI
-  // ioctl that can stall long enough to overrun the DMA capture ring, so the
-  // CYW43 node still reports 0 rather than risking the audio path. The ESP
+  // Transport-health telemetry, sampled here and nowhere else. IUplinkTransport
+  // ::linkRssiDbm() defaults to 0 and HttpFramePublisher (CYW43) deliberately
+  // keeps that default: calling cyw43_wifi_get_rssi() from this loop with BLE
+  // scanning enabled hung the node until the 16 s watchdog fired, every ~30 s
+  // (bench 2026-11-23, docs/pico2w_cyw43_capacity_results.md). The ESP
   // transport reads a cached association record and answers immediately.
   stats_.wifiRssiDbm = publisher_.linkRssiDbm();
   stats_.heapFreeBytes = freeHeapBytes();
@@ -513,15 +521,23 @@ void NodeRunner::pumpPublisher() {
   PublishResult result = {};
   if (publisher_.pollPublish(result)) {
     stats_.lastPublishStatus = result.statusCode;
-    stats_.publishLatencyLastMs = result.latencyMs;
-    if (result.latencyMs > stats_.publishLatencyMaxMs) {
-      stats_.publishLatencyMaxMs = result.latencyMs;
-    }
-    if (stats_.publishLatencyEwmaMs == 0) {
-      stats_.publishLatencyEwmaMs = result.latencyMs;
-    } else {
-      stats_.publishLatencyEwmaMs =
-          ((stats_.publishLatencyEwmaMs * 7u) + result.latencyMs + 4u) / 8u;
+    recordLatencySample(
+        result.latencyMs,
+        stats_.publishLatencyLastMs,
+        stats_.publishLatencyEwmaMs,
+        stats_.publishLatencyMaxMs);
+    stats_.bytesSent += result.bytesAcked;
+    if (result.uploadComplete) {
+      recordLatencySample(
+          result.uploadMs,
+          stats_.publishUploadLastMs,
+          stats_.publishUploadEwmaMs,
+          stats_.publishUploadMaxMs);
+      recordLatencySample(
+          result.serverWaitMs,
+          stats_.publishServerWaitLastMs,
+          stats_.publishServerWaitEwmaMs,
+          stats_.publishServerWaitMaxMs);
     }
     if (result.ok) {
       onPublishSuccess();
@@ -742,7 +758,9 @@ void NodeRunner::loopOnce() {
         "[node] blocks=%" PRIu64 " published=%" PRIu64 " dropped=%" PRIu64
         " continuity=%" PRIu64 " errors=%" PRIu64 " queue=%u overflows=%" PRIu64
         " discarded=%" PRIu64
-        " last_status=%d latency_ms=%u ewma_ms=%u max_ms=%u rssi=%d\n",
+        " last_status=%d latency_ms=%u ewma_ms=%u max_ms=%u"
+        " upload_ewma_ms=%u upload_max_ms=%u wait_ewma_ms=%u wait_max_ms=%u"
+        " qhw=%u/%u sent_kb=%" PRIu64 " rssi=%d\n",
         stats_.framesCaptured,
         stats_.framesPublished,
         stats_.framesDropped,
@@ -755,6 +773,13 @@ void NodeRunner::loopOnce() {
         static_cast<unsigned>(stats_.publishLatencyLastMs),
         static_cast<unsigned>(stats_.publishLatencyEwmaMs),
         static_cast<unsigned>(stats_.publishLatencyMaxMs),
+        static_cast<unsigned>(stats_.publishUploadEwmaMs),
+        static_cast<unsigned>(stats_.publishUploadMaxMs),
+        static_cast<unsigned>(stats_.publishServerWaitEwmaMs),
+        static_cast<unsigned>(stats_.publishServerWaitMaxMs),
+        static_cast<unsigned>(stats_.queueSlotsHighWater),
+        static_cast<unsigned>(effectiveQueueCapacity()),
+        stats_.bytesSent / 1024u,
         static_cast<int>(stats_.wifiRssiDbm));
   }
 }

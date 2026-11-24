@@ -156,6 +156,11 @@ struct HttpFramePublisher::TransportState {
   absolute_time_t totalDeadline = {};
   uint32_t requestTimeoutMs = 0;
   uint32_t requestStartedMs = 0;
+  // Upload/server-wait split: bytes handed to tcp_write vs bytes the peer has
+  // ACKed for this request; uploadCompleteMs stamps the final ACK.
+  size_t requestBytesWritten = 0;
+  size_t requestBytesAcked = 0;
+  uint32_t uploadCompleteMs = 0;
   HttpFramePublisher::BackgroundPollCallback backgroundPollCallback = nullptr;
   void* backgroundPollContext = nullptr;
   PublishFailureStage failureStage = PublishFailureStage::kNone;
@@ -242,6 +247,9 @@ void resetRequestState(HttpFramePublisher::TransportState& state, bool keepRespo
   state.totalDeadline = {};
   state.requestTimeoutMs = 0;
   state.requestStartedMs = 0;
+  state.requestBytesWritten = 0;
+  state.requestBytesAcked = 0;
+  state.uploadCompleteMs = 0;
   state.requestDone = false;
   state.err = ERR_OK;
   state.failureStage = PublishFailureStage::kNone;
@@ -327,6 +335,7 @@ bool writeStringSegment(
         TCP_WRITE_FLAG_COPY);
     if (writeErr == ERR_OK) {
       state.sendOffset += chunk;
+      state.requestBytesWritten += chunk;
       refreshRequestDeadline(state);
     } else if (writeErr == ERR_MEM) {
       return false;
@@ -607,15 +616,30 @@ err_t onConnected(void* arg, tcp_pcb* tpcb, err_t err) {
 }
 
 err_t onSent(void* arg, tcp_pcb* tpcb, uint16_t len) {
-  (void)len;
   HttpFramePublisher::TransportState* state =
       static_cast<HttpFramePublisher::TransportState*>(arg);
   if (state == nullptr) {
     return ERR_ARG;
   }
+  state->requestBytesAcked += len;
   refreshRequestDeadline(*state);
   flushTx(*state, tpcb);
+  if (state->uploadCompleteMs == 0 &&
+      state->sendPhase == HttpFramePublisher::TransportState::SendPhase::kDone &&
+      state->requestBytesAcked >= state->requestBytesWritten) {
+    state->uploadCompleteMs = to_ms_since_boot(get_absolute_time());
+  }
   return ERR_OK;
+}
+
+// Fills the upload/server-wait split on any finished or abandoned request.
+void fillTimingSplit(const HttpFramePublisher::TransportState& state, PublishResult& result) {
+  result.bytesAcked = static_cast<uint32_t>(state.requestBytesAcked);
+  if (state.uploadCompleteMs != 0 && state.requestStartedMs != 0) {
+    result.uploadComplete = true;
+    result.uploadMs = state.uploadCompleteMs - state.requestStartedMs;
+    result.serverWaitMs = to_ms_since_boot(get_absolute_time()) - state.uploadCompleteMs;
+  }
 }
 
 err_t onPoll(void* arg, tcp_pcb* tpcb) {
@@ -793,6 +817,7 @@ PublishResult finishRequestResult(HttpFramePublisher::TransportState& state, boo
   if (state.requestStartedMs != 0) {
     result.latencyMs = to_ms_since_boot(get_absolute_time()) - state.requestStartedMs;
   }
+  fillTimingSplit(state, result);
   result.failureStage = PublishFailureStage::kNone;
   result.lwipError = static_cast<int32_t>(state.err);
   if (state.statusCode > 0) {
@@ -1323,6 +1348,7 @@ bool HttpFramePublisher::pollPublish(PublishResult& result) {
     result.failureStage = PublishFailureStage::kTimeout;
     result.lwipError = static_cast<int32_t>(ERR_TIMEOUT);
     result.latencyMs = to_ms_since_boot(get_absolute_time()) - transportState_->requestStartedMs;
+    fillTimingSplit(*transportState_, result);
     if (transportState_->keepResponse) {
       result.responseBody = transportState_->response;
     }

@@ -28,6 +28,11 @@ function(mmpr_apply_nodecfg target node_config_path)
     else()
         message(FATAL_ERROR "mmpr_apply_nodecfg: could not find '#define MMPR_ENABLE_BLE_SCAN <0|1>' in ${node_config_path}")
     endif()
+    # Bench override: -DMMPR_NODECFG_ENABLE_BLE_SCAN=0|1 wins over the header so
+    # BLE on/off variants need no source edit (header's #ifndef guard yields).
+    if(DEFINED MMPR_NODECFG_ENABLE_BLE_SCAN)
+        set(_mmpr_ble ${MMPR_NODECFG_ENABLE_BLE_SCAN})
+    endif()
     # Export to caller scope so the node CMakeLists can gate btstack linking.
     set(MMPR_ENABLE_BLE_SCAN ${_mmpr_ble} PARENT_SCOPE)
     target_compile_definitions(${target} PRIVATE MMPR_ENABLE_BLE_SCAN=${_mmpr_ble})
@@ -57,7 +62,11 @@ function(mmpr_apply_nodecfg target node_config_path)
             TDM_SAMPLE_EDGE
             TDM_CAPTURE_BIT_OFFSET
             TDM_DATA_PIN_BIAS
-            TDM_ENABLE_WORD_DIAGNOSTICS)
+            TDM_ENABLE_WORD_DIAGNOSTICS
+            TCP_SND_BUF_MSS
+            TCP_TMR_INTERVAL_MS
+            TARGET_QUEUE_MS
+            AUDIO_BUFFER_RAM_CEILING_KB)
         if(DEFINED MMPR_NODECFG_${_def})
             target_compile_definitions(${target}
                     PRIVATE MMPR_NODECFG_${_def}=${MMPR_NODECFG_${_def}})

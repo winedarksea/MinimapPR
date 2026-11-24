@@ -113,6 +113,18 @@ bool GpsPpsTimerCapture::initPioStateMachine() {
   // would otherwise become a per-boot offset between the tick domain and
   // time_us_64() that biases the PPS-to-audio snapshot delay correction.
   monotonicBaseUs_ = time_us_64();
+
+  // Publish everything onIrq() reads BEFORE the IRQ can fire. The SM may push
+  // immediately (PPS pin already high at start, or a counter fall-through), so
+  // the IRQ can be pending the instant it is enabled; if onIrq() then saw
+  // pio_ == nullptr / !configured_ it returned without draining the FIFO, the
+  // level-triggered "RX not empty" IRQ re-entered forever and begin() never
+  // returned -> 16 s watchdog reset at every GPS baud lock (bench 2026-11-23).
+  pio_ = selectedPio;
+  sm_ = selectedSm;
+  offset_ = programOffset;
+  programInstalled_ = true;
+  configured_ = true;
   pio_sm_set_enabled(selectedPio, static_cast<uint>(selectedSm), true);
 
   irqIndex_ = 0;
@@ -134,11 +146,6 @@ bool GpsPpsTimerCapture::initPioStateMachine() {
       static_cast<enum pio_interrupt_source>(pis_sm0_rx_fifo_not_empty + selectedSm),
       true);
   irq_set_enabled(static_cast<irq_num_t>(irqNumber_), true);
-
-  pio_ = selectedPio;
-  sm_ = selectedSm;
-  offset_ = programOffset;
-  programInstalled_ = true;
   return true;
 }
 

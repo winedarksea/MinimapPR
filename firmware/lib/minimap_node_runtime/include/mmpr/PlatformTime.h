@@ -29,7 +29,13 @@
 
 #else
 
+#include <malloc.h>
+
 #include "pico/time.h"
+
+// pico-sdk linker-script symbols bounding the newlib heap.
+extern "C" char __end__;
+extern "C" char __HeapLimit;
 
 #endif
 
@@ -89,11 +95,15 @@ inline void sleepUs(uint64_t us) {
   ::sleep_us(us);
 }
 
-// The pico-sdk has no cheap free-heap query (it would mean reaching into
-// newlib's malloc internals), so RunnerStats::heapFreeBytes stays 0 on RP2350
-// nodes -- which is exactly what it was before this seam existed.
+// Heap is [__end__, __HeapLimit) in the pico-sdk linker script; newlib's
+// mallinfo().uordblks is the in-use total. mallinfo walks newlib's bins, so
+// callers sample it on a slow cadence (NodeRunner: every 15 s).
 inline uint32_t freeHeapBytes() {
-  return 0;
+  const struct mallinfo info = mallinfo();
+  const uintptr_t heapBytes = reinterpret_cast<uintptr_t>(&__HeapLimit) - reinterpret_cast<uintptr_t>(&__end__);
+  return heapBytes > static_cast<uintptr_t>(info.uordblks)
+      ? static_cast<uint32_t>(heapBytes - static_cast<uintptr_t>(info.uordblks))
+      : 0u;
 }
 
 #endif
