@@ -7,7 +7,28 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from minimappr.models import NodeOverrides, NodeSpec, SyncGrade
+from minimappr.core.geo import LocalCoordinateFrame
+from minimappr.core.sensor_world_position import sensor_world_position_m
+from minimappr.models import NodeOverrides, NodeSpec, SyncGrade, Vec3
+
+
+def operator_override_position_m(
+    override: NodeOverrides,
+    coordinate_frame: LocalCoordinateFrame | None,
+) -> Vec3 | None:
+    """Site-frame position an operator pinned, or None if position is not overridden.
+
+    A local ``position_m`` wins when both are entered. A ``position_geo``-only
+    override is projected into the site frame: leaving ``position_m`` at the
+    reported GPS value would place the node somewhere the operator did not say.
+    """
+    if override.position_m is not None:
+        return (float(override.position_m[0]), float(override.position_m[1]), float(override.position_m[2]))
+    if override.position_geo is None:
+        return None
+    if coordinate_frame is None:
+        raise ValueError("a position_geo override needs the site coordinate frame to map it to position_m")
+    return coordinate_frame.geo_to_local(override.position_geo)
 
 
 @dataclass(slots=True)
@@ -30,7 +51,9 @@ class NodeRuntime:
 
 
 class NodeRegistry:
-    def __init__(self) -> None:
+    def __init__(self, coordinate_frame: LocalCoordinateFrame | None = None) -> None:
+        # Needed only to map position_geo-only overrides; rebound on site-origin change.
+        self._coordinate_frame = coordinate_frame
         self._nodes: dict[str, NodeRuntime] = {}
         self._sensors: dict[str, SensorDescriptor] = {}
         self._latest_observations: dict[str, str] = {}
@@ -41,12 +64,17 @@ class NodeRegistry:
         self._overrides: dict[str, NodeOverrides] = {}
         self._lock = asyncio.Lock()
 
+    def set_coordinate_frame(self, coordinate_frame: LocalCoordinateFrame) -> None:
+        """Adopt a new site frame; nodes re-register in it on their next upsert."""
+        self._coordinate_frame = coordinate_frame
+
     async def upsert(self, spec: NodeSpec, last_seen_ns: int) -> NodeRuntime:
         override = self._overrides.get(spec.id)
         if override is not None:
             update: dict[str, object] = {}
-            if override.position_m is not None:
-                update["position_m"] = override.position_m
+            override_position_m = operator_override_position_m(override, self._coordinate_frame)
+            if override_position_m is not None:
+                update["position_m"] = override_position_m
             if override.position_geo is not None:
                 update["position_geo"] = override.position_geo
             if override.orientation is not None:
@@ -70,7 +98,7 @@ class NodeRegistry:
                 sensor_id=sensor_id,
                 node_id=spec.id,
                 channel_index=index,
-                position_m=base + np.asarray(offset, dtype=np.float64),
+                position_m=sensor_world_position_m(base, spec.orientation, offset),
             )
 
         async with self._lock:
