@@ -10,10 +10,15 @@ void appendLeU16(std::vector<uint8_t>& out, uint16_t value) {
 }
 
 void appendLeU32(std::vector<uint8_t>& out, uint32_t value) {
-  out.push_back(static_cast<uint8_t>(value & 0xFF));
-  out.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
-  out.push_back(static_cast<uint8_t>((value >> 16) & 0xFF));
-  out.push_back(static_cast<uint8_t>((value >> 24) & 0xFF));
+  // One range insert, not four push_backs: GCC 14 flags the push_back chain on
+  // a freshly reserved vector with a false -Wfree-nonheap-object.
+  const uint8_t bytes[4] = {
+      static_cast<uint8_t>(value & 0xFF),
+      static_cast<uint8_t>((value >> 8) & 0xFF),
+      static_cast<uint8_t>((value >> 16) & 0xFF),
+      static_cast<uint8_t>((value >> 24) & 0xFF),
+  };
+  out.insert(out.end(), bytes, bytes + 4);
 }
 
 uint16_t readLeU16(const uint8_t* bytes) {
@@ -24,6 +29,9 @@ uint32_t readLeU32(const uint8_t* bytes) {
   return static_cast<uint32_t>(bytes[0]) | (static_cast<uint32_t>(bytes[1]) << 8) |
          (static_cast<uint32_t>(bytes[2]) << 16) | (static_cast<uint32_t>(bytes[3]) << 24);
 }
+
+// DATA_POST: u32 postDeadlineMs + u16 pathLen.
+constexpr size_t kDataPostFixedPrefixBytes = 4 + 2;
 
 }  // namespace
 
@@ -104,13 +112,15 @@ EspC5DecodeStatus decodeEspC5Frame(
 
 void encodeDataPostFrame(
     uint16_t seq,
+    uint32_t postDeadlineMs,
     const std::string& endpointPath,
     const std::string& body,
     std::vector<uint8_t>& outBytes) {
   EspC5Frame frame;
   frame.type = EspC5FrameType::kDataPost;
   frame.seq = seq;
-  frame.payload.reserve(2 + endpointPath.size() + body.size());
+  frame.payload.reserve(kDataPostFixedPrefixBytes + endpointPath.size() + body.size());
+  appendLeU32(frame.payload, postDeadlineMs);
   appendLeU16(frame.payload, static_cast<uint16_t>(endpointPath.size()));
   frame.payload.insert(frame.payload.end(), endpointPath.begin(), endpointPath.end());
   frame.payload.insert(frame.payload.end(), body.begin(), body.end());
@@ -119,17 +129,21 @@ void encodeDataPostFrame(
 
 bool decodeDataPostPayload(
     const std::vector<uint8_t>& payload,
+    uint32_t& outPostDeadlineMs,
     std::string& outPath,
     std::string& outBody) {
-  if (payload.size() < 2) {
+  if (payload.size() < kDataPostFixedPrefixBytes) {
     return false;
   }
-  const uint16_t pathLen = readLeU16(payload.data());
-  if (static_cast<size_t>(pathLen) + 2 > payload.size()) {
+  outPostDeadlineMs = readLeU32(payload.data());
+  const uint16_t pathLen = readLeU16(payload.data() + 4);
+  if (static_cast<size_t>(pathLen) + kDataPostFixedPrefixBytes > payload.size()) {
     return false;
   }
-  outPath.assign(reinterpret_cast<const char*>(payload.data() + 2), pathLen);
-  outBody.assign(reinterpret_cast<const char*>(payload.data() + 2 + pathLen), payload.size() - 2 - pathLen);
+  const uint8_t* path = payload.data() + kDataPostFixedPrefixBytes;
+  outPath.assign(reinterpret_cast<const char*>(path), pathLen);
+  outBody.assign(reinterpret_cast<const char*>(path + pathLen),
+                 payload.size() - kDataPostFixedPrefixBytes - pathLen);
   return true;
 }
 
@@ -156,18 +170,28 @@ void encodeLinkStatusFrame(uint16_t seq, const LinkStatusPayload& status, std::v
   EspC5Frame frame;
   frame.type = EspC5FrameType::kLinkStatus;
   frame.seq = seq;
-  frame.payload.reserve(2);
+  frame.payload.reserve(kEspC5LinkStatusPayloadBytes);
   frame.payload.push_back(status.linkUp ? 1 : 0);
   frame.payload.push_back(static_cast<uint8_t>(status.rssiDbm));
+  frame.payload.push_back(status.wifiChannel);
+  frame.payload.push_back(status.band5GHz ? 1 : 0);
+  appendLeU32(frame.payload, status.tcpRetransmitsTotal);
+  appendLeU32(frame.payload, status.bridgeBufferHighWaterBytes);
+  appendLeU32(frame.payload, status.postsRefusedBusyTotal);
   encodeEspC5Frame(frame, outBytes);
 }
 
 bool decodeLinkStatusPayload(const std::vector<uint8_t>& payload, LinkStatusPayload& outStatus) {
-  if (payload.size() < 2) {
+  if (payload.size() < kEspC5LinkStatusPayloadBytes) {
     return false;
   }
   outStatus.linkUp = payload[0] != 0;
   outStatus.rssiDbm = static_cast<int8_t>(payload[1]);
+  outStatus.wifiChannel = payload[2];
+  outStatus.band5GHz = payload[3] != 0;
+  outStatus.tcpRetransmitsTotal = readLeU32(payload.data() + 4);
+  outStatus.bridgeBufferHighWaterBytes = readLeU32(payload.data() + 8);
+  outStatus.postsRefusedBusyTotal = readLeU32(payload.data() + 12);
   return true;
 }
 

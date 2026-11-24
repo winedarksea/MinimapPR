@@ -9,7 +9,7 @@ namespace mmpr {
 
 struct SpiHostLinkConfig {
   spi_inst_t* spi = spi0;
-  uint32_t baudHz = 4 * 1000 * 1000;  // 4 MHz to start; bench-tune against the real C5.
+  uint32_t baudHz = 20 * 1000 * 1000;  // node_config kEspSpiBaudHz; C5 slave max unverified until bench.
   uint8_t sckPin = 22;                // GP22 (kEspSpiSckPin)
   uint8_t mosiPin = 23;               // GP23 (kEspSpiTxPin, host TX -> C5 RX)
   uint8_t misoPin = 20;               // GP20 (kEspSpiRxPin, host RX <- C5 TX)

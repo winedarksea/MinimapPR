@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+#include "mmpr/EspC5Frame.h"
+#include "mmpr/PdmPlanarSource.h"
 #include "mmpr/Types.h"
 
 // ============================================================================
@@ -124,14 +126,29 @@ constexpr size_t clampSize(size_t value, size_t lo, size_t hi) {
 }
 }
 
-static constexpr uint32_t kTargetRingMs = 200;
-static constexpr uint32_t kTargetQueueMs = 300;
+// Output frame ring between the core-1 decimator and the main loop. It only
+// has to cover main-loop latency (incl. the blocking SPI send of one batch);
+// the publish queue below absorbs radio stalls. The tetra TDM ring peaked at
+// 2 frames (~20 ms) on the 2026-11-23 bench, so 100 ms is ~5x margin and the
+// RAM goes to the queue instead.
+static constexpr uint32_t kTargetRingMs = 100;
+// Publish-side jitter buffer. It must outlast the radio stalls it is meant to
+// survive: on the 2026-11-23 Pico bench, 0.6-1.2 s stalls on a busy 2.4 GHz
+// channel caused all residual loss once the queue was shorter than the stall.
+// The RAM ceiling below caps it well short of this target at 48 kHz (~0.55 s);
+// PSRAM (kPsramCsPin) is the fix, see the board assessment §2.
+#ifndef MMPR_NODECFG_TARGET_QUEUE_MS
+#define MMPR_NODECFG_TARGET_QUEUE_MS 1000
+#endif
+static constexpr uint32_t kTargetQueueMs = MMPR_NODECFG_TARGET_QUEUE_MS;
 static constexpr size_t kTargetPublishBytes = 28u * 1024u;
-// No CYW43/lwIP/btstack heap in this build, so the audio budget can be much
-// larger than the tetra ceiling. RP2350 has 520 KiB SRAM; leave headroom for
-// stacks, the core-1 DSP scratch/LUTs, and the ESP32-C5 SPI link buffers.
-static constexpr size_t kAudioBufferRamCeiling = 352u * 1024u;
-static constexpr uint32_t kAssumedFloorKbitPerSec = 15000;  // 5 GHz link via C5
+// No CYW43/lwIP/btstack heap in this build, so the audio budget can be larger
+// than the tetra's. RP2350 has 520 KiB SRAM; leave headroom for stacks, the
+// core-1 DSP scratch/LUTs, and the in-flight DATA_POST frame (one batch).
+#ifndef MMPR_NODECFG_AUDIO_BUFFER_RAM_CEILING_KB
+#define MMPR_NODECFG_AUDIO_BUFFER_RAM_CEILING_KB 352
+#endif
+static constexpr size_t kAudioBufferRamCeiling = MMPR_NODECFG_AUDIO_BUFFER_RAM_CEILING_KB * 1024u;
 
 static constexpr uint32_t kDerivSampleRateHz = MMPR_NODECFG_AUDIO_SAMPLE_RATE_HZ;
 static constexpr uint32_t kDerivFrameSamples = MMPR_NODECFG_AUDIO_FRAME_SAMPLES;
@@ -139,8 +156,16 @@ static constexpr uint32_t kDerivChannels = kPlanarChannelCount;
 
 static constexpr size_t kDerivPacketSlotBytes =
     static_cast<size_t>(kDerivFrameSamples) * kDerivChannels * sizeof(int16_t);
-static constexpr size_t kDerivRingFrameBytes =
-    static_cast<size_t>(kDerivFrameSamples) * kDerivChannels * sizeof(uint32_t);
+// PdmPlanarSource allocates its output ring as int16 x kPdmMaxChannels, plus a
+// fixed raw PDM word ring between the DMA IRQ and core 1. Synthetic mode
+// allocates neither. (The tetra's uint32 TDM ring cost was copied here before
+// and double-counted the ring, shrinking the queue.)
+static constexpr size_t kDerivRingFrameBytes = kUsePdmAudio
+    ? static_cast<size_t>(kDerivFrameSamples) * mmpr::kPdmMaxChannels * sizeof(int16_t)
+    : 0u;
+static constexpr size_t kDerivPdmRawRingBytes = kUsePdmAudio
+    ? mmpr::kPdmRawBlockRingSize * mmpr::kPdmRawWordsPerBlock * sizeof(uint32_t)
+    : 0u;
 
 static constexpr uint32_t kAudioRingFramesAuto = detail::clampU32(
     detail::ceilDivU32(static_cast<uint64_t>(kDerivSampleRateHz) * kTargetRingMs,
@@ -150,14 +175,19 @@ static constexpr uint32_t kAudioRingFramesAuto = detail::clampU32(
 static constexpr size_t kPublishBatchFramesAuto = detail::clampSize(
     kDerivPacketSlotBytes > 0 ? (kTargetPublishBytes / kDerivPacketSlotBytes) : 1u,
     1u, 16u);
+#ifdef MMPR_NODECFG_PUBLISH_BATCH_FRAMES
+static constexpr size_t kDerivBatchFrames = MMPR_NODECFG_PUBLISH_BATCH_FRAMES;
+#else
+static constexpr size_t kDerivBatchFrames = kPublishBatchFramesAuto;
+#endif
 
 static constexpr uint32_t kAudioQueueSlotsWant = detail::clampU32(
     detail::ceilDivU32(static_cast<uint64_t>(kDerivSampleRateHz) * kTargetQueueMs,
                        1000ull * kDerivFrameSamples),
     8u, 96u);
 static constexpr size_t kDerivRingBytes =
-    static_cast<size_t>(kAudioRingFramesAuto) * kDerivRingFrameBytes;
-static constexpr size_t kDerivActiveBatchBytes = kPublishBatchFramesAuto * kDerivPacketSlotBytes;
+    static_cast<size_t>(kAudioRingFramesAuto) * kDerivRingFrameBytes + kDerivPdmRawRingBytes;
+static constexpr size_t kDerivActiveBatchBytes = kDerivBatchFrames * kDerivPacketSlotBytes;
 static constexpr size_t kDerivQueueBudgetBytes =
     kAudioBufferRamCeiling > (kDerivRingBytes + kDerivActiveBatchBytes)
         ? (kAudioBufferRamCeiling - kDerivRingBytes - kDerivActiveBatchBytes)
@@ -169,12 +199,6 @@ static constexpr uint32_t kAudioQueueSlotsAuto = detail::clampU32(
     kAudioQueueSlotsWant < kAudioQueueSlotsFit ? kAudioQueueSlotsWant : kAudioQueueSlotsFit,
     4u, 96u);
 
-static constexpr uint32_t kHttpTimeoutSendMs = static_cast<uint32_t>(
-    (static_cast<uint64_t>(kPublishBatchFramesAuto) * kDerivPacketSlotBytes * 8ull) /
-    (kAssumedFloorKbitPerSec == 0 ? 1u : kAssumedFloorKbitPerSec));
-static constexpr uint32_t kHttpTimeoutMsAuto =
-    detail::clampU32(kHttpTimeoutSendMs * 2u + 120u, 150u, 850u);
-
 #ifdef MMPR_NODECFG_AUDIO_RING_FRAMES
 static constexpr uint32_t kAudioRingFrames = MMPR_NODECFG_AUDIO_RING_FRAMES;
 #else
@@ -185,15 +209,47 @@ static constexpr size_t kAudioQueueSlots = MMPR_NODECFG_AUDIO_QUEUE_SLOTS;
 #else
 static constexpr size_t kAudioQueueSlots = kAudioQueueSlotsAuto;
 #endif
-#ifdef MMPR_NODECFG_PUBLISH_BATCH_FRAMES
-static constexpr size_t kPublishBatchFrames = MMPR_NODECFG_PUBLISH_BATCH_FRAMES;
-#else
-static constexpr size_t kPublishBatchFrames = kPublishBatchFramesAuto;
+static constexpr size_t kPublishBatchFrames = kDerivBatchFrames;
+
+// ============================================================================
+// ESP32-C5 bridge link: SPI rate and the timeout chain
+// ============================================================================
+// SPI clock to the C5. The old 4 MHz placeholder was barely above the 5 x 48 kHz
+// payload (3.84 Mbit/s) and below 96 kHz. 20 MHz is within the RP2350's range
+// (clk_peri / 2); the C5 SPI-slave maximum is UNVERIFIED until the bridge
+// bench. The static_assert below keeps 2x headroom over the audio payload.
+#ifndef MMPR_NODECFG_ESP_SPI_BAUD_HZ
+#define MMPR_NODECFG_ESP_SPI_BAUD_HZ 20000000
 #endif
-#ifdef MMPR_NODECFG_HTTP_TIMEOUT_MS
-static constexpr uint32_t kHttpTimeoutMs = MMPR_NODECFG_HTTP_TIMEOUT_MS;
+static constexpr uint32_t kEspSpiBaudHz = MMPR_NODECFG_ESP_SPI_BAUD_HZ;
+static constexpr uint32_t kSpiMinHeadroomOverPayload = 2;
+
+// The bridge's whole budget per POST, sent in every DATA_POST frame. It must
+// outlast the C5's own TCP loss recovery: ESP-IDF's lwIP keeps the 250 ms slow
+// timer by default, giving the same ~1.5 s RTO floor that broke the tetra when
+// its HTTP timeout was 425 ms. Re-derive from the C5 capacity bench.
+#ifndef MMPR_NODECFG_BRIDGE_POST_DEADLINE_MS
+#define MMPR_NODECFG_BRIDGE_POST_DEADLINE_MS 3000
+#endif
+static constexpr uint32_t kBridgePostDeadlineMs = MMPR_NODECFG_BRIDGE_POST_DEADLINE_MS;
+
+// Host-side wait for POST_STATUS, per attempt: the bridge deadline, plus the
+// SPI transfer of one DATA_POST, plus margin for the status frame. It must
+// fire only when the bridge itself is unresponsive, never while it is still
+// inside its deadline.
+// Allowance for MMB3 headers/descriptors + SPI framing on top of the audio
+// bytes; generous because it only lengthens a timeout.
+static constexpr size_t kDataPostFramingAllowanceBytes = 4096;
+static constexpr uint32_t kBridgeStatusMarginMs = 250;
+static constexpr size_t kDataPostMaxFrameBytes =
+    kDerivBatchFrames * kDerivPacketSlotBytes + kDataPostFramingAllowanceBytes;
+static constexpr uint32_t kDataPostSpiTransferMs = detail::ceilDivU32(
+    static_cast<uint64_t>(kDataPostMaxFrameBytes) * 8ull * 1000ull, kEspSpiBaudHz);
+#ifdef MMPR_NODECFG_HOST_RESPONSE_TIMEOUT_MS
+static constexpr uint32_t kHostResponseTimeoutMs = MMPR_NODECFG_HOST_RESPONSE_TIMEOUT_MS;
 #else
-static constexpr uint32_t kHttpTimeoutMs = kHttpTimeoutMsAuto;
+static constexpr uint32_t kHostResponseTimeoutMs =
+    kBridgePostDeadlineMs + kDataPostSpiTransferMs + kBridgeStatusMarginMs;
 #endif
 
 static constexpr uint32_t kPublishBatchMaxRetries = 1;
@@ -374,14 +430,17 @@ static_assert(kAudioQueueSlots > 0 && kAudioQueueSlots <= 96, "audio queue slots
 static_assert(kPublishBatchFrames > 0 && kPublishBatchFrames <= 16, "publish batch frames must be 1-16");
 static_assert(kPdmDataPinCount == 3, "planar PDM uses 3 data lines (2+2+1 sharing)");
 static_assert(
-    (static_cast<size_t>(kActiveAudioFrameSamples) * static_cast<size_t>(kActiveAudioChannels) * sizeof(uint32_t) *
-         static_cast<size_t>(kAudioRingFrames)) +
-        (static_cast<size_t>(kMaxPacketSamplesPerChannel) * static_cast<size_t>(kActiveAudioChannels) *
-         sizeof(int16_t) *
-         (static_cast<size_t>(kAudioQueueSlots) +
-          (kPublishBatchFrames < static_cast<size_t>(kAudioQueueSlots)
-               ? kPublishBatchFrames
-               : static_cast<size_t>(kAudioQueueSlots)))) <= kAudioBufferRamCeiling,
+    static_cast<size_t>(kAudioRingFrames) * kDerivRingFrameBytes + kDerivPdmRawRingBytes +
+            kDerivPacketSlotBytes * (kAudioQueueSlots + kPublishBatchFrames) <=
+        kAudioBufferRamCeiling,
     "audio ring + queue + active batch budget exceeds kAudioBufferRamCeiling");
+static_assert(static_cast<uint64_t>(kEspSpiBaudHz) >=
+                  static_cast<uint64_t>(kActiveAudioSampleRateHz) * kActiveAudioChannels * 16ull *
+                      kSpiMinHeadroomOverPayload,
+    "ESP32-C5 SPI clock gives < 2x headroom over the audio payload");
+static_assert(kHostResponseTimeoutMs >
+                  kBridgePostDeadlineMs + kDataPostSpiTransferMs + mmpr::kEspC5MinHostTimeoutMarginMs,
+    "host response timeout must outlast the bridge POST deadline plus the SPI transfer; "
+    "a shorter host timeout recreates the tetra abort/retry spiral");
 
 }  // namespace nodecfg

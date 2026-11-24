@@ -16,11 +16,17 @@ constexpr size_t kResponseReadChunkBytes = 64;
 constexpr size_t kMinPostStatusFrameBytes = 1 + kEspC5FrameHeaderSize + 5 + kEspC5FrameCrcSize;
 }  // namespace
 
-EspC5Publisher::EspC5Publisher(const char* ingestPath, SpiHostLink& link, uint32_t timeoutMs)
+EspC5Publisher::EspC5Publisher(const char* ingestPath,
+                               SpiHostLink& link,
+                               uint32_t bridgePostDeadlineMs,
+                               uint32_t hostResponseTimeoutMs)
     : link_(link),
       endpointUrl_(std::string("spi://esp32c5") + (ingestPath != nullptr ? ingestPath : "")),
       ingestPath_(ingestPath != nullptr ? ingestPath : ""),
-      timeoutMs_(timeoutMs) {}
+      bridgePostDeadlineMs_(bridgePostDeadlineMs),
+      hostResponseTimeoutMs_(hostResponseTimeoutMs > bridgePostDeadlineMs + kEspC5MinHostTimeoutMarginMs
+                                 ? hostResponseTimeoutMs
+                                 : bridgePostDeadlineMs + kEspC5MinHostTimeoutMarginMs) {}
 
 uint16_t EspC5Publisher::allocateSeq() {
   const uint16_t seq = nextSeq_;
@@ -100,22 +106,51 @@ bool EspC5Publisher::beginBinaryStoreForwardPublish(
   }
 
   const uint16_t seq = allocateSeq();
-  std::vector<uint8_t> encoded;
+  inFlightFrame_.clear();
   try {
-    encodeDataPostFrame(seq, ingestPath_, body, encoded);
+    encodeDataPostFrame(seq, bridgePostDeadlineMs_, ingestPath_, body, inFlightFrame_);
   } catch (const std::bad_alloc&) {
+    inFlightFrame_.clear();
     immediateResult.statusCode = -6;
     return false;
   }
-
-  link_.sendFrame(encoded);
+  // Free the body before the blocking SPI transfer: the encoded frame already
+  // holds a copy, and two batch-sized buffers at once is avoidable heap peak.
+  std::string().swap(body);
 
   inFlightSeq_ = seq;
   keepResponseBody_ = keepResponseBody;
-  rxAccumulator_.clear();
   requestStartedMs_ = to_ms_since_boot(get_absolute_time());
-  state_ = State::kAwaitingStatus;
+  sendInFlightFrame();
   return true;  // started; caller polls via pollPublish
+}
+
+void EspC5Publisher::sendInFlightFrame() {
+  rxAccumulator_.clear();
+  attemptStartedMs_ = to_ms_since_boot(get_absolute_time());
+  link_.sendFrame(inFlightFrame_);
+  // Over the bridge "upload" is the SPI transfer only; Wi-Fi upload and the
+  // server both land in serverWaitMs. LINK_STATUS separates those.
+  uploadMs_ = to_ms_since_boot(get_absolute_time()) - attemptStartedMs_;
+  uploadComplete_ = true;
+  state_ = State::kAwaitingStatus;
+}
+
+void EspC5Publisher::fillTiming(PublishResult& result, uint32_t nowMs) const {
+  result.latencyMs = nowMs - requestStartedMs_;
+  result.uploadComplete = uploadComplete_;
+  result.uploadMs = uploadMs_;
+  const uint32_t attemptElapsedMs = nowMs - attemptStartedMs_;
+  result.serverWaitMs = attemptElapsedMs > uploadMs_ ? attemptElapsedMs - uploadMs_ : 0;
+  result.bytesAcked = result.ok ? static_cast<uint32_t>(inFlightFrame_.size()) : 0;
+}
+
+void EspC5Publisher::finishPublish() {
+  state_ = State::kIdle;
+  rxAccumulator_.clear();
+  std::vector<uint8_t>().swap(inFlightFrame_);
+  uploadComplete_ = false;
+  uploadMs_ = 0;
 }
 
 bool EspC5Publisher::tryDecodeStatusResponse(PublishResult& result) {
@@ -152,7 +187,7 @@ bool EspC5Publisher::tryDecodeStatusResponse(PublishResult& result) {
         result.ok = false;
         result.statusCode = -5;
         result.failureStage = PublishFailureStage::kResponseParse;
-        result.latencyMs = to_ms_since_boot(get_absolute_time()) - requestStartedMs_;
+        fillTiming(result, to_ms_since_boot(get_absolute_time()));
         return true;
       }
 
@@ -160,7 +195,7 @@ bool EspC5Publisher::tryDecodeStatusResponse(PublishResult& result) {
         result.ok = false;
         result.statusCode = -5;
         result.failureStage = PublishFailureStage::kResponseParse;
-        result.latencyMs = to_ms_since_boot(get_absolute_time()) - requestStartedMs_;
+        fillTiming(result, to_ms_since_boot(get_absolute_time()));
         return true;
       }
 
@@ -188,14 +223,21 @@ bool EspC5Publisher::tryDecodeStatusResponse(PublishResult& result) {
           result.ok = false;
           result.statusCode = -5;
           result.failureStage = PublishFailureStage::kResponseParse;
-          result.latencyMs = to_ms_since_boot(get_absolute_time()) - requestStartedMs_;
+          fillTiming(result, to_ms_since_boot(get_absolute_time()));
           return true;
+        }
+
+        if (!ok && statusCode == kEspC5BridgeStatusBusy) {
+          // Backpressure: the bridge discarded the frame unattempted. Signal
+          // the caller to resend rather than resolving the publish as failed.
+          result.statusCode = kEspC5BridgeStatusBusy;
+          return false;
         }
 
         result.ok = ok;
         result.statusCode = statusCode;
         result.failureStage = ok ? PublishFailureStage::kNone : PublishFailureStage::kRecv;
-        result.latencyMs = to_ms_since_boot(get_absolute_time()) - requestStartedMs_;
+        fillTiming(result, to_ms_since_boot(get_absolute_time()));
         return true;
       }
     }
@@ -211,7 +253,7 @@ bool EspC5Publisher::pollPublish(PublishResult& result) {
   result.failureStage = PublishFailureStage::kNone;
   result.lwipError = 0;
 
-  if (state_ != State::kAwaitingStatus) {
+  if (state_ == State::kIdle) {
     return false;
   }
 
@@ -219,23 +261,52 @@ bool EspC5Publisher::pollPublish(PublishResult& result) {
     backgroundPollCallback_(backgroundPollContext_);
   }
 
+  uint32_t nowMs = to_ms_since_boot(get_absolute_time());
+
+  if (state_ == State::kBusyBackoff) {
+    if (nowMs - busyBackoffStartedMs_ < kBusyResendDelayMs) {
+      return false;
+    }
+    ++busyResendsTotal_;
+    sendInFlightFrame();
+    return false;
+  }
+
   if (tryDecodeStatusResponse(result)) {
     if (!keepResponseBody_) {
       result.responseBody.clear();
     }
-    state_ = State::kIdle;
-    rxAccumulator_.clear();
+    finishPublish();
     return true;
   }
 
-  const uint32_t nowMs = to_ms_since_boot(get_absolute_time());
-  if (nowMs - requestStartedMs_ >= timeoutMs_) {
+  nowMs = to_ms_since_boot(get_absolute_time());
+  if (result.statusCode == kEspC5BridgeStatusBusy) {
+    // Keep resending while the publish is younger than one host timeout; past
+    // that the bridge is wedged rather than briefly full, so fail the publish
+    // and let NodeRunner's queue accounting record the loss.
+    if (nowMs - requestStartedMs_ < hostResponseTimeoutMs_) {
+      result = {};
+      result.statusCode = -1;
+      busyBackoffStartedMs_ = nowMs;
+      state_ = State::kBusyBackoff;
+      return false;
+    }
+    result.ok = false;
+    result.failureStage = PublishFailureStage::kTimeout;
+    fillTiming(result, nowMs);
+    finishPublish();
+    return true;
+  }
+
+  // Per attempt: a busy resend gets a full window, because the bridge starts
+  // a fresh postDeadlineMs for it.
+  if (nowMs - attemptStartedMs_ >= hostResponseTimeoutMs_) {
     result.ok = false;
     result.statusCode = -4;
     result.failureStage = PublishFailureStage::kTimeout;
-    result.latencyMs = nowMs - requestStartedMs_;
-    state_ = State::kIdle;
-    rxAccumulator_.clear();
+    fillTiming(result, nowMs);
+    finishPublish();
     return true;
   }
 
@@ -247,8 +318,7 @@ bool EspC5Publisher::publishInProgress() const {
 }
 
 void EspC5Publisher::cancelPublish() {
-  state_ = State::kIdle;
-  rxAccumulator_.clear();
+  finishPublish();
 }
 
 void EspC5Publisher::setBackgroundPollCallback(BackgroundPollCallback callback, void* context) {
@@ -259,6 +329,7 @@ void EspC5Publisher::setBackgroundPollCallback(BackgroundPollCallback callback, 
 void EspC5Publisher::applyLinkStatus(const LinkStatusPayload& status) {
   linkUp_ = status.linkUp;
   lastRssiDbm_ = status.rssiDbm;
+  lastLinkStatus_ = status;
 }
 
 }  // namespace mmpr

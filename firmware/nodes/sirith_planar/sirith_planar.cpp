@@ -207,7 +207,7 @@ mmpr::IAudioSource& gActiveAudioSource = nodecfg::kUsePdmAudio
 // are unverified without a bench).
 mmpr::SpiHostLinkConfig gSpiLinkConfig = {
     spi0,
-    4 * 1000 * 1000,
+    nodecfg::kEspSpiBaudHz,
     nodecfg::kEspSpiSckPin,
     nodecfg::kEspSpiTxPin,
     nodecfg::kEspSpiRxPin,
@@ -215,7 +215,8 @@ mmpr::SpiHostLinkConfig gSpiLinkConfig = {
     nodecfg::kEspHostWakePin,
 };
 mmpr::SpiHostLink gSpiLink(gSpiLinkConfig);
-mmpr::EspC5Publisher gPublisher(nodecfg::kIngestPath, gSpiLink, nodecfg::kHttpTimeoutMs);
+mmpr::EspC5Publisher gPublisher(
+    nodecfg::kIngestPath, gSpiLink, nodecfg::kBridgePostDeadlineMs, nodecfg::kHostResponseTimeoutMs);
 mmpr::NodeClock gClock;
 
 mmpr::IEnvironmentalSource* gEnvironmentalSource =
@@ -275,6 +276,18 @@ void setupUplink() {
               static_cast<unsigned>(nodecfg::kEspSpiCsPin),
               static_cast<unsigned>(nodecfg::kEspHostWakePin),
               nodecfg::kIngestPath);
+  // Logged so a bench run records the budget it actually ran with (the tetra
+  // loss was only diagnosable once queue depth and timeouts were visible).
+  std::printf("[planar] uplink spi=%lu Hz post_deadline=%lu ms host_timeout=%lu ms "
+              "queue=%u slots (%lu ms) ring=%lu frames batch=%u\n",
+              static_cast<unsigned long>(nodecfg::kEspSpiBaudHz),
+              static_cast<unsigned long>(nodecfg::kBridgePostDeadlineMs),
+              static_cast<unsigned long>(nodecfg::kHostResponseTimeoutMs),
+              static_cast<unsigned>(nodecfg::kAudioQueueSlots),
+              static_cast<unsigned long>(nodecfg::kAudioQueueSlots * nodecfg::kActiveAudioFrameSamples * 1000u /
+                                         nodecfg::kActiveAudioSampleRateHz),
+              static_cast<unsigned long>(nodecfg::kAudioRingFrames),
+              static_cast<unsigned>(nodecfg::kPublishBatchFrames));
 }
 
 void setupOptionalPeripherals() {

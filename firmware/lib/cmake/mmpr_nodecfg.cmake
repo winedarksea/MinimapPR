@@ -66,7 +66,10 @@ function(mmpr_apply_nodecfg target node_config_path)
             TCP_SND_BUF_MSS
             TCP_TMR_INTERVAL_MS
             TARGET_QUEUE_MS
-            AUDIO_BUFFER_RAM_CEILING_KB)
+            AUDIO_BUFFER_RAM_CEILING_KB
+            ESP_SPI_BAUD_HZ
+            BRIDGE_POST_DEADLINE_MS
+            HOST_RESPONSE_TIMEOUT_MS)
         if(DEFINED MMPR_NODECFG_${_def})
             target_compile_definitions(${target}
                     PRIVATE MMPR_NODECFG_${_def}=${MMPR_NODECFG_${_def}})

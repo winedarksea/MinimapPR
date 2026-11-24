@@ -36,7 +36,7 @@ int main() {
     std::vector<uint8_t> wire;
     const std::string path = "/api/v1/ingest/binary";
     const std::string body = std::string("MMB3") + std::string(37, '\x07');  // stand-in opaque MMB3 bytes
-    mmpr::encodeDataPostFrame(/*seq=*/42, path, body, wire);
+    mmpr::encodeDataPostFrame(/*seq=*/42, /*postDeadlineMs=*/3000, path, body, wire);
 
     EspC5Frame decoded;
     size_t consumed = 0;
@@ -47,15 +47,27 @@ int main() {
     check(decoded.seq == 42, "DATA_POST decoded seq round-trips");
 
     std::string decodedPath, decodedBody;
-    check(mmpr::decodeDataPostPayload(decoded.payload, decodedPath, decodedBody), "DATA_POST payload splits");
+    uint32_t decodedDeadlineMs = 0;
+    check(mmpr::decodeDataPostPayload(decoded.payload, decodedDeadlineMs, decodedPath, decodedBody),
+          "DATA_POST payload splits");
+    check(decodedDeadlineMs == 3000, "DATA_POST postDeadlineMs round-trips");
     check(decodedPath == path, "DATA_POST path round-trips");
     check(decodedBody == body, "DATA_POST opaque MMB3 body round-trips byte-for-byte");
+
+    // Truncations inside the fixed deadline+pathLen prefix, and a pathLen that
+    // overruns the payload, must be rejected rather than read out of bounds.
+    std::vector<uint8_t> shortPayload(decoded.payload.begin(), decoded.payload.begin() + 5);
+    check(!mmpr::decodeDataPostPayload(shortPayload, decodedDeadlineMs, decodedPath, decodedBody),
+          "DATA_POST payload shorter than the fixed prefix is rejected");
+    std::vector<uint8_t> overrun(decoded.payload.begin(), decoded.payload.begin() + 6 + path.size() - 1);
+    check(!mmpr::decodeDataPostPayload(overrun, decodedDeadlineMs, decodedPath, decodedBody),
+          "DATA_POST pathLen overrunning the payload is rejected");
   }
 
   // --- Corrupt-CRC rejection ---------------------------------------------------
   {
     std::vector<uint8_t> wire;
-    mmpr::encodeDataPostFrame(1, "/x", "body", wire);
+    mmpr::encodeDataPostFrame(1, 3000, "/x", "body", wire);
     // Flip a bit deep in the payload; CRC must catch it.
     wire[wire.size() - mmpr::kEspC5FrameCrcSize - 1] ^= 0xFF;
 
@@ -67,7 +79,7 @@ int main() {
   }
   {
     std::vector<uint8_t> wire;
-    mmpr::encodeDataPostFrame(1, "/x", "body", wire);
+    mmpr::encodeDataPostFrame(1, 3000, "/x", "body", wire);
     // Flip a bit in the CRC field itself.
     wire.back() ^= 0x01;
 
@@ -80,7 +92,7 @@ int main() {
   // --- Bad sync byte ------------------------------------------------------------
   {
     std::vector<uint8_t> wire;
-    mmpr::encodeDataPostFrame(1, "/x", "body", wire);
+    mmpr::encodeDataPostFrame(1, 3000, "/x", "body", wire);
     wire[0] = 0x00;
 
     EspC5Frame decoded;
@@ -93,7 +105,7 @@ int main() {
   // --- Truncated / incomplete frame handling -------------------------------------
   {
     std::vector<uint8_t> wire;
-    mmpr::encodeDataPostFrame(7, "/api/v1/ingest/binary", "some-mmb3-bytes", wire);
+    mmpr::encodeDataPostFrame(7, 3000, "/api/v1/ingest/binary", "some-mmb3-bytes", wire);
 
     // Only the sync byte -- header not even fully in yet.
     EspC5Frame decoded;
@@ -120,7 +132,7 @@ int main() {
   // --- Oversized/garbage length field -------------------------------------------
   {
     std::vector<uint8_t> wire;
-    mmpr::encodeDataPostFrame(1, "/x", "body", wire);
+    mmpr::encodeDataPostFrame(1, 3000, "/x", "body", wire);
     // Stomp the len field (bytes [4..8): sync(1)+type(1)+seq(2)=offset 4,
     // little-endian u32) with something absurd.
     wire[4] = 0xFF;
@@ -166,11 +178,29 @@ int main() {
     check(statusCode == -3, "POST_STATUS(failure) round-trips negative statusCode");
   }
 
+  // --- POST_STATUS bridge BUSY (backpressure) round-trip -------------------------
+  {
+    std::vector<uint8_t> wire;
+    mmpr::encodePostStatusFrame(/*seq=*/11, /*ok=*/false, mmpr::kEspC5BridgeStatusBusy, wire);
+    EspC5Frame decoded;
+    size_t consumed = 0;
+    mmpr::decodeEspC5Frame(wire.data(), wire.size(), decoded, consumed);
+    bool ok = true;
+    int32_t statusCode = 0;
+    check(mmpr::decodePostStatusPayload(decoded.payload, ok, statusCode), "POST_STATUS(busy) parses");
+    check(!ok && statusCode == mmpr::kEspC5BridgeStatusBusy, "POST_STATUS(busy) round-trips the bridge code");
+  }
+
   // --- LINK_STATUS frame shape (stub: no handler wired up, but shape is fixed) --
   {
     mmpr::LinkStatusPayload status;
     status.linkUp = true;
     status.rssiDbm = -47;
+    status.wifiChannel = 149;
+    status.band5GHz = true;
+    status.tcpRetransmitsTotal = 0x01020304u;
+    status.bridgeBufferHighWaterBytes = 65536u;
+    status.postsRefusedBusyTotal = 7u;
 
     std::vector<uint8_t> wire;
     mmpr::encodeLinkStatusFrame(/*seq=*/3, status, wire);
@@ -185,6 +215,13 @@ int main() {
     check(mmpr::decodeLinkStatusPayload(decoded.payload, decodedStatus), "LINK_STATUS payload parses");
     check(decodedStatus.linkUp == true, "LINK_STATUS linkUp round-trips");
     check(decodedStatus.rssiDbm == -47, "LINK_STATUS rssiDbm round-trips (negative dBm)");
+    check(decodedStatus.wifiChannel == 149, "LINK_STATUS wifiChannel round-trips");
+    check(decodedStatus.band5GHz, "LINK_STATUS band5GHz round-trips");
+    check(decodedStatus.tcpRetransmitsTotal == 0x01020304u, "LINK_STATUS tcpRetransmitsTotal round-trips");
+    check(decodedStatus.bridgeBufferHighWaterBytes == 65536u, "LINK_STATUS buffer high-water round-trips");
+    check(decodedStatus.postsRefusedBusyTotal == 7u, "LINK_STATUS postsRefusedBusyTotal round-trips");
+    std::vector<uint8_t> shortLink(decoded.payload.begin(), decoded.payload.end() - 1);
+    check(!mmpr::decodeLinkStatusPayload(shortLink, decodedStatus), "truncated LINK_STATUS payload is rejected");
   }
 
   // --- WIFI_CONFIG frame shape (stub: no handler wired up, but shape is fixed) --

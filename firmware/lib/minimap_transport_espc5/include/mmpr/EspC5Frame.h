@@ -97,26 +97,57 @@ EspC5DecodeStatus decodeEspC5Frame(
     size_t& consumedBytes);
 
 // --- DATA_POST helpers ------------------------------------------------------
-// DATA_POST payload layout: [u16 pathLen][path bytes][body bytes (rest)].
+// DATA_POST payload layout:
+//   [u32 postDeadlineMs][u16 pathLen][path bytes][body bytes (rest)].
+// `postDeadlineMs` is the bridge's whole budget for this POST (connect, send,
+// TCP loss recovery, response). The host owns the timeout chain so the
+// ordering "each timeout outlasts the recovery of the layer below it" is
+// enforced in one place (sirith_planar node_config.h) instead of relying on a
+// matching constant in the C5 firmware: the bridge must give up and answer
+// kEspC5BridgeStatusDeadline by then, and the host waits strictly longer. A
+// host timeout that fired while the C5 was still working is the planar
+// equivalent of the tetra abort/reconnect spiral (2026-11-23 bench).
 // `body` is the already-encoded, opaque MMB3 binary blob built by
 // NodeProtocol::buildBinaryStoreForwardPayloadParts -- this module never
 // interprets it, only carries it.
 void encodeDataPostFrame(
     uint16_t seq,
+    uint32_t postDeadlineMs,
     const std::string& endpointPath,
     const std::string& body,
     std::vector<uint8_t>& outBytes);
 
-// Splits a decoded DATA_POST frame's payload back into path/body. Returns
-// false if the payload is too short to contain a valid pathLen prefix (or the
-// declared pathLen overruns the payload).
+// Splits a decoded DATA_POST frame's payload back into deadline/path/body.
+// Returns false if the payload is too short for the fixed prefix or the
+// declared pathLen overruns the payload.
 bool decodeDataPostPayload(
     const std::vector<uint8_t>& payload,
+    uint32_t& outPostDeadlineMs,
     std::string& outPath,
     std::string& outBody);
 
 // --- POST_STATUS helpers -----------------------------------------------------
 // POST_STATUS payload layout: [u8 ok][i32 statusCode] (5 bytes, fixed).
+// statusCode is the HTTP status when the POST reached the server, otherwise
+// one of the bridge codes below (with ok = 0).
+//
+// kEspC5BridgeStatusBusy is backpressure, not failure: the C5 had no buffer
+// for this DATA_POST and discarded it without attempting the POST. The host
+// resends the same frame rather than dropping audio. The bridge must never
+// discard a DATA_POST silently -- an unacknowledged drop is indistinguishable
+// from a slow server and costs the host its whole timeout.
+inline constexpr int32_t kEspC5BridgeStatusBusy = -100;
+// The POST did not complete within the frame's postDeadlineMs.
+inline constexpr int32_t kEspC5BridgeStatusDeadline = -101;
+// No Wi-Fi association / IP when the DATA_POST arrived.
+inline constexpr int32_t kEspC5BridgeStatusNoLink = -102;
+// TCP connect or send failed before a response (reset, refused, DNS).
+inline constexpr int32_t kEspC5BridgeStatusTransportError = -103;
+
+// Minimum margin the host's per-attempt POST_STATUS wait keeps over the
+// DATA_POST's postDeadlineMs (+ SPI transfer), so the bridge's deadline reply
+// always arrives before the host gives up.
+inline constexpr uint32_t kEspC5MinHostTimeoutMarginMs = 100;
 void encodePostStatusFrame(uint16_t seq, bool ok, int32_t statusCode, std::vector<uint8_t>& outBytes);
 bool decodePostStatusPayload(const std::vector<uint8_t>& payload, bool& outOk, int32_t& outStatusCode);
 
@@ -124,11 +155,23 @@ bool decodePostStatusPayload(const std::vector<uint8_t>& payload, bool& outOk, i
 // Stubs: encode/decode exist so the layout is fixed and testable now, even
 // though no handler acts on these frames yet (LINK_STATUS is unsolicited
 // C5->host telemetry; WIFI_CONFIG provisioning is a future host->C5 op).
+//
+// LINK_STATUS carries the counters that made the Pico CYW43 loss diagnosable
+// on the 2026-11-23 bench (retransmits, buffer high-water) -- without them a
+// stall on the far side of the SPI link looks identical to a slow server.
 struct LinkStatusPayload {
   bool linkUp = false;
   int8_t rssiDbm = 0;
+  uint8_t wifiChannel = 0;              // 0 = unknown / not associated
+  bool band5GHz = false;
+  uint32_t tcpRetransmitsTotal = 0;     // monotonic since bridge boot
+  uint32_t bridgeBufferHighWaterBytes = 0;
+  uint32_t postsRefusedBusyTotal = 0;   // DATA_POSTs answered kEspC5BridgeStatusBusy
 };
-// Payload layout: [u8 linkUp][i8 rssiDbm] (2 bytes, fixed).
+// Payload layout (16 bytes, fixed):
+//   [u8 linkUp][i8 rssiDbm][u8 wifiChannel][u8 band5GHz]
+//   [u32 tcpRetransmitsTotal][u32 bridgeBufferHighWaterBytes][u32 postsRefusedBusyTotal]
+inline constexpr size_t kEspC5LinkStatusPayloadBytes = 16;
 void encodeLinkStatusFrame(uint16_t seq, const LinkStatusPayload& status, std::vector<uint8_t>& outBytes);
 bool decodeLinkStatusPayload(const std::vector<uint8_t>& payload, LinkStatusPayload& outStatus);
 
