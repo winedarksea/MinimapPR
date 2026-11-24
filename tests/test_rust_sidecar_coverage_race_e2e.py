@@ -9,18 +9,19 @@ must contain cross-node TDOA pairs.
 
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 
 import numpy as np
 
 from tests.helpers import SIRITH_TETRA_SENSOR_OFFSETS_M
-from tests.test_rust_manifest_handoff_e2e import (
-    _http_json,
-    _running_rust_sidecar,
-    _store_forward_payload,
-    _wait_for_live_dsp_results,
+from tests.rust_sidecar_e2e_helpers import (
+    fetch_live_dsp_results,
+    http_json,
+    post_store_forward_ingest,
+    running_rust_sidecar,
+    store_forward_payload,
+    wait_for_live_dsp_results,
 )
 
 SAMPLE_RATE_HZ = 16_000
@@ -34,7 +35,6 @@ CLUSTER_ID = "coverage-race-live"
 FRAME_COUNT = 60
 SIGNAL_SEED = 20261122
 SIGNAL_AMPLITUDE = 0.3
-RESULTS_POLL_LIMIT = 200
 E2E_STALL_BUDGET_SECONDS = 10.0
 E2E_TOTAL_CAP_SECONDS = 20.0
 
@@ -52,8 +52,8 @@ def _cluster_sensor_positions() -> dict[str, list[float]]:
     return positions
 
 
-def _frame_payload(node_id: str, frame_index: int, start_time_ns: int, frame_channels: np.ndarray) -> bytes:
-    payload = _store_forward_payload(
+def _frame_payload(node_id: str, frame_index: int, start_time_ns: int, frame_channels: np.ndarray) -> dict:
+    payload = store_forward_payload(
         node_id=node_id,
         node_type="sirith_tetra",
         sensor_offsets_m=[[float(axis) for axis in offset] for offset in SIRITH_TETRA_SENSOR_OFFSETS_M],
@@ -67,18 +67,7 @@ def _frame_payload(node_id: str, frame_index: int, start_time_ns: int, frame_cha
     frame = payload["buffered_frames"][0]["frame"]
     frame["start_sample_index"] = frame_index * FRAME_SAMPLES
     frame["end_sample_index"] = (frame_index + 1) * FRAME_SAMPLES
-    return json.dumps(payload).encode("utf-8")
-
-
-def _post_frame(port: int, body: bytes) -> None:
-    response = _http_json(
-        port,
-        "/api/v1/ingest/store-forward",
-        method="POST",
-        body=body,
-        headers={"Content-Type": "application/json"},
-    )
-    assert response["accepted"] is True
+    return payload
 
 
 def _is_cross_node_pair(pair: dict) -> bool:
@@ -110,11 +99,11 @@ def _replay_with_node_b_one_frame_late(coverage_wait_enabled: bool, tmp_path: Pa
     }
     start_time_ns = time.time_ns()
 
-    def frame_body(node_id: str, frame_index: int) -> bytes:
+    def frame_body(node_id: str, frame_index: int) -> dict:
         samples = slice(frame_index * FRAME_SAMPLES, (frame_index + 1) * FRAME_SAMPLES)
         return _frame_payload(node_id, frame_index, start_time_ns, channels_by_node[node_id][:, samples])
 
-    with _running_rust_sidecar(
+    with running_rust_sidecar(
         tmp_path,
         extra_env={
             "MINIMAPPR_CLASSIFICATION_WINDOW_SECONDS": "15.0",
@@ -140,17 +129,17 @@ def _replay_with_node_b_one_frame_late(coverage_wait_enabled: bool, tmp_path: Pa
             return len(localizations_by_manifest_id) >= 2
 
         for frame_index in range(FRAME_COUNT):
-            _post_frame(port, frame_body(NODE_IDS[0], frame_index))
+            post_store_forward_ingest(port, frame_body(NODE_IDS[0], frame_index))
             if frame_index > 0:
-                _post_frame(port, frame_body(NODE_IDS[1], frame_index - 1))
-            collect_localizations(_http_json(port, f"/api/v1/dsp/results?limit={RESULTS_POLL_LIMIT}"))
-        _post_frame(port, frame_body(NODE_IDS[1], FRAME_COUNT - 1))
-        _wait_for_live_dsp_results(
+                post_store_forward_ingest(port, frame_body(NODE_IDS[1], frame_index - 1))
+            collect_localizations(fetch_live_dsp_results(port))
+        post_store_forward_ingest(port, frame_body(NODE_IDS[1], FRAME_COUNT - 1))
+        wait_for_live_dsp_results(
             port,
             description="two cadence-triggered cluster localizations",
             predicate=collect_localizations,
         )
-        status = _http_json(port, "/api/v1/dsp/status")
+        status = http_json(port, "/api/v1/dsp/status")
     assert isinstance(status, dict)
     return list(localizations_by_manifest_id.values()), status
 
