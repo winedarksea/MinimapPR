@@ -65,7 +65,9 @@ class HotPathScenario:
     settle_seconds: float = 6.0
 
     def to_json_dict(self) -> dict:
-        return asdict(self)
+        # Round-trip through JSON so tuples become lists: a freshly built dict
+        # must compare equal to one loaded from a result file.
+        return json.loads(json.dumps(asdict(self)))
 
 
 @dataclass(frozen=True)

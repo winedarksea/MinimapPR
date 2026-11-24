@@ -1,0 +1,283 @@
+{
+  "checkout": {
+    "branch": "loc/m0-scoring",
+    "commit": "440e6bb2904a61f8cc4cd913d4f81f46d77c6762",
+    "uncommitted_paths_under_runtime_directories": []
+  },
+  "machine": {
+    "cpu_model": "Apple M2",
+    "logical_cpu_count": 8,
+    "machine": "arm64",
+    "memory_gib": 24.0,
+    "platform": "macOS-27.2.1-arm64-arm-64bit",
+    "python": "3.12.13"
+  },
+  "metrics": {
+    "app_peak_rss_mb": 287.890625,
+    "app_stream_reconnect_count": 0.0,
+    "buffer_discontinuity_count": 0.0,
+    "classification_backlog_drop_count": 0.0,
+    "classification_max_completed_lag_seconds": 19.139777,
+    "detection_count": 2.0,
+    "detection_snippet_bytes_written": 1451140.0,
+    "ingest_post_round_trip_p50_ms": 2.2040205,
+    "ingest_post_round_trip_p95_ms": 5.598373349999999,
+    "ingest_queue_drop_count": 0.0,
+    "ingest_rejected_post_count": 0.0,
+    "packet_gap_count": 0.0,
+    "raw_audio_disk_bytes_written": 0.0,
+    "raw_audio_disk_files_written": 0.0,
+    "raw_audio_out_of_order_span_count": 0.0,
+    "sidecar_peak_rss_mb": 184.015625,
+    "solve_count": 45.0,
+    "solve_latency_p50_ms": 584.9365,
+    "solve_latency_p95_ms": 1084.0744086
+  },
+  "notes": "Milestone 0 baseline. Commit 440e6bb is branch loc/m0-scoring; its runtime code (minimappr/, minimappr-ingest-sidecar/, minimappr-core/ minus the new minimappr/sim scoring modules) is identical to main 6e82644. Recorded 2026-11-24 with `scripts/hot_path_release_gate.py run --checkout . --scenario full --repeat 3` on a shared dev machine (other agents building; see per-run load averages). Debug sidecar build.",
+  "observer_complete": true,
+  "repeat_count": 3,
+  "runs": [
+    {
+      "components": {
+        "app": {
+          "buffer_rate_mismatch_wipes": 0,
+          "buffer_reanchors": 0,
+          "classification_drops": 0,
+          "detections_emitted": 3,
+          "frame_sequence_gaps": 0,
+          "frames_zero_padded_degraded": 0,
+          "stage_drops_backpressure": 0,
+          "triggers_dropped_queue_full": 0
+        },
+        "forwarded_raw_audio_duplicated_samples": 0,
+        "forwarded_raw_audio_missing_samples": 0,
+        "forwarded_raw_audio_unmapped_streams": 0,
+        "load_average_1_5_15_min_at_start": [
+          6.28,
+          9.32,
+          12.34
+        ],
+        "observed_classifier_renders": 39,
+        "observer_malformed_events": 0,
+        "observer_replay_gap_events": 0,
+        "observer_stream_error": null,
+        "raw_audio_written_paths": [],
+        "sidecar_coverage_wait_stop_reasons": {
+          "all_covered": 30,
+          "stalled": 18
+        },
+        "sidecar_discontinuities": 0,
+        "sidecar_queue_drops": 0,
+        "sidecar_sequence_gaps": 0,
+        "sidecar_storage_mode": "memory_only_live_path",
+        "sidecar_total_localization_results": 84,
+        "unmapped_solve_count": 0
+      },
+      "metrics": {
+        "app_peak_rss_mb": 287.890625,
+        "app_stream_reconnect_count": 0,
+        "buffer_discontinuity_count": 0,
+        "classification_backlog_drop_count": 0,
+        "classification_max_completed_lag_seconds": 19.139777,
+        "detection_count": 2,
+        "detection_snippet_bytes_written": 971096,
+        "ingest_post_round_trip_p50_ms": 2.039583,
+        "ingest_post_round_trip_p95_ms": 3.8371817999999944,
+        "ingest_queue_drop_count": 0,
+        "ingest_rejected_post_count": 0,
+        "packet_gap_count": 0,
+        "raw_audio_disk_bytes_written": 0,
+        "raw_audio_disk_files_written": 0,
+        "raw_audio_out_of_order_span_count": 0,
+        "sidecar_peak_rss_mb": 184.015625,
+        "solve_count": 45,
+        "solve_latency_p50_ms": 584.9365,
+        "solve_latency_p95_ms": 1066.8663996
+      },
+      "served_minimappr_file": "/Users/colincatlin/Documents-NoCloud/MinimapPR/.claude/worktrees/m0-scoring/minimappr/__init__.py"
+    },
+    {
+      "components": {
+        "app": {
+          "buffer_rate_mismatch_wipes": 0,
+          "buffer_reanchors": 0,
+          "classification_drops": 0,
+          "detections_emitted": 3,
+          "frame_sequence_gaps": 0,
+          "frames_zero_padded_degraded": 0,
+          "stage_drops_backpressure": 0,
+          "triggers_dropped_queue_full": 0
+        },
+        "forwarded_raw_audio_duplicated_samples": 0,
+        "forwarded_raw_audio_missing_samples": 0,
+        "forwarded_raw_audio_unmapped_streams": 0,
+        "load_average_1_5_15_min_at_start": [
+          13.11,
+          10.15,
+          12.4
+        ],
+        "observed_classifier_renders": 39,
+        "observer_malformed_events": 0,
+        "observer_replay_gap_events": 0,
+        "observer_stream_error": null,
+        "raw_audio_written_paths": [],
+        "sidecar_coverage_wait_stop_reasons": {
+          "all_covered": 30,
+          "stalled": 18
+        },
+        "sidecar_discontinuities": 0,
+        "sidecar_queue_drops": 0,
+        "sidecar_sequence_gaps": 0,
+        "sidecar_storage_mode": "memory_only_live_path",
+        "sidecar_total_localization_results": 84,
+        "unmapped_solve_count": 0
+      },
+      "metrics": {
+        "app_peak_rss_mb": 291.8125,
+        "app_stream_reconnect_count": 0,
+        "buffer_discontinuity_count": 0,
+        "classification_backlog_drop_count": 0,
+        "classification_max_completed_lag_seconds": 19.119819,
+        "detection_count": 2,
+        "detection_snippet_bytes_written": 1473972,
+        "ingest_post_round_trip_p50_ms": 2.2040205,
+        "ingest_post_round_trip_p95_ms": 5.598373349999999,
+        "ingest_queue_drop_count": 0,
+        "ingest_rejected_post_count": 0,
+        "packet_gap_count": 0,
+        "raw_audio_disk_bytes_written": 0,
+        "raw_audio_disk_files_written": 0,
+        "raw_audio_out_of_order_span_count": 0,
+        "sidecar_peak_rss_mb": 186.3125,
+        "solve_count": 45,
+        "solve_latency_p50_ms": 565.636417,
+        "solve_latency_p95_ms": 1084.0744086
+      },
+      "served_minimappr_file": "/Users/colincatlin/Documents-NoCloud/MinimapPR/.claude/worktrees/m0-scoring/minimappr/__init__.py"
+    },
+    {
+      "components": {
+        "app": {
+          "buffer_rate_mismatch_wipes": 0,
+          "buffer_reanchors": 0,
+          "classification_drops": 0,
+          "detections_emitted": 3,
+          "frame_sequence_gaps": 0,
+          "frames_zero_padded_degraded": 0,
+          "stage_drops_backpressure": 0,
+          "triggers_dropped_queue_full": 0
+        },
+        "forwarded_raw_audio_duplicated_samples": 0,
+        "forwarded_raw_audio_missing_samples": 0,
+        "forwarded_raw_audio_unmapped_streams": 0,
+        "load_average_1_5_15_min_at_start": [
+          7.87,
+          9.18,
+          11.88
+        ],
+        "observed_classifier_renders": 39,
+        "observer_malformed_events": 0,
+        "observer_replay_gap_events": 0,
+        "observer_stream_error": null,
+        "raw_audio_written_paths": [],
+        "sidecar_coverage_wait_stop_reasons": {
+          "all_covered": 30,
+          "stalled": 18
+        },
+        "sidecar_discontinuities": 0,
+        "sidecar_queue_drops": 0,
+        "sidecar_sequence_gaps": 0,
+        "sidecar_storage_mode": "memory_only_live_path",
+        "sidecar_total_localization_results": 84,
+        "unmapped_solve_count": 0
+      },
+      "metrics": {
+        "app_peak_rss_mb": 219.15625,
+        "app_stream_reconnect_count": 0,
+        "buffer_discontinuity_count": 0,
+        "classification_backlog_drop_count": 0,
+        "classification_max_completed_lag_seconds": 19.239682,
+        "detection_count": 2,
+        "detection_snippet_bytes_written": 1451140,
+        "ingest_post_round_trip_p50_ms": 2.2433125,
+        "ingest_post_round_trip_p95_ms": 7.5305334499999645,
+        "ingest_queue_drop_count": 0,
+        "ingest_rejected_post_count": 0,
+        "packet_gap_count": 0,
+        "raw_audio_disk_bytes_written": 0,
+        "raw_audio_disk_files_written": 0,
+        "raw_audio_out_of_order_span_count": 0,
+        "sidecar_peak_rss_mb": 168.53125,
+        "solve_count": 45,
+        "solve_latency_p50_ms": 613.278959,
+        "solve_latency_p95_ms": 1248.1085752
+      },
+      "served_minimappr_file": "/Users/colincatlin/Documents-NoCloud/MinimapPR/.claude/worktrees/m0-scoring/minimappr/__init__.py"
+    }
+  ],
+  "scenario": {
+    "cluster_id": "hot-path-gate",
+    "duration_seconds": 40.0,
+    "event_amplitude": 0.3,
+    "event_duration_seconds": 0.35,
+    "event_interval_seconds": 1.5,
+    "frame_samples": 512,
+    "frames_per_post": 4,
+    "name": "full",
+    "nodes": [
+      {
+        "join_seconds": 0.0,
+        "leave_seconds": 40.0,
+        "node_id": "gate-node-a",
+        "position_m": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "join_seconds": 0.0,
+        "leave_seconds": 25.0,
+        "node_id": "gate-node-b",
+        "position_m": [
+          3.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "join_seconds": 10.0,
+        "leave_seconds": 40.0,
+        "node_id": "gate-node-c",
+        "position_m": [
+          0.0,
+          3.0,
+          0.0
+        ]
+      },
+      {
+        "join_seconds": 18.0,
+        "leave_seconds": 32.0,
+        "node_id": "gate-node-d",
+        "position_m": [
+          3.0,
+          3.0,
+          0.0
+        ]
+      }
+    ],
+    "noise_rms": 0.004,
+    "per_node_post_skew_seconds": 0.007,
+    "sample_rate_hz": 16000,
+    "settle_seconds": 6.0,
+    "signal_seed": 20261124,
+    "slow_classifier_delay_seconds": 2.5,
+    "source_position_m": [
+      1.5,
+      7.0,
+      1.2
+    ]
+  },
+  "schema_version": 1,
+  "sidecar_build_profile": "debug"
+}
