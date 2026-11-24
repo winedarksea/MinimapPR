@@ -11,9 +11,9 @@ use super::*;
 use minimappr_core::localization_sensor_entry::{CoordinateFrameKind, SolveExclusionReason};
 
 /// Production cadence + cooldown fire at frames 0, 25 and 50 of a 60-frame run.
-const FRAMES_PER_RUN: usize = 60;
-const FIRST_SHARED_TRIGGER_FRAME: usize = 25;
-const SECOND_SHARED_TRIGGER_FRAME: usize = 50;
+pub(super) const FRAMES_PER_RUN: usize = 60;
+pub(super) const FIRST_SHARED_TRIGGER_FRAME: usize = 25;
+pub(super) const SECOND_SHARED_TRIGGER_FRAME: usize = 50;
 /// Identical audio in either arrival order must give the same lag to within
 /// the correlator's interpolation step.
 const ARRIVAL_ORDER_LAG_TOLERANCE_SECONDS: f64 = 0.25 / FIXTURE_SAMPLE_RATE_HZ as f64;
@@ -274,7 +274,7 @@ async fn late_packet_releasing_a_parked_solve_keeps_the_short_baseline_exclusion
 
 /// Delivers node a's frames on time and node b one frame late, for frames
 /// `first..=last`; returns with node b's `last` frame still undelivered.
-async fn deliver_with_late_node(
+pub(super) async fn deliver_with_late_node(
     harness: &mut RaceHarness,
     on_time: &FixtureNode,
     late: &FixtureNode,
@@ -316,7 +316,6 @@ async fn deliver_late_frame(
 }
 
 #[tokio::test]
-#[ignore = "localization overhaul milestone 1: R2 state/API in place; needs the R1 sensor registry to read DspWorkerState.site_geometry and R6 solve provenance"]
 async fn geometry_push_while_a_solve_is_parked_applies_only_to_later_solves() {
     const SITE_FRAME_ID: &str = "e1-site-frame";
     const GEOMETRY_PUSH_REVISION: u64 = 7;

@@ -43,6 +43,14 @@ class SolveBufferScope(StrEnum):
     AUTOMATIC_SITE_CLUSTER = "automatic_site_cluster"
 
 
+class NodeLocalRoutingReason(StrEnum):
+    NODE_ARRAY_GEOMETRY_UNUSABLE = "node_array_geometry_unusable"
+    NODE_POSITION_UNTRUSTED_NO_OVERRIDE = "node_position_untrusted_no_override"
+    EXPLICIT_CLUSTER_INCOMPLETE = "explicit_cluster_incomplete"
+    EXPLICIT_CLUSTER_BELOW_MINIMUM_SENSORS = "explicit_cluster_below_minimum_sensors"
+    NODE_CHANNELS_MISSING_FROM_EXPLICIT_CLUSTER = "node_channels_missing_from_explicit_cluster"
+
+
 class CoordinateFrameKind(StrEnum):
     SITE_ENU = "site_enu"
     SIDECAR_AUTOMATIC_ENU = "sidecar_automatic_enu"
@@ -143,6 +151,8 @@ class SolveProvenance:
     buffer_scope: SolveBufferScope
     cluster_id: str | None
     reporting_node_id: str
+    # Why the reporter solved node-local; None for cluster solves.
+    node_local_routing_reason: NodeLocalRoutingReason | None
     coordinate_frame: SolveCoordinateFrame
     layout_revision: int
     geometry_push_revision: int | None
@@ -232,6 +242,11 @@ def parse_solve_provenance(payload: Any) -> SolveProvenance:
         buffer_scope=_require_enum(mapping, "buffer_scope", SolveBufferScope),
         cluster_id=_optional_string(mapping, "cluster_id"),
         reporting_node_id=_require_nonempty_string(mapping, "reporting_node_id"),
+        node_local_routing_reason=(
+            None
+            if _require_key(mapping, "node_local_routing_reason") is None
+            else _require_enum(mapping, "node_local_routing_reason", NodeLocalRoutingReason)
+        ),
         coordinate_frame=_parse_coordinate_frame(_require_key(mapping, "coordinate_frame")),
         layout_revision=_require_int(mapping, "layout_revision"),
         geometry_push_revision=_optional_int(mapping, "geometry_push_revision"),

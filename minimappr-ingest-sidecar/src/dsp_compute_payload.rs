@@ -4,6 +4,11 @@
 use super::*;
 pub(crate) use minimappr_core::localization_sensor_entry::SolveAttemptKind;
 
+/// A new `solve_provenance.solve_id`.
+pub(crate) fn new_solve_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 /// Default = no coverage and an empty window (a channel left out of the solve).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct LocalizationChannelState {
@@ -37,7 +42,10 @@ pub(crate) struct ComputePayload {
     pub(crate) localization_window_center_time_ns: i128,
     /// Ordered sensors + positions snapshot taken at ingest; index = buffer channel.
     pub(crate) sensor_layout: Arc<SolveSensorLayout>,
-    /// Why this payload solves (or `not_attempted`); published by R6.
+    /// `solve_provenance.solve_id`. Fresh per payload, except a render that
+    /// covers an earlier event-triggered solve, which repeats that solve's id.
+    pub(crate) solve_id: String,
+    /// Why this payload solves (or `not_attempted`).
     pub(crate) attempt_kind: SolveAttemptKind,
     /// Pairs SRP/covariance/render may use (admit-all until milestone 2, R7).
     pub(crate) pair_admission: SolvePairAdmission,

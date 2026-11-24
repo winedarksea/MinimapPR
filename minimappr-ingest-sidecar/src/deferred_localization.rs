@@ -13,7 +13,8 @@ use crate::{
     dsp_worker::{
         channel_coverage_ending_at, channel_windows_ending_at,
         channel_windows_ending_at_with_gap_concealment, classifier_render_bounds_from_windows,
-        eligible_localization_channels, localization_channel_states_centered, ComputePayload,
+        eligible_localization_channels, localization_channel_states_centered, new_solve_id,
+        ComputePayload,
     },
     localization_coverage_wait::{
         evaluate_window_coverage, ChannelStreamActivityTracker, CoverageWaitClock,
@@ -112,9 +113,9 @@ impl DeferredLocalizationScheduler {
 
     /// Batch-boundary path (end of every DSP poll cycle): re-evaluates every
     /// pending window. Deciding only here, never mid-batch, matters because
-    /// `merge_pending_manifests_for_batch` processes a backlog newest-first:
-    /// mid-batch a member can show frame k+1 with frame k still a hole that
-    /// the same batch backfills a moment later.
+    /// network skew interleaves members within one batch: mid-batch a member
+    /// can show frame k+1 with frame k still a hole that the same batch
+    /// backfills a moment later.
     pub(crate) fn service_all(
         &mut self,
         buffers_by_key: &HashMap<String, Vec<SensorStreamBuffer>>,
@@ -361,6 +362,7 @@ pub(crate) fn localization_only_template(
         classifier_render_end_ns: None,
         localization_window_center_time_ns: payload.localization_window_center_time_ns,
         sensor_layout: payload.sensor_layout.clone(),
+        solve_id: new_solve_id(),
         attempt_kind: trigger_attempt_kind,
         pair_admission: payload.pair_admission.clone(),
         source_ids: payload.source_ids.clone(),

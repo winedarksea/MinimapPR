@@ -242,11 +242,17 @@ pub(super) fn merge_pending_manifests_for_batch(
         }
     }
 
-    // Prioritize freshest manifests so live audio stays current even while a
+    // Select the freshest manifests so live audio stays current even while a
     // backlog exists in either source. This keeps the 30-second BirdNET window
     // populated with recent audio rather than draining an old backlog first.
-    merged.sort_unstable_by(|left, right| right.created_ns.cmp(&left.created_ns));
+    merged.sort_by(|left, right| right.created_ns.cmp(&left.created_ns));
     merged.truncate(batch_limit);
+    // ...but process the selection in arrival order. Cadence gates, triggers
+    // and renders read a stream's frames in time order: newest-first let the
+    // last upload's render publish before the onset frame had triggered, so
+    // that render could not report the event solve it covers, and moved the
+    // trigger to whichever frame the cadence gate happened to admit next.
+    merged.sort_by_key(|manifest| manifest.created_ns);
     merged
 }
 

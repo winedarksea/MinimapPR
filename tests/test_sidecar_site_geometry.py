@@ -165,6 +165,40 @@ def test_body_matches_the_contract_field_set() -> None:
     }
 
 
+def test_orientation_override_alone_pushes_an_orientation_only_placement() -> None:
+    snapshot = _snapshot(
+        [node_row("planar-gps", overrides={"orientation": {"yaw_deg": 35.0}}, orientation={"yaw_deg": 35.0})]
+    )
+    placement = snapshot.to_push_body(2)["node_placements"]["planar-gps"]
+
+    # No position keys: Rust keeps the node's packet GPS and applies this rotation.
+    assert set(placement) == {"placement_source", "body_to_world_quaternion_wxyz"}
+    assert placement["placement_source"] == PLACEMENT_SOURCE_OPERATOR_OVERRIDE
+    half_yaw = math.radians(35.0) / 2.0
+    assert placement["body_to_world_quaternion_wxyz"] == pytest.approx(
+        [math.cos(half_yaw), 0.0, 0.0, math.sin(half_yaw)]
+    )
+
+
+def test_a_stationary_estimate_carries_the_orientation_override_instead() -> None:
+    estimate_geo = FLAT_FRAME.local_to_geo((10.0, 20.0, 0.0))
+    snapshot = _snapshot(
+        [node_row("planar-gps", overrides={"orientation": {"yaw_deg": 35.0}}, orientation={"yaw_deg": 35.0})],
+        {"planar-gps": estimator_checkpoint_row(estimate_geo, horizontal_std_m=0.4)},
+    )
+    placement = snapshot.node_placements["planar-gps"]
+    assert placement.placement_source == PLACEMENT_SOURCE_STATIONARY_ESTIMATE
+    assert placement.position_m is not None
+    assert placement.body_to_world_quaternion_wxyz is not None
+
+
+def test_orientation_only_placement_change_is_a_change() -> None:
+    before = _snapshot([node_row("n", overrides={"orientation": {"yaw_deg": 35.0}}, orientation={"yaw_deg": 35.0})])
+    after = _snapshot([node_row("n", overrides={"orientation": {"yaw_deg": 36.0}}, orientation={"yaw_deg": 36.0})])
+    assert after.differs_beyond_estimate_drift(before, estimate_move_threshold_m=0.5)
+    assert not before.differs_beyond_estimate_drift(before, estimate_move_threshold_m=0.5)
+
+
 class TestEstimateDrift:
     def _estimate_snapshot(self, east_offset_m: float, *, orientation: dict | None = None):
         estimate_geo = FLAT_FRAME.local_to_geo((10.0 + east_offset_m, 20.0, 0.0))

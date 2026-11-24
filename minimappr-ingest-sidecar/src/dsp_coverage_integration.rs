@@ -26,8 +26,9 @@ impl DspWorker {
             min_coverage_ratio: self.config.min_coverage_ratio,
         };
         // Cluster buffers always park until the batch boundary: mid-batch a
-        // member may show holes that later frames in the same (newest-first)
-        // batch backfill. Costs no wall time; released at the end of the cycle.
+        // member may show holes that later frames in the same batch backfill
+        // (a node's frame k can arrive after another node's frame k+1). Costs
+        // no wall time; released at the end of the cycle.
         if buffer_key.starts_with(CLUSTER_BUFFER_KEY_PREFIX) {
             return Some(span);
         }
@@ -77,15 +78,15 @@ impl DspWorker {
         // A test delivery is a batch of one, so it ends at a batch boundary.
         let ingested_payload = self.ingest_one(manifest, pending_backlog_depth).await;
         let ready_payloads = self.take_ready_deferred_localizations(true).await;
-        for payload in ingested_payload.into_iter().chain(ready_payloads) {
-            self.note_stage_attempts(&payload).await;
+        for mut payload in ingested_payload.into_iter().chain(ready_payloads) {
+            self.prepare_dispatch(&mut payload).await;
             let result = crate::actors::dsp_compute::run_math(payload);
             crate::actors::dsp_compute::run_io(result).await;
         }
         self.flush_deferred_source_manifest_consumptions().await;
     }
 
-    /// Test seam for one `process_pending` batch, newest-first as production
+    /// Test seam for one `process_pending` batch, ordered as production
     /// orders it, with compute run inline instead of on the rayon pool.
     #[cfg(test)]
     pub(crate) async fn process_batch_inline(&mut self, manifests: Vec<DspManifest>) {
@@ -107,8 +108,8 @@ impl DspWorker {
     pub(crate) async fn run_poll_tick_deferred_localizations(&mut self) -> usize {
         let ready_payloads = self.take_ready_deferred_localizations(true).await;
         let released_count = ready_payloads.len();
-        for payload in ready_payloads {
-            self.note_stage_attempts(&payload).await;
+        for mut payload in ready_payloads {
+            self.prepare_dispatch(&mut payload).await;
             let result = crate::actors::dsp_compute::run_math(payload);
             crate::actors::dsp_compute::run_io(result).await;
         }

@@ -7,7 +7,10 @@ section 10. The snapshot is the solve geometry Rust uses ahead of raw packet GPS
   accuracy as ``position_std_m``;
 - the filtered KDE estimate of every stationary node without an override
   (``stationary_estimate``), so per-packet GPS jitter never becomes solve
-  geometry.
+  geometry;
+- an orientation-only entry (no ``position_m``) for a node whose operator
+  pinned only its mount orientation: Rust keeps its raw GPS position and
+  applies this rotation, which the packet itself never carries.
 
 Inputs are storage rows (node rows and estimator checkpoints), not in-memory
 estimator state, so the same builder serves the combined process and the
@@ -53,17 +56,17 @@ def contract_projection_for(coordinate_frame: LocalCoordinateFrame) -> str:
 
 @dataclass(frozen=True, slots=True)
 class SiteNodePlacement:
-    position_m: tuple[float, float, float]
-    position_std_m: float
+    # None (with position_std_m None) = orientation-only placement.
+    position_m: tuple[float, float, float] | None
+    position_std_m: float | None
     placement_source: str
     body_to_world_quaternion_wxyz: tuple[float, float, float, float] | None
 
     def to_wire(self) -> dict[str, object]:
-        wire: dict[str, object] = {
-            "position_m": list(self.position_m),
-            "position_std_m": self.position_std_m,
-            "placement_source": self.placement_source,
-        }
+        wire: dict[str, object] = {"placement_source": self.placement_source}
+        if self.position_m is not None:
+            wire["position_m"] = list(self.position_m)
+            wire["position_std_m"] = self.position_std_m
         # Key omitted means identity in the contract.
         if self.body_to_world_quaternion_wxyz is not None:
             wire["body_to_world_quaternion_wxyz"] = list(self.body_to_world_quaternion_wxyz)
@@ -124,7 +127,7 @@ class SiteGeometrySnapshot:
                 or placement.body_to_world_quaternion_wxyz != previous_placement.body_to_world_quaternion_wxyz
             ):
                 return True
-            if placement.placement_source == PLACEMENT_SOURCE_OPERATOR_OVERRIDE:
+            if placement.placement_source == PLACEMENT_SOURCE_OPERATOR_OVERRIDE or placement.position_m is None:
                 if placement != previous_placement:
                     return True
                 continue
@@ -192,6 +195,22 @@ def _stationary_estimate_placement(
     )
 
 
+def _orientation_only_placement(node_row: Mapping[str, Any]) -> SiteNodePlacement | None:
+    """An operator orientation override on a node with no pushed position."""
+    raw_overrides = node_row.get("overrides")
+    if not isinstance(raw_overrides, dict) or not raw_overrides:
+        return None
+    overrides = NodeOverrides.model_validate(raw_overrides)
+    if overrides.orientation is None:
+        return None
+    return SiteNodePlacement(
+        position_m=None,
+        position_std_m=None,
+        placement_source=PLACEMENT_SOURCE_OPERATOR_OVERRIDE,
+        body_to_world_quaternion_wxyz=body_to_world_quaternion_wxyz(overrides.orientation),
+    )
+
+
 def build_site_geometry_snapshot(
     *,
     node_rows: list[Mapping[str, Any]],
@@ -203,6 +222,7 @@ def build_site_geometry_snapshot(
 
     Nodes with neither an override nor a settled stationary estimate are left
     out: Rust then uses their raw GPS, or keeps them node-local when untrusted.
+    An orientation override alone gives an orientation-only entry.
     """
     placements: dict[str, SiteNodePlacement] = {}
     for node_row in node_rows:
@@ -212,6 +232,8 @@ def build_site_geometry_snapshot(
             if placement is None:
                 estimator_row = estimator_states_by_node_id.get(node_id) or {}
                 placement = _stationary_estimate_placement(node_row, estimator_row.get("state"), coordinate_frame)
+            if placement is None:
+                placement = _orientation_only_placement(node_row)
         except ValueError as exc:
             # One malformed stored row must not withhold every other node's
             # geometry; the node simply stays on raw GPS until it is fixed.

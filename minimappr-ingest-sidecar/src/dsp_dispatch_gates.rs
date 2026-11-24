@@ -63,6 +63,7 @@ impl DspWorker {
             localization_window_center_time_ns: owned.buffer_start_time_ns
                 + (owned.buffer_end_time_ns - owned.buffer_start_time_ns) / 2,
             sensor_layout: owned.sensor_layout,
+            solve_id: new_solve_id(),
             attempt_kind: SolveAttemptKind::NotAttempted,
             pair_admission: SolvePairAdmission::admit_all(),
             source_ids: owned.source_ids,
@@ -205,6 +206,7 @@ impl DspWorker {
                     classifier_render_end_ns,
                     localization_window_center_time_ns: buffered.localization_center_time_ns,
                     sensor_layout: owned.sensor_layout,
+                    solve_id: new_solve_id(),
                     attempt_kind: SolveAttemptKind::NotAttempted,
                     pair_admission: SolvePairAdmission::admit_all(),
                     source_ids: owned.source_ids,
@@ -352,6 +354,7 @@ impl DspWorker {
             classifier_render_end_ns,
             localization_window_center_time_ns: buffered.localization_center_time_ns,
             sensor_layout: owned.sensor_layout,
+            solve_id: new_solve_id(),
             attempt_kind: if timing_gates.run_srp {
                 trigger_attempt_kind
             } else {

@@ -43,8 +43,8 @@ fn push_with_placements(
                 (
                     node_id.to_string(),
                     NodePlacement {
-                        position_m: *position_m,
-                        position_std_m: 0.05,
+                        position_m: Some(*position_m),
+                        position_std_m: Some(0.05),
                         placement_source: *placement_source,
                         body_to_world_quaternion_wxyz: None,
                     },
@@ -250,10 +250,20 @@ fn malformed_pushes_are_rejected() {
         Err(SiteGeometryError::InvalidSiteOrigin { .. })
     ));
 
-    let mutations: [fn(&mut NodePlacement); 3] = [
-        |placement| placement.position_m[1] = f64::NAN,
-        |placement| placement.position_std_m = -0.1,
+    let mutations: [fn(&mut NodePlacement); 5] = [
+        |placement| placement.position_m = Some([0.0, f64::NAN, 0.0]),
+        |placement| placement.position_std_m = Some(-0.1),
         |placement| placement.body_to_world_quaternion_wxyz = Some([0.0; 4]),
+        // Neither a position nor an orientation: nothing is placed.
+        |placement| {
+            placement.position_m = None;
+            placement.position_std_m = None;
+        },
+        // An accuracy with no position to describe.
+        |placement| {
+            placement.position_m = None;
+            placement.body_to_world_quaternion_wxyz = Some([1.0, 0.0, 0.0, 0.0]);
+        },
     ];
     for mutate in mutations {
         let mut push = valid.clone();
@@ -285,4 +295,54 @@ fn node_context_parsing_reads_source_and_orientation() {
     assert_eq!(fix.alt_m, 0.0);
     assert_eq!(fix.reported_body_to_world_quaternion_wxyz, None);
     assert!(reported_node_fix_from_node_context(&serde_json::json!({"id": "x"})).is_none());
+}
+
+#[test]
+fn orientation_only_placement_keeps_gps_position_and_pins_the_rotation() {
+    const PINNED_YAW_QUATERNION_WXYZ: [f64; 4] = [0.9537, 0.0, 0.0, 0.3007];
+    const REPORTED_YAW_QUATERNION_WXYZ: [f64; 4] = [0.0, 0.0, 0.0, 1.0];
+    let mut push = push_with_placements(2, CoordinateProjection::FlatWgs84Series, &[]);
+    push.node_placements.insert(
+        "planar".to_string(),
+        NodePlacement {
+            position_m: None,
+            position_std_m: None,
+            placement_source: NodePlacementSource::OperatorOverride,
+            body_to_world_quaternion_wxyz: Some(PINNED_YAW_QUATERNION_WXYZ),
+        },
+    );
+    let mut state = SiteGeometryState::from_push(push).unwrap();
+    let gps = ReportedNodeFix {
+        reported_body_to_world_quaternion_wxyz: Some(REPORTED_YAW_QUATERNION_WXYZ),
+        ..gps_fix_at_site_enu([37.0, -22.0, 1.5])
+    };
+    let NodePlacementResolution::Placed {
+        position_m,
+        position_std_m,
+        position_source,
+        body_to_world_quaternion_wxyz,
+    } = state.resolve_node_placement("planar", Some(&gps))
+    else {
+        panic!("a trusted GPS fix places an orientation-only node");
+    };
+    assert_near(position_m, [37.0, -22.0, 1.5], 1e-6);
+    assert_eq!(position_std_m, Some(3.0), "GPS accuracy, not a pushed one");
+    assert_eq!(position_source, SensorPositionSource::ReportedGps);
+    assert_eq!(
+        body_to_world_quaternion_wxyz,
+        Some(PINNED_YAW_QUATERNION_WXYZ),
+        "the pushed orientation beats the reported one"
+    );
+
+    let fallback = ReportedNodeFix {
+        position_source: SensorPositionSource::FallbackStatic,
+        ..gps
+    };
+    assert_eq!(
+        state.resolve_node_placement("planar", Some(&fallback)),
+        NodePlacementResolution::Untrusted {
+            reason: SolveExclusionReason::NodePositionUntrustedNoOverride
+        },
+        "an orientation does not make an untrusted position trusted"
+    );
 }

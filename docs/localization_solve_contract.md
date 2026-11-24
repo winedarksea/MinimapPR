@@ -6,10 +6,13 @@ Source of truth for the wire shapes: `minimappr-core/src/localization_sensor_ent
 by the Rust test `contract_doc_example_round_trips_field_for_field`; when a field
 changes, update the type, that test and this document together.
 
-Status (milestone 0): the types exist and parse, but the sidecar does not emit
-them yet. Every new key is omitted from the JSON until the milestone that fills
-it (`solve_provenance`: milestone 1 / R6; `is_cross_node`,
-`timing_uncertainty_seconds`: milestones 1-2 / R6-R7). A manifest without
+Status (milestone 1): the sidecar emits `solve_provenance` on every
+`localization_result` and `classifier_render` (built in
+`minimappr-ingest-sidecar/src/localization_solve_provenance.rs`) and
+`pair_tdoas[].is_cross_node`. Still empty or omitted until milestone 2:
+`excluded_pairs` and `node_timing` (always `[]`; R5 / R7), and
+`pair_tdoas[].timing_uncertainty_seconds` (omitted; R5). Every pair among the
+active sensors is admitted until pair admission lands (R7). A manifest without
 `solve_provenance` is a legacy manifest.
 
 ## 1. Where it appears
@@ -19,6 +22,17 @@ it (`solve_provenance`: milestone 1 / R6; `is_cross_node`,
 - `localization_result` manifests, and
 - `classifier_render` manifests (the render carries a copy of the solve's
   `localization` payload, so the same `solve_id` appears on both).
+
+A render does not localize its own trailing frame when its span contains the
+latest event-triggered solve on its buffer: it solves that event's window
+instead, so the stored detection is the event solve the render covers. When
+the buffers still cover exactly the sensors the event solve used, the render
+re-runs that solve and repeats its `solve_id`, `window_center_time_ns` and
+layout snapshot (the `localization_result` published with the render repeats
+it too; one `solve_id` is one solve, however many manifests carry it). When a
+member whose audio arrived late now covers the window as well, the render
+solves the fuller sensor set under a new `solve_id` (same window centre and
+`attempt_kind`), and later covering renders repeat that one.
 
 The key is omitted (not `null`) when the sidecar has no provenance to report.
 
@@ -35,6 +49,7 @@ value can be JSON `null`.
 | `buffer_scope` | enum string | Which buffer the audio came from (3.2). |
 | `cluster_id` | string, nullable | Cluster of the buffer; `null` for node-local solves. |
 | `reporting_node_id` | string | Node whose packet produced the manifest. Not necessarily the only contributor; store separately from `cluster_id`. |
+| `node_local_routing_reason` | enum string, nullable | Why the reporter solved node-local (section 3.7); `null` for cluster solves. |
 | `coordinate_frame` | object | Frame of every `position_m` (section 4). |
 | `layout_revision` | integer | Bumps whenever any sensor position in the layout changes, GPS updates included. |
 | `geometry_push_revision` | integer, nullable | Revision of the geometry push in effect for this solve; `null` before any push. |
@@ -109,6 +124,16 @@ Precedence, highest first: pushed placement, then GPS, then the rest.
 `gps_locked`, `gps_holdover`, `ntp_disciplined`, `free_running`, `unknown`.
 Firmware / Python `TimeQuality` spellings; legacy `ntp_sync` is read as
 `ntp_disciplined` (as Python converts it on load); any other value is reported as `unknown`.
+
+### 3.7 `node_local_routing_reason`
+
+| Value | Meaning |
+|---|---|
+| `node_array_geometry_unusable` | 2-3 channels without usable offsets: the node cannot be placed in a cluster. |
+| `node_position_untrusted_no_override` | No trusted world position (`fallback_static` or no fix) and no pushed placement. |
+| `explicit_cluster_incomplete` | The manifest carries only one of `cluster_id` / `cluster_sensor_positions`. |
+| `explicit_cluster_below_minimum_sensors` | The declared cluster has fewer sensors than an SRP solve needs. |
+| `node_channels_missing_from_explicit_cluster` | Some of the node's channels are not in the declared sensor list. |
 
 ## 4. `coordinate_frame`
 
@@ -200,6 +225,7 @@ arrival at `ch_b`. New fields, omitted while unset:
   "buffer_scope": "automatic_site_cluster",
   "cluster_id": "auto-gps",
   "reporting_node_id": "planar-a",
+  "node_local_routing_reason": null,
   "coordinate_frame": {
     "frame_id": "site-7",
     "kind": "site_enu",
@@ -257,7 +283,9 @@ sidecar startup.
                  "placement_source": "operator_override",
                  "body_to_world_quaternion_wxyz": [1.0, 0.0, 0.0, 0.0]},
     "point-b":  {"position_m": [6.0, 0.0, 1.5], "position_std_m": 0.4,
-                 "placement_source": "stationary_estimate"}
+                 "placement_source": "stationary_estimate"},
+    "planar-c": {"placement_source": "operator_override",
+                 "body_to_world_quaternion_wxyz": [0.9537, 0.0, 0.0, 0.3007]}
   }
 }
 ```
@@ -269,10 +297,18 @@ sidecar startup.
 | `site_origin` | `{lat, lon, alt_m}` | Origin of the site ENU frame. |
 | `projection` | enum string | Section 3.4; must be the projection Python's `LocalCoordinateFrame` uses. |
 | `node_placements` | object keyed by `node_id` | Node origins in site ENU metres. |
-| `node_placements.*.position_m` | `[x, y, z]` | Node origin (the point its body offsets are measured from). |
-| `node_placements.*.position_std_m` | number | 1-sigma accuracy of the placement. |
-| `node_placements.*.placement_source` | `operator_override` \| `stationary_estimate` | Becomes the sensors' `position_source`. |
+| `node_placements.*.position_m` | `[x, y, z]`, optional | Node origin (the point its body offsets are measured from). Omitted = orientation-only placement (below). |
+| `node_placements.*.position_std_m` | number, optional | 1-sigma accuracy of `position_m`; only with `position_m`. |
+| `node_placements.*.placement_source` | `operator_override` \| `stationary_estimate` | Becomes the sensors' `position_source` (when `position_m` is set). |
 | `node_placements.*.body_to_world_quaternion_wxyz` | `[w, x, y, z]`, optional | Body -> world rotation; key omitted = identity. |
+
+**Orientation-only placement**: an entry with `body_to_world_quaternion_wxyz`
+and no `position_m` means "position from the node's reported GPS, rotation from
+this entry". Python sends one (`placement_source` `operator_override`) for a
+node whose operator pinned its mount orientation but neither its position nor
+a settled stationary estimate; packets carry no reliable orientation, so
+without it the override never reached Rust. The sensors' `position_source` is
+then `reported_gps` (or the node is untrusted, as with no entry at all).
 
 Semantics: the body is a **full snapshot**. A node missing from
 `node_placements` loses any earlier pushed placement and falls back to GPS.
@@ -292,7 +328,8 @@ than the applied one (an equal revision is accepted as a full replace), body
 `422` for a malformed or invalid body (`invalid_site_geometry_body` /
 `invalid_site_geometry`: empty `site_frame_id`, origin out of range,
 non-finite `position_m`, negative `position_std_m`, zero or non-finite
-quaternion). The revision is held in sidecar memory only, so a Python process
+quaternion, an entry with neither `position_m` nor a quaternion, or
+`position_std_m` without `position_m`). The revision is held in sidecar memory only, so a Python process
 that restarts while the sidecar keeps running must read `GET` first and push
 above the applied revision.
 
@@ -305,11 +342,16 @@ above the applied revision.
  "applied_geometry_push_revision": 3, "node_placement_count": 2}
 ```
 
-Placement resolution per node: pushed placement (its `position_std_m` and
-quaternion) > raw GPS projected into the frame in effect (`position_std_m`
-null, the node's reported orientation) > untrusted
+Placement resolution per node: pushed placement with `position_m` (its
+`position_std_m` and quaternion) > raw GPS projected into the frame in effect
+(`position_std_m` null, the orientation-only placement's quaternion if one is
+pushed, else the node's reported orientation) > untrusted
 (`node_position_untrusted_no_override`) for a `fallback_static` source
-(`gps_fallback` / `static` / `fallback_static`) or no fix at all.
+(`gps_fallback` / `static` / `fallback_static`) or no fix at all. An untrusted
+node solves node-local with that `node_local_routing_reason`, and leaves the
+automatic cluster if it was in it. Every automatic-cluster route re-places every
+member in the frame in effect, so a push (or a GPS move) changes the whole
+layout at once and bumps `layout_revision`.
 
 Rotation convention: R is the matrix of Python `orientation_rotation_matrix`
 (`minimappr/spatial_audio/geometry.py`, Rz(yaw) Ry(pitch) Rx(roll), world =

@@ -25,6 +25,7 @@ mod journal_reader;
 mod leases;
 mod localization_coverage_wait;
 mod localization_solve_config;
+mod localization_solve_provenance;
 mod manifests;
 mod onset_clustering_oracle;
 mod render_mvdr;

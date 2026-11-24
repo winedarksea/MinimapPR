@@ -93,13 +93,22 @@ impl DspWorker {
         }
 
         let channel_count = decoded_segments[0].channels.len();
-        let routing = self.sensor_registry.route_node(&NodeRoutingRequest {
-            stream_key: &stream_key,
-            manifest: &manifest,
-            channel_count,
-            sample_rate_hz: decoded_segments[0].sample_rate_hz.max(1),
-            now_ns,
-        });
+        // The geometry write lock is held only for routing: placement may
+        // adopt the automatic frame's origin, and a concurrent push must not
+        // land between placing one member and another.
+        let shared_state = self.state.clone();
+        let mut state = shared_state.write().await;
+        let routing = self.sensor_registry.route_node(
+            &NodeRoutingRequest {
+                stream_key: &stream_key,
+                manifest: &manifest,
+                channel_count,
+                sample_rate_hz: decoded_segments[0].sample_rate_hz.max(1),
+                now_ns,
+            },
+            &mut state.site_geometry,
+        );
+        drop(state);
         let route = routing.route;
         if route.layout.buffer_scope != SolveBufferScope::NodeLocal {
             // Published results carry the buffer-ordered list, so a legacy

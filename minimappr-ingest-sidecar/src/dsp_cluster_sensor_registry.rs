@@ -16,10 +16,10 @@
 //! buffer sets are dropped.
 
 use super::*;
+use crate::dsp_geometry_config::{reported_node_fix_from_node_context, SiteGeometryState};
 use crate::srp_phat::HalfSpace;
 use minimappr_core::localization_sensor_entry::{
     CoordinateFrameKind, SensorPositionSource, SolveBufferScope, SolveCoordinateFrame,
-    SolveExclusionReason,
 };
 
 const DEFAULT_STREAM_ID: &str = "audio_main";
@@ -50,53 +50,8 @@ pub(crate) struct NodeRoutingOutcome {
     pub(crate) large_array_omni_fallback_reason: Option<&'static str>,
 }
 
-/// Placement of one node's sensors in the solve frame.
-enum NodeWorldSensors {
-    Placed {
-        sensor_positions_m: Vec<[f64; 3]>,
-        position_source: SensorPositionSource,
-        position_std_m: Option<f64>,
-    },
-    #[expect(dead_code, reason = "the R2 seam returns the exclusion reason")]
-    Untrusted { reason: SolveExclusionReason },
-}
-
-/// R2 seam: the single call that places a node's sensors in the solve frame.
-/// The integration replaces the body with
-/// `SiteGeometryState::resolve_node_placement` (pushed placement > trusted GPS
-/// > untrusted) followed by `sensor_world_position_m` per offset; until then
-/// it is the legacy automatic-GPS projection with identity orientation.
-fn resolve_node_world_sensors(
-    site_frame: &mut AutomaticSiteFrame,
-    reported_fix: Option<ReportedGpsPosition>,
-    body_offsets_m: &[[f32; 3]],
-) -> NodeWorldSensors {
-    let Some(fix) = reported_fix else {
-        return NodeWorldSensors::Untrusted {
-            reason: SolveExclusionReason::NodePositionUntrustedNoOverride,
-        };
-    };
-    let node_position_m = site_frame.local_position_m(fix);
-    NodeWorldSensors::Placed {
-        sensor_positions_m: body_offsets_m
-            .iter()
-            .map(|offset| {
-                let offset = offset.map(f64::from);
-                [
-                    node_position_m[0] + offset[0],
-                    node_position_m[1] + offset[1],
-                    node_position_m[2] + offset[2],
-                ]
-            })
-            .collect(),
-        position_source: SensorPositionSource::ReportedGps,
-        position_std_m: None,
-    }
-}
-
 pub(crate) struct ClusterSensorRegistry {
     sets_by_buffer_key: HashMap<String, BufferSensorSet>,
-    automatic_site_frame: AutomaticSiteFrame,
     max_solve_sensors: usize,
     stale_after_ns: u128,
     /// Revisions are issued from one counter so a buffer set that is evicted
@@ -113,7 +68,6 @@ impl ClusterSensorRegistry {
     pub(crate) fn new(config: &crate::localization_solve_config::LocalizationSolveConfig) -> Self {
         Self {
             sets_by_buffer_key: HashMap::new(),
-            automatic_site_frame: AutomaticSiteFrame::default(),
             max_solve_sensors: config.localization_max_solve_sensors,
             stale_after_ns: (config.localization_sensor_registry_stale_seconds.max(0.0)
                 * NANOSECONDS_PER_SECOND_F64)
@@ -122,7 +76,13 @@ impl ClusterSensorRegistry {
         }
     }
 
-    pub(crate) fn route_node(&mut self, request: &NodeRoutingRequest) -> NodeRoutingOutcome {
+    /// `site_geometry` is the frame + placements in effect now (pushed, or the
+    /// automatic GPS frame, which may adopt its origin on this call).
+    pub(crate) fn route_node(
+        &mut self,
+        request: &NodeRoutingRequest,
+        site_geometry: &mut SiteGeometryState,
+    ) -> NodeRoutingOutcome {
         let node_id = stream_key_node_id(request.stream_key);
         let node = request
             .manifest
@@ -147,7 +107,9 @@ impl ClusterSensorRegistry {
                 Err(NodeLocalRoutingReason::ExplicitClusterIncomplete)
             }
             ExplicitClusterDeclaration::Absent => match &array {
-                Some(array) => self.route_into_automatic_cluster(request, node_id, node, array),
+                Some(array) => {
+                    self.route_into_automatic_cluster(request, node_id, node, array, site_geometry)
+                }
                 None => Err(NodeLocalRoutingReason::NodeArrayGeometryUnusable),
             },
         };
@@ -266,21 +228,24 @@ impl ClusterSensorRegistry {
         node_id: &str,
         node: Option<&serde_json::Value>,
         array: &ValidatedNodeArray,
+        site_geometry: &mut SiteGeometryState,
     ) -> Result<SensorRoute, NodeLocalRoutingReason> {
-        let reported_fix = node.and_then(reported_gps_position);
-        let NodeWorldSensors::Placed {
-            sensor_positions_m,
-            position_source,
-            position_std_m,
-        } = resolve_node_world_sensors(
-            &mut self.automatic_site_frame,
-            reported_fix,
-            &array.body_offsets_m,
-        )
-        else {
-            return Err(NodeLocalRoutingReason::NodePositionUntrusted);
-        };
         let buffer_key = cluster_buffer_key(AUTOMATIC_GPS_CLUSTER_ID, request.stream_key);
+        let member = AutomaticClusterMember {
+            body_offsets_m: array.body_offsets_m.clone(),
+            reported_fix: node.and_then(reported_node_fix_from_node_context),
+        };
+        let Ok(placed) = place_automatic_cluster_member(site_geometry, node_id, &member) else {
+            // A member that lost its trusted position must not keep lending
+            // its last one to the shared buffer.
+            if let Some(set) = self.sets_by_buffer_key.get_mut(&buffer_key) {
+                if set.remove_node(node_id) {
+                    set.layout_revision =
+                        issue_layout_revision(&mut self.last_issued_layout_revision);
+                }
+            }
+            return Err(NodeLocalRoutingReason::NodePositionUntrustedNoOverride);
+        };
         let set = self
             .sets_by_buffer_key
             .entry(buffer_key.clone())
@@ -292,25 +257,29 @@ impl ClusterSensorRegistry {
             });
         let mut changed = set.evict_stale(request.now_ns, self.stale_after_ns);
         changed |= set.retain_node_channels(node_id, request.channel_count);
-        for (channel_index, position_m) in sensor_positions_m.into_iter().enumerate() {
+        for (channel_index, position_m) in placed.sensor_positions_m.into_iter().enumerate() {
             changed |= set.observe(
                 &sensor_id_for_node_channel(node_id, channel_index),
                 SensorObservation {
                     position_m,
-                    position_source,
-                    position_std_m,
+                    position_source: placed.position_source,
+                    position_std_m: placed.position_std_m,
                     sample_rate_hz: Some(request.sample_rate_hz),
                 },
                 request.now_ns,
             );
         }
+        set.automatic_members.insert(node_id.to_string(), member);
+        changed |= replace_other_automatic_cluster_members(set, site_geometry, node_id);
         set.set_node_half_space(node_id, array.half_space);
+        let coordinate_frame = site_geometry.coordinate_frame();
+        changed |= set.adopt_coordinate_frame(&coordinate_frame);
         if changed {
             set.layout_revision = issue_layout_revision(&mut self.last_issued_layout_revision);
         }
         let context = RouteSnapshotContext {
-            coordinate_frame: self.automatic_site_frame.coordinate_frame(),
-            geometry_push_revision: self.automatic_site_frame.geometry_push_revision(),
+            coordinate_frame,
+            geometry_push_revision: site_geometry.geometry_push_revision(),
             node_local_routing_reason: None,
             geometry_unusable_node_id: None,
             max_solve_sensors: self.max_solve_sensors,
@@ -403,3 +372,7 @@ fn cluster_buffer_key(cluster_id: &str, stream_key: &str) -> String {
 #[cfg(test)]
 #[path = "dsp_cluster_sensor_registry_tests.rs"]
 mod dsp_cluster_sensor_registry_tests;
+
+#[cfg(test)]
+#[path = "dsp_cluster_sensor_registry_geometry_tests.rs"]
+mod dsp_cluster_sensor_registry_geometry_tests;

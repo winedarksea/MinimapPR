@@ -1,7 +1,6 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::{Map, Value};
 use tracing::warn;
-use uuid::Uuid;
 
 use crate::{
     dsp_render_output::{
@@ -11,7 +10,7 @@ use crate::{
         consume_manifest_standalone, dispatch_classification_result_standalone,
         render_coverage_json, source_manifest_was_persisted, ComputePayload, PairTdoa,
     },
-    manifests::{DspManifest, LocalizationManifestPayload, PairTdoaDiagnostic},
+    localization_solve_provenance::{localization_manifest_payload, localization_result_manifest},
     srp_phat::{
         estimate_tetrahedral_steering, SrpPhatConfig, SrpPhatEvaluation, SrpPhatLocalization,
     },
@@ -21,7 +20,7 @@ use crate::{
 pub(crate) struct ComputeMathResult {
     pub(crate) payload: ComputePayload,
     pub(crate) localization: SrpPhatLocalization,
-    pub(crate) pair_diagnostics: Vec<PairTdoaDiagnostic>,
+    pub(crate) pair_tdoas: Vec<PairTdoa>,
     /// Canonical render PCM bytes used for BirdNET classification.
     pub(crate) pcm_bytes: Option<Vec<u8>>,
     /// Listener-facing render bytes that may conceal missing spans on copied windows.
@@ -122,18 +121,7 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
         }
     };
 
-    let pair_diagnostics = localization_evaluation
-        .pair_tdoas
-        .iter()
-        .map(|pair| PairTdoaDiagnostic {
-            is_cross_node: Some(
-                payload
-                    .sensor_layout
-                    .is_cross_node_pair(pair.ch_a, pair.ch_b),
-            ),
-            ..pair_tdoa_diagnostic(pair)
-        })
-        .collect::<Vec<_>>();
+    let pair_tdoas = localization_evaluation.pair_tdoas;
     let localization = localization_evaluation.localization;
 
     let fallback_reason = if let Some(ref reason) = payload.omni_fallback_reason {
@@ -204,7 +192,7 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
     ComputeMathResult {
         payload,
         localization,
-        pair_diagnostics,
+        pair_tdoas,
         pcm_bytes,
         listenable_pcm_bytes,
         render_meta,
@@ -219,7 +207,7 @@ pub async fn run_io(result: ComputeMathResult) {
     let ComputeMathResult {
         mut payload,
         localization,
-        pair_diagnostics,
+        pair_tdoas,
         pcm_bytes,
         listenable_pcm_bytes,
         render_meta,
@@ -267,22 +255,8 @@ pub async fn run_io(result: ComputeMathResult) {
     let received_level_dbfs = max_window_rms(&payload.channel_states)
         .map(|rms| 20.0 * (rms.max(1.0e-9)).log10())
         .map(|db| db as f32);
-    let mut localization_payload = localization_manifest_payload(
-        &localization,
-        payload.config.localization_band_hz,
-        pair_diagnostics,
-        received_level_dbfs,
-        payload
-            .sensor_layout
-            .solve_half_space(&payload.active_channels)
-            != crate::srp_phat::HalfSpace::None,
-    );
-    localization_payload.solve_provenance = Some(payload.sensor_layout.solve_provenance(
-        payload.attempt_kind,
-        &payload.active_channels,
-        payload.localization_window_center_time_ns,
-        payload.config.window_seconds,
-    ));
+    let localization_payload =
+        localization_manifest_payload(&payload, &localization, &pair_tdoas, received_level_dbfs);
 
     let has_classifier_render = render_result
         .as_ref()
@@ -330,28 +304,14 @@ pub async fn run_io(result: ComputeMathResult) {
     let arrived_via_channel = !source_manifest_was_persisted(&payload.manifest);
 
     let published = if !payload.skip_localization_result {
-        let m = DspManifest {
-            manifest_id: format!("manifest-{}", Uuid::new_v4()),
-            manifest_type: "localization_result".to_string(),
-            created_ns: payload.now_ns,
-            source_handles: payload.manifest.source_handles.clone(),
-            // Carry derived_handle from the render so Python's load_localized_render_manifest_bundle
-            // can find the render metadata (fixes the dropped-event bug).
-            derived_handle: render_derived_handle,
-            localization: Some(localization_payload),
-            classifier_render: None,
-            birdnet: None,
-            coverage_stats: render_coverage_json.or(localization_coverage_json),
-            promotion_ready: false,
-            env_samples: None,
-            node_context: payload.manifest.node_context.clone(),
-            cluster_id: payload.manifest.cluster_id.clone(),
-            cluster_sensor_positions: payload.manifest.cluster_sensor_positions.clone(),
-            raw_payload: None,
-            raw_render_bytes: None,
-            raw_audio_frame: None,
-            raw_audio_bytes: None,
-        };
+        let m = localization_result_manifest(
+            &payload,
+            localization_payload,
+            // Carry derived_handle from the render so Python's
+            // load_localized_render_manifest_bundle can find the render metadata.
+            render_derived_handle,
+            render_coverage_json.or(localization_coverage_json),
+        );
         if !arrived_via_channel {
             // Disk-backed ingest: persist manifest (without bulky base64 data).
             let mut disk_m = m.clone();
@@ -508,51 +468,4 @@ pub fn run_compute(payload: ComputePayload, handle: tokio::runtime::Handle) {
         run_math(payload)
     };
     handle.spawn(run_io(result));
-}
-
-fn pair_tdoa_diagnostic(pair: &PairTdoa) -> PairTdoaDiagnostic {
-    PairTdoaDiagnostic {
-        ch_a: pair.ch_a,
-        ch_b: pair.ch_b,
-        delay_samples: pair.tdoa.delay_samples,
-        lag_seconds: pair.tdoa.lag_seconds,
-        confidence: pair.tdoa.confidence,
-        is_cross_node: None,
-        timing_uncertainty_seconds: None,
-    }
-}
-
-fn localization_manifest_payload(
-    result: &SrpPhatLocalization,
-    effective_band_hz: [f32; 2],
-    pair_tdoas: Vec<PairTdoaDiagnostic>,
-    received_level_dbfs: Option<f32>,
-    half_space_applied: bool,
-) -> LocalizationManifestPayload {
-    LocalizationManifestPayload {
-        attempted_algorithm: result.attempted_algorithm.clone(),
-        resolved_algorithm: result.resolved_algorithm.clone(),
-        steering_direction: (magnitude(result.steering_direction) > 1.0e-6)
-            .then_some(result.steering_direction),
-        position_m: result.position_m,
-        position_covariance_m2: result.position_covariance_m2,
-        range_observability: result.range_observability,
-        range_projection_mode: result.range_projection_mode.clone(),
-        confidence: result.confidence,
-        residual_rms_seconds: result
-            .residual_rms_seconds
-            .is_finite()
-            .then_some(result.residual_rms_seconds),
-        sound_speed_mps: result.sound_speed_mps,
-        effective_band_hz: Some(effective_band_hz),
-        dominant_frequency_hz: result.dominant_frequency_hz,
-        received_level_dbfs,
-        half_space_applied,
-        pair_tdoas,
-        solve_provenance: None,
-    }
-}
-
-fn magnitude(vector: [f32; 3]) -> f32 {
-    (vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]).sqrt()
 }
