@@ -103,8 +103,9 @@ idf.py -DMMPR_NODECFG_AUDIO_SAMPLE_RATE_HZ=48000 build  # after loss is at zero
 nothing attached streams valid MMB3 at exactly the real data rate, which is all the uplink
 measurement needs. Set mode `0` once the ADAU7112 is wired.
 
-Wi-Fi credentials and the ingest URL live at the top of
-[`include/node_config.h`](include/node_config.h).
+The ingest URL lives at the top of [`include/node_config.h`](include/node_config.h).
+Wi-Fi credentials come from the gitignored `firmware/local_config/wifi_credentials.h`
+(copy [`wifi_credentials.example.h`](../../local_config/wifi_credentials.example.h)).
 
 ## Pin map (provisional)
 

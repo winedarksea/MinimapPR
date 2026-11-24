@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS sirith_tetra_s3.cpp
     INCLUDE_DIRS ${CMAKE_CURRENT_LIST_DIR}/../include
+                 ${CMAKE_CURRENT_LIST_DIR}/../../../local_config  # gitignored wifi_credentials.h
     REQUIRES minimap_node_runtime
              minimap_audio_esp32s3
              minimap_transport_esp_wifi

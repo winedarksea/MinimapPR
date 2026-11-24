@@ -30,8 +30,14 @@ enum class AudioInputMode : uint8_t {
 #define MMPR_NODECFG_SERVER_BASE_URL "http://192.168.8.165:8081"
 #endif
 
-static constexpr const char* kWifiSsid = "catlin";
-static constexpr const char* kWifiPassword = "TEST";
+// Wi-Fi credentials come from the gitignored firmware/local_config/wifi_credentials.h
+// so they never land in git (template: wifi_credentials.example.h beside it).
+#if !__has_include("wifi_credentials.h")
+#error "Missing firmware/local_config/wifi_credentials.h: copy wifi_credentials.example.h there and fill in your network"
+#endif
+#include "wifi_credentials.h"
+static constexpr const char* kWifiSsid = MMPR_WIFI_SSID;
+static constexpr const char* kWifiPassword = MMPR_WIFI_PASSWORD;
 
 // --- GPS UART baud rate ---
 // 9600 for the SparkFun GPS carrier board, 38400 for a bare ublox NEO-M10Q.

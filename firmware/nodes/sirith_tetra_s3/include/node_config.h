@@ -51,8 +51,14 @@ enum class AudioInputMode : uint8_t {
 #define MMPR_NODECFG_SERVER_BASE_URL "http://192.168.8.103:8081"
 #endif
 
-static constexpr const char* kWifiSsid = "catlin";
-static constexpr const char* kWifiPassword = "DarthWiFi";
+// Wi-Fi credentials come from the gitignored firmware/local_config/wifi_credentials.h
+// so they never land in git (template: wifi_credentials.example.h beside it).
+#if !__has_include("wifi_credentials.h")
+#error "Missing firmware/local_config/wifi_credentials.h: copy wifi_credentials.example.h there and fill in your network"
+#endif
+#include "wifi_credentials.h"
+static constexpr const char* kWifiSsid = MMPR_WIFI_SSID;
+static constexpr const char* kWifiPassword = MMPR_WIFI_PASSWORD;
 
 // --- Optional subsystems ---
 #ifndef MMPR_NODECFG_ENABLE_TFT_STATUS

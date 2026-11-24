@@ -60,10 +60,14 @@ Also supports optional BLE scanning (`MMPR_ENABLE_BLE_SCAN`), posting observatio
 
 ### Configure
 
+Wi-Fi credentials live outside git. Copy
+`local_config/wifi_credentials.example.h` to `local_config/wifi_credentials.h`
+(gitignored) and fill in your network; the build stops with `#error` until you do.
+
 Edit `nodes/sirith_tetrahedral/include/node_config.h`:
 
 - `MMPR_NODECFG_AUDIO_INPUT_MODE` — `0` TDM 4-mic, `1` I2S mono, `3` synthetic (no hardware)
-- WiFi credentials and `MMPR_NODECFG_SERVER_BASE_URL`
+- `MMPR_NODECFG_SERVER_BASE_URL`
 - audio rate/channels/frame size (`32000` Hz, `4`, `512` by default)
 - TDM sample edge, capture bit offset, and data-pin bias
 - `MMPR_NODECFG_GPS_PPS_PIN` and GPS UART settings

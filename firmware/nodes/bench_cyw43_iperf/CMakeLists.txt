@@ -49,7 +49,8 @@ add_executable(bench_cyw43_iperf
 target_include_directories(bench_cyw43_iperf PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}         # lwipopts.h: wraps the production one, adds bench knobs
         ${TETRA_DIR}
-        ${TETRA_DIR}/include              # node_config.h (Wi-Fi credentials, BLE scan timing)
+        ${TETRA_DIR}/include              # node_config.h (BLE scan timing)
+        ${FIRMWARE_LIB_DIR}/../local_config  # gitignored wifi_credentials.h
         ${FIRMWARE_LIB_DIR}/minimap_node_runtime/include
         ${FIRMWARE_LIB_DIR}/minimap_transport_cyw43/include
 )

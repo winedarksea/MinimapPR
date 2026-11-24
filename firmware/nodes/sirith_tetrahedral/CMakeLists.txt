@@ -65,6 +65,7 @@ pico_enable_stdio_usb(sirith_tetrahedral 1)
 target_include_directories(sirith_tetrahedral PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
         ${CMAKE_CURRENT_LIST_DIR}/include
+        ${FIRMWARE_LIB_DIR}/../local_config   # gitignored wifi_credentials.h
 )
 
 # Runtime + transports + audio capture come from the shared libs.
