@@ -136,8 +136,12 @@ async def test_mixed_cluster_render_stores_the_solve_contract(
     assert detection["source_node_id"] == reporter_id
     assert math.dist(detection["position_m"], SOURCE_POSITION_M) < POSITION_ERROR_BOUND_M
     assert int(detection["timestamp_ns"]) == MIXED_WINDOW_CENTER_TIME_NS
+    # Selection and capability tier follow the six contributing sensors, not
+    # the reporter's own channels (one, for the point node).
+    assert sorted(detection["source_sensors"]) == sorted(mixed_cluster_sensor_positions_m())
+    assert feature_summary["capability_tier"] == "full_3d"
 
-    solve = feature_summary[LOCALIZATION_SOLVE_FEATURE_KEY]
+    solve =feature_summary[LOCALIZATION_SOLVE_FEATURE_KEY]
     assert sorted(solve["contributing_sensor_ids"]) == sorted(mixed_cluster_sensor_positions_m())
     assert solve["contributing_node_ids"] == sorted([PLANAR_NODE_ID, POINT_NODE_ID])
     assert solve["cluster_id"] == MIXED_CLUSTER_ID
