@@ -66,6 +66,8 @@ mod dsp_manifest_buffering;
 mod dsp_manifest_publish;
 #[path = "dsp_node_array_geometry_gate.rs"]
 mod dsp_node_array_geometry_gate;
+#[path = "dsp_node_clock_assessment.rs"]
+mod dsp_node_clock_assessment;
 #[path = "dsp_preprocess.rs"]
 mod dsp_preprocess;
 #[path = "dsp_solve_pair_admission.rs"]
@@ -87,6 +89,8 @@ use self::dsp_covered_event_solve::*;
 use self::dsp_manifest_buffering::*;
 pub(crate) use self::dsp_manifest_publish::*;
 pub(crate) use self::dsp_node_array_geometry_gate::*;
+#[allow(unused_imports, reason = "filled by R5, consumed by R7 (milestone 2)")]
+pub(crate) use self::dsp_node_clock_assessment::*;
 pub(crate) use self::dsp_preprocess::*;
 pub(crate) use self::dsp_solve_pair_admission::*;
 pub(crate) use self::dsp_solve_sensor_layout::*;
