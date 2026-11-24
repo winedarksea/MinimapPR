@@ -6,13 +6,14 @@ Source of truth for the wire shapes: `minimappr-core/src/localization_sensor_ent
 by the Rust test `contract_doc_example_round_trips_field_for_field`; when a field
 changes, update the type, that test and this document together.
 
-Status (milestone 1): the sidecar emits `solve_provenance` on every
+Status (milestone 2): the sidecar emits `solve_provenance` on every
 `localization_result` and `classifier_render` (built in
-`minimappr-ingest-sidecar/src/localization_solve_provenance.rs`) and
-`pair_tdoas[].is_cross_node`. Still empty or omitted until milestone 2:
-`excluded_pairs` and `node_timing` (always `[]`; R5 / R7), and
-`pair_tdoas[].timing_uncertainty_seconds` (omitted; R5). Every pair among the
-active sensors is admitted until pair admission lands (R7). A manifest without
+`minimappr-ingest-sidecar/src/localization_solve_provenance.rs`), with
+`excluded_pairs` from pair admission (R7,
+`minimappr-ingest-sidecar/src/dsp_solve_pair_admission.rs`) and
+`pair_tdoas[].is_cross_node` / `timing_uncertainty_seconds` on every admitted
+pair. `node_timing` is filled by the clock evidence work (R5); until it lands
+every node is timed as an unknown clock (section 8). A manifest without
 `solve_provenance` is a legacy manifest.
 
 ## 1. Where it appears
@@ -187,6 +188,31 @@ Every exclusion carries one `reason`:
 A weak clock class alone never excludes a pair; it raises that pair's
 `timing_uncertainty_seconds`.
 
+### 6.1 Pair admission
+
+One admission is computed per solve from its layout snapshot, its active
+sensors and the clock snapshot taken at trigger; a parked solve recomputes it
+when it is released (coverage changed while it waited), and a render that
+repeats an event solve repeats that solve's admission. Rules, applied to
+every pair of sensors **not** already in `excluded_sensors` for
+`sample_rate_mismatch`, `node_array_geometry_unusable` or
+`max_solve_sensors_exceeded` (those sensors contribute no pair entries; the
+sensor exclusion is the record), first match wins:
+
+1. either sensor is not in `active_sensor_indices` -> `coverage_below_threshold`;
+2. sensor separation under `localization_min_pair_baseline_m` -> `pair_baseline_below_minimum` (same-node pairs included);
+3. cross-node pair and either node's measured timeline residual is over
+   `localization_cross_node_max_timeline_residual_seconds` -> `timeline_residual_over_limit`
+   (that node's intra-node pairs stay admitted);
+4. otherwise admitted.
+
+Pairs are listed with `sensor_index_a < sensor_index_b`. An excluded pair is
+never correlated, so it is absent from `pair_tdoas` and contributes nothing to
+the SRP grid, the reference TDOAs or the covariance. A node whose timeline is
+over the limit is also left out of the beamformed classifier render (it
+cannot be delay-aligned with other nodes); when that node is the reporter,
+the render uses only its own channels.
+
 ```json
 {"sensor_index": 3, "sensor_id": "point-c:ch0", "reason": "sample_rate_mismatch"}
 {"sensor_index_a": 0, "sensor_index_b": 2, "reason": "timeline_residual_over_limit"}
@@ -205,15 +231,24 @@ A weak clock class alone never excludes a pair; it raises that pair's
 
 ## 8. `localization.pair_tdoas[]` additions
 
-`pair_tdoas` holds **admitted pairs only**. Existing fields are unchanged
+`pair_tdoas` holds **admitted pairs only** (section 6.1). Existing fields are unchanged
 (`ch_a`, `ch_b`, `delay_samples`, `lag_seconds`, `confidence`); `ch_a`/`ch_b`
 index `solve_provenance.sensors`. `lag_seconds` is arrival at `ch_a` minus
-arrival at `ch_b`. New fields, omitted while unset:
+arrival at `ch_b`. New fields (present on every pair the sidecar emits;
+optional for legacy manifests):
 
 | Field | JSON type | Meaning |
 |---|---|---|
 | `is_cross_node` | bool | The two sensors belong to different nodes. |
-| `timing_uncertainty_seconds` | number | 1-sigma timing uncertainty of this pair (clock evidence of both nodes). The Python re-solve weights the pair by it and inflates covariance to match. |
+| `timing_uncertainty_seconds` | number | 1-sigma timing uncertainty of this pair: `0` for two sensors of one node (one clock); for a cross-node pair the two nodes' timing uncertainties in quadrature, `sqrt(u_a^2 + u_b^2)`. A node's uncertainty is its clock assessment (largest of class default, holdover error, measured residual, step penalty); a node without one is timed with `localization_clock_unknown_uncertainty_seconds`. The Python re-solve weights the pair by it and inflates covariance to match. |
+
+**Published covariance.** The Rust SRP solver weights every pair equally, so
+`localization.position_covariance_m2` is widened instead: `(c * u_max)^2` is
+added to each diagonal entry, where `c` is `sound_speed_mps` and `u_max` the
+largest `timing_uncertainty_seconds` among the solve's `pair_tdoas`. The worst
+pair is used, not an average, because a node's clock offset shifts all of its
+cross-node TDOAs together (it does not average out) and the unweighted solve
+cannot discount that node. A solve with only same-node pairs is unchanged.
 
 ## 9. Example `solve_provenance`
 

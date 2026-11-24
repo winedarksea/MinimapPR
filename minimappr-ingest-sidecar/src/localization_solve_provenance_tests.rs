@@ -61,6 +61,11 @@ fn provenance_reports_the_snapshot_and_a_reason_for_every_inactive_sensor() {
             solve_id: "solve-1",
             attempt_kind: SolveAttemptKind::EventTriggerAbsoluteRms,
             active_sensor_indices: &[0, 2],
+            excluded_pairs: &[ExcludedSensorPair {
+                sensor_index_a: 0,
+                sensor_index_b: 1,
+                reason: SolveExclusionReason::CoverageBelowThreshold,
+            }],
             window_center_time_ns: 1_500_000_000,
             window_seconds: 0.064,
         },
@@ -90,7 +95,14 @@ fn provenance_reports_the_snapshot_and_a_reason_for_every_inactive_sensor() {
         ]
     );
     assert_eq!(provenance.node_local_routing_reason, None);
-    assert!(provenance.excluded_pairs.is_empty() && provenance.node_timing.is_empty());
+    let wire = serde_json::to_value(&provenance).unwrap();
+    assert_eq!(
+        wire["excluded_pairs"],
+        serde_json::json!([
+            {"sensor_index_a": 0, "sensor_index_b": 1, "reason": "coverage_below_threshold"}
+        ])
+    );
+    assert!(provenance.node_timing.is_empty());
     assert_eq!(provenance.window_center_time_ns, 1_500_000_000);
     assert_eq!(provenance.solve_sample_rate_hz, RATE_HZ);
 }
@@ -106,6 +118,7 @@ fn node_local_routing_reason_is_published() {
             solve_id: "solve-2",
             attempt_kind: SolveAttemptKind::NotAttempted,
             active_sensor_indices: &[],
+            excluded_pairs: &[],
             window_center_time_ns: 0,
             window_seconds: 0.064,
         },
