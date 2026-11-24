@@ -32,7 +32,6 @@ from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest
 from minimappr.classifiers.base import AudioClassifier
 from minimappr.classifiers.birdnet_two_threshold import detection_is_below_display_threshold
 from minimappr.config import Settings
-from minimappr.core.amplitude_range import amplitude_range_prior_m
 from minimappr.core.assembly import DetectionAssembler
 from minimappr.core.multi_node_bearing_fusion import (
     BearingFusionResult,
@@ -53,6 +52,13 @@ from minimappr.core.classification_priority import (
 from minimappr.core.degradation import CapabilityDegradationModel
 from minimappr.core.environment import StaticEnvironmentProvider
 from minimappr.core.geo import LocalCoordinateFrame
+# Stage carriers are re-exported: callers and tests import them from this module.
+from minimappr.core.fusion_stage_carriers import (  # noqa: F401
+    DetectionProduct,
+    EventCandidate,
+    LocalizationBranch,
+    LocalizedCandidate,
+)
 from minimappr.core.cluster_registry import ClusterRegistry
 from minimappr.core.birdnet_label_categories import correct_persisted_birdnet_species_label_categories
 from minimappr.core.onset_srp_localization_stage import LOCALIZATION_METHOD_NAME as ONSET_SRP_LOCALIZATION_METHOD
@@ -63,12 +69,14 @@ from minimappr.core.onset_window_label_reconciliation import OnsetWindowLabelRec
 from minimappr.core.ingest_relative_trigger import NoiseFloorRelativeTrigger  # Field Mode W3-attribution
 from minimappr.core.ingest import EnvironmentUpdater, IngestProcessor
 from minimappr.core.live_ingest_state import LiveIngestState
-from minimappr.core.ambi_atob import alias_cutoff_from_positions
+from minimappr.core.localized_render_handoff import LocalizedRenderHandoff
+from minimappr.core.localized_render_handoff_hooks import (
+    SOLVE_ORIGIN_PYTHON_INGEST,
+    build_localization_seam_collaborators,
+)
 from minimappr.core.localization import LocalizationError
 from minimappr.core.localization_uncertainty import (
-    apply_frequency_covariance_scaling,
     clamp_covariance_eigenvalues_range_proportional,
-    covariance_to_nested_list,
     range_observability_from_covariance,
 )
 from minimappr.core.node_registry import NodeRegistry
@@ -82,7 +90,6 @@ from minimappr.core.range_projection import (
     apply_unobservable_range_haircut,
     normalize_range_mode,
 )
-from minimappr.core.rust_tdoa_solve import solve_localization_from_rust_tdoas
 from minimappr.core.preprocessing import (
     NodePreprocessorFactory,
     create_classification_preprocessor,
@@ -136,83 +143,6 @@ logger = logging.getLogger(__name__)
 # node surveyed far from origin still gets its full 1 km envelope; this backstop only
 # catches runaway coordinates well beyond any plausible deployment footprint.
 _SANITY_GATE_ORIGIN_BACKSTOP_M = 5000.0
-
-
-# ---------------------------------------------------------------------------
-# Internal pipeline stage data carriers
-# ---------------------------------------------------------------------------
-
-@dataclass(slots=True)
-class EventCandidate:
-    id: str
-    source_node_id: str
-    event_time_ns: int
-    sample_rate_hz: int
-    source_type: str
-    time_quality: TimeQuality
-    source_observation_ids: list[str]
-    # Wall-clock time the candidate was enqueued onto `_localization_queue`.
-    # Used to compute queue-wait latency (mirrors the Rust sidecar's
-    # `IngestDiagnostics.record_queue_wait_ms`, see diagnostics.rs) for the
-    # `/api/v1/diagnostics/summary` side-by-side comparison.
-    enqueued_ns: int = 0
-
-
-@dataclass(slots=True)
-class LocalizedCandidate:
-    candidate: EventCandidate
-    localization_branch: LocalizationBranch | None
-    selected_sensor_ids: list[str]
-    selected_windows: dict[str, np.ndarray]
-    selected_positions: dict[str, np.ndarray]
-    classification_selected_windows: dict[str, np.ndarray]
-    omni_reference_sensor: str
-    omni_reference_signal: np.ndarray
-    omni_position_m: tuple[float, float, float]
-    omni_classification_reference_signal: np.ndarray
-    localization_audio_quality: dict[str, AudioCoverageStats]
-    classification_audio_quality: dict[str, AudioCoverageStats]
-    classification_audio_quality_source: str
-    environment: dict[str, Any]
-    extra_classification_features: dict[str, Any] = field(default_factory=dict)
-    # Admission score in [0,1] computed once at classification-enqueue time (see
-    # core/classification_priority.py). Ordering only; never affects inference.
-    classification_significance: float = 0.0
-    # Field Mode W3-attribution: ClusterAttributionContext from the onset stage (None = no attribution).
-    onset_attribution_context: Any = None
-    # Closeout B2: parked by window label reconciliation; a sibling or the timeout emits it.
-    held_for_window_label_reconciliation: bool = False
-
-
-@dataclass(slots=True)
-class DetectionProduct:
-    detection: DetectionEvent
-    track: TrackState | None
-    suppressed_by_zone: bool
-    suppression_reasons: list[str]
-    pipeline_item_id: str
-    event_time_ns: int
-    entity_id: str | None = None  # Field Mode W3-entity
-
-
-@dataclass(slots=True)
-class LocalizationBranch:
-    localization_position_m: tuple[float, float, float]
-    localization_confidence: float
-    localization_gdop: float
-    localization_position_covariance_m2: list[list[float]] | None
-    localization_range_observability: float | None
-    localization_residual_rms_seconds: float | None
-    localization_range_projection_mode: str | None
-    reference_sensor: str
-    reference_signal: np.ndarray
-    classification_reference_signal: np.ndarray
-    tdoa_s: dict[str, float]
-    localization_method: str
-    capability_tier: str
-    wavelength_factor: float | None = None
-    dominant_frequency_hz: float | None = None
-    alias_cutoff_hz: float | None = None
 
 
 @dataclass(slots=True)
@@ -675,6 +605,10 @@ class FusionNode:
                 settings=self.settings, buffer=self.buffer, storage=self.storage
             )
             self._speech_capture.add_consumer(self._on_transcript)
+        # Localization-overhaul seams (no-ops until later milestones plug in);
+        # built by a factory so those milestones never edit this module.
+        self._localization_seam_collaborators = build_localization_seam_collaborators(self)
+        self._localized_render_handoff = LocalizedRenderHandoff(self, self._localization_seam_collaborators)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -922,401 +856,8 @@ class FusionNode:
         )
 
     async def ingest_localized_render(self, payload: LocalizedClassifierRenderRequest) -> None:
-        if self._stopping:
-            raise ValueError("Fusion node is stopping")
-
-        server_received_ns = time.time_ns()
-
-        normalized_audio = np.asarray(payload.decoded_audio, dtype=np.float32)
-        if normalized_audio.ndim != 1 or normalized_audio.size == 0:
-            raise ValueError("Localized render audio must be a non-empty mono signal")
-        if payload.sample_rate_hz <= 0:
-            raise ValueError("Localized render sample_rate_hz must be positive")
-
-        metadata = dict(payload.node.metadata)
-        metadata["time_quality"] = payload.time_quality.value
-        node = payload.node.model_copy(update={"metadata": metadata})
-        if node.position_m is None and node.position_geo is not None:
-            node = node.model_copy(
-                update={"position_m": self.coordinate_frame.geo_to_local(node.position_geo)}
-            )
-
-        # A classifier render may retain the DSP localization payload for
-        # diagnostics even after the sidecar deliberately selected an omni render
-        # (for example, low-confidence SRP-PHAT). That payload is not a reportable
-        # position. Treat the render contract as authoritative so an ill-conditioned
-        # solve cannot turn an omni detection into a far-away localized track.
-        reporting_modality = payload.reporting_modality
-        if payload.render_kind == "birdnet_omni_fallback" or payload.fallback_reason is not None:
-            reporting_modality = "omni"
-        if reporting_modality == "omni" and node.position_m is None:
-            raise ValueError("Omni classifier render requires node.position_m")
-
-        # Localized classifier renders are derived products, not raw sensor frames.
-        # Keep event-time semantics for localization/classification, but update
-        # node heartbeat freshness from server receipt time so online/offline
-        # status reflects current connectivity rather than source clock skew.
-        runtime = await self.registry.upsert(node, server_received_ns)
-        position_geo = node.position_geo
-        if position_geo is None and node.position_m is not None:
-            position_geo = self.coordinate_frame.local_to_geo(node.position_m)
-        await self._persist_node_registration_if_changed(
-            node,
-            last_seen_ns=server_received_ns,
-            position_geo=position_geo,
-        )
-        sensor_descriptors = await self.registry.sensors_for_node(node.id)
-        render_duration_ns = int(
-            round(normalized_audio.size * (1_000_000_000.0 / float(payload.sample_rate_hz)))
-        )
-        render_start_time_ns = server_received_ns - max(0, render_duration_ns)
-        for descriptor in sensor_descriptors:
-            await self.buffer.append(
-                sensor_id=descriptor.sensor_id,
-                sample_rate_hz=payload.sample_rate_hz,
-                start_time_ns=render_start_time_ns,
-                samples=normalized_audio,
-            )
-        selected_positions = {
-            descriptor.sensor_id: descriptor.position_m for descriptor in sensor_descriptors
-        }
-        selected_sensor_ids = list(runtime.sensor_ids)
-        if not selected_sensor_ids:
-            raise ValueError(f"Node {node.id!r} did not register any sensors")
-
-        reference_sensor = selected_sensor_ids[0]
-
-        # Resolve the single-node localization. By default we trust the Rust
-        # sidecar's own SRP-PHAT estimate; when configured for "python_cartesian"
-        # we re-home the *solve* to Python using the sidecar's pairwise TDOAs +
-        # bearing so this path shares the multi-node Cartesian estimator. Either
-        # way the canonical range mode + observability/confidence haircut apply.
-        localization_position_m = payload.localization_position_m
-        localization_confidence = payload.localization_confidence
-        localization_gdop = payload.localization_gdop
-        localization_position_covariance_m2 = payload.localization_position_covariance_m2
-        localization_range_observability = payload.localization_range_observability
-        localization_residual_rms_seconds = payload.localization_residual_rms_seconds
-        raw_range_projection_mode = payload.localization_range_projection_mode
-        localization_method = payload.localization_method
-
-        if (
-            self.settings.localization_single_node_solver == "python_cartesian"
-            and reporting_modality == "localized"
-            and payload.localization_pair_tdoas
-            and payload.localization_sound_speed_mps is not None
-        ):
-            # Amplitude/SNR-informed range prior (Phase 1c): when enabled and the
-            # sidecar reported a received level, derive the projection distance from
-            # inverse-square spreading instead of the fixed config default. Only
-            # affects unobservable-range projection (asymptotic / bearing cone apex);
-            # a range_refined solve ignores far_field_initial_range_m entirely.
-            far_field_range_m = self.settings.localization_far_field_default_range_m
-            far_field_prior_radial_std_m: float | None = None
-            cfg = self.localization_config
-            if (
-                cfg.localization_amplitude_range_prior_enabled
-                and payload.localization_received_level_dbfs is not None
-            ):
-                prior_range_m, prior_clamped = amplitude_range_prior_m(
-                    payload.localization_received_level_dbfs,
-                    reference_source_level_db=cfg.localization_amplitude_reference_level_db,
-                    min_range_m=cfg.localization_amplitude_prior_min_range_m,
-                    max_range_m=cfg.localization_amplitude_prior_max_range_m,
-                )
-                far_field_range_m = prior_range_m
-                far_field_prior_radial_std_m = (
-                    cfg.localization_amplitude_prior_std_factor * prior_range_m
-                )
-                self._metrics.localization_amplitude_prior_used_count += 1
-                if prior_clamped:
-                    self._metrics.localization_amplitude_prior_clamped_count += 1
-            solved = solve_localization_from_rust_tdoas(
-                sensor_positions=selected_positions,
-                ordered_sensor_ids=selected_sensor_ids,
-                pair_tdoas=payload.localization_pair_tdoas,
-                steering_direction=payload.localization_steering_direction,
-                sound_speed_mps=payload.localization_sound_speed_mps,
-                sample_rate_hz=payload.sample_rate_hz,
-                interpolation_factor=self.settings.gcc_phat_interp_factor,
-                far_field_default_range_m=far_field_range_m,
-                far_field_prior_radial_std_m=far_field_prior_radial_std_m,
-                bearing_strength=cfg.localization_node_bearing_strength,
-                bearing_observed_obs_floor=getattr(
-                    cfg, "localization_obs_factor_bearing_floor", None
-                ),
-            )
-            if solved is not None:
-                localization_position_m = solved.position_m
-                localization_confidence = solved.confidence
-                localization_gdop = solved.gdop
-                localization_position_covariance_m2 = solved.position_covariance_m2
-                localization_range_observability = solved.range_observability
-                localization_residual_rms_seconds = solved.residual_rms_seconds
-                raw_range_projection_mode = solved.range_projection_mode
-                localization_method = "python_cartesian_rust_tdoa"
-                self._metrics.localization_single_node_python_solved_count += 1
-            else:
-                self._metrics.localization_single_node_python_fallback_count += 1
-
-        rust_contributing_centroid_m = (
-            np.mean(
-                np.vstack(
-                    [np.asarray(selected_positions[sid], dtype=np.float64) for sid in selected_positions]
-                ),
-                axis=0,
-            )
-            if selected_positions
-            else None
-        )
-        localization_rejected_out_of_range = (
-            reporting_modality == "localized"
-            and not self._localization_position_is_reportable(
-                localization_position_m,
-                rust_contributing_centroid_m,
-            )
-        )
-        if localization_rejected_out_of_range:
-            # This ingress path receives a precomputed position and used to bypass
-            # _build_localization_branch(), where the normal solver path is gated.
-            # Preserve the classification as an omni observation at its node instead
-            # of allowing a bogus geographic position into a localized track.
-            self._metrics.localization_rejected_out_of_range_count += 1
-            self._record_silent_drop(stage="localization", reason="position_out_of_range")
-            reporting_modality = "omni"
-
-        # Frequency-dependent lateral covariance scaling for the single-node path.
-        # Angular resolution degrades when the dominant signal frequency falls well
-        # below the array's spatial-aliasing cutoff, so widen the covariance
-        # perpendicular to the bearing. The sidecar reports the dominant frequency
-        # (absent on un-rebuilt sidecars → skip); the alias cutoff is derived from
-        # node geometry. Mirrors the multi-node dispatcher's Item B scaling.
-        if (
-            localization_position_covariance_m2 is not None
-            and payload.localization_dominant_frequency_hz is not None
-            and payload.localization_sound_speed_mps is not None
-        ):
-            positions = np.vstack(
-                [
-                    np.asarray(selected_positions[sid], dtype=np.float64)
-                    for sid in sorted(selected_positions)
-                ]
-            )
-            alias_cutoff_hz = alias_cutoff_from_positions(
-                positions, c_sound=payload.localization_sound_speed_mps
-            )
-            centroid_m = np.mean(positions, axis=0)
-            bearing_vec = np.asarray(localization_position_m, dtype=np.float64) - centroid_m
-            scaled_cov = apply_frequency_covariance_scaling(
-                covariance_m2=np.asarray(localization_position_covariance_m2, dtype=np.float64),
-                bearing_unit_vec=bearing_vec,
-                dominant_frequency_hz=payload.localization_dominant_frequency_hz,
-                alias_cutoff_hz=alias_cutoff_hz,
-            )
-            localization_position_covariance_m2 = covariance_to_nested_list(scaled_cov)
-
-        # Canonicalize the range mode and apply the path-agnostic haircut so a
-        # far-field single-node estimate cannot pass through over-confident.
-        localization_range_projection_mode = normalize_range_mode(raw_range_projection_mode)
-        self._record_range_projection_metrics(raw_range_projection_mode)
-        localization_confidence, localization_range_observability = apply_unobservable_range_haircut(
-            mode=localization_range_projection_mode,
-            confidence=localization_confidence,
-            range_observability=localization_range_observability,
-        )
-        # Same quality gate the solver path applies in _build_localization_branch,
-        # judged on the post-haircut confidence. Both seams must gate: this one
-        # carries precomputed positions from the Rust sidecar and is the path a
-        # production deployment actually uses, so gating only the solver path
-        # would look correct in tests and change nothing in the field.
-        localization_rejected_low_quality: str | None = None
-        if reporting_modality == "localized":
-            localization_rejected_low_quality = self._localization_quality_is_reportable(
-                confidence=localization_confidence,
-                gdop=localization_gdop,
-            )
-            if localization_rejected_low_quality is not None:
-                self._metrics.localization_rejected_low_quality_count += 1
-                self._record_silent_drop(
-                    stage="localization",
-                    reason=localization_rejected_low_quality,
-                    source_node_id=node.id,
-                    range_projection_mode=localization_range_projection_mode,
-                    localization_confidence=localization_confidence,
-                    gdop=localization_gdop,
-                )
-                reporting_modality = "omni"
-        # Resolved before the covariance clamp so the clamp knows whether altitude
-        # was actually observable on this solve.
-        capability_tier = (
-            "full_3d"
-            if reporting_modality == "localized"
-            and len(selected_sensor_ids) >= self.settings.min_sensors_for_3d
-            else "classification_only"
-        )
-        localization_position_covariance_m2 = self._clamp_localization_covariance(
-            localization_position_covariance_m2,
-            position_m=localization_position_m,
-            contributing_centroid_m=rust_contributing_centroid_m,
-            capability_tier=capability_tier,
-        )
-
-        rust_audio_quality = (
-            {reference_sensor: payload.audio_quality}
-            if payload.audio_quality is not None
-            else {}
-        )
-        candidate = EventCandidate(
-            id=f"rust-{payload.manifest_id}",
-            source_node_id=node.id,
-            event_time_ns=payload.event_time_ns,
-            sample_rate_hz=payload.sample_rate_hz,
-            source_type=payload.source_type,
-            time_quality=payload.time_quality,
-            source_observation_ids=list(payload.source_observation_ids),
-        )
-        rust_extra_features: dict[str, Any] = {"rust_manifest_id": payload.manifest_id}
-        if payload.render_kind is not None:
-            rust_extra_features["rust_render_kind"] = payload.render_kind
-        if payload.render_start_ns is not None:
-            rust_extra_features["rust_render_start_ns"] = int(payload.render_start_ns)
-        if payload.render_end_ns is not None:
-            rust_extra_features["rust_render_end_ns"] = int(payload.render_end_ns)
-        if payload.fallback_reason is not None:
-            rust_extra_features["rust_fallback_reason"] = payload.fallback_reason
-        if localization_rejected_out_of_range:
-            rust_extra_features["localization_rejected_reason"] = "position_out_of_range"
-        elif localization_rejected_low_quality is not None:
-            rust_extra_features["localization_rejected_reason"] = localization_rejected_low_quality
-        if reporting_modality == "omni":
-            # A render that arrived as "localized" can be degraded to omni above
-            # (out-of-range rejection, or the quality gate); it needs the same
-            # node-position guard as a render that arrived omni.
-            if node.position_m is None:
-                raise ValueError("Omni classifier render requires node.position_m")
-            # Keep the raw sidecar localization only as provenance above; an omni
-            # detection is positioned at its source node and cannot create a track.
-            localization_position_m = tuple(float(value) for value in node.position_m)
-            localization_confidence = self.fusion_config.fallback_localization_confidence
-            localization_gdop = float("inf")
-            localization_position_covariance_m2 = None
-            localization_range_observability = None
-            localization_residual_rms_seconds = None
-            localization_range_projection_mode = None
-            localization_method = "rust_classifier_render_fallback"
-        rust_localization_branch = LocalizationBranch(
-            localization_position_m=localization_position_m,
-            localization_confidence=localization_confidence,
-            localization_gdop=localization_gdop,
-            reference_sensor=reference_sensor,
-            reference_signal=normalized_audio,
-            classification_reference_signal=normalized_audio,
-            tdoa_s={},
-            localization_method=localization_method,
-            capability_tier=capability_tier,
-            localization_position_covariance_m2=localization_position_covariance_m2,
-            localization_range_observability=localization_range_observability,
-            localization_residual_rms_seconds=localization_residual_rms_seconds,
-            localization_range_projection_mode=localization_range_projection_mode,
-        )
-        if reporting_modality == "localized":
-            rust_localization_branch = await self._maybe_fuse_multi_node_bearing(
-                rust_localization_branch,
-                node_id=node.id,
-                contributing_centroid_m=rust_contributing_centroid_m,
-                event_time_ns=payload.event_time_ns,
-                sound_speed_mps=payload.localization_sound_speed_mps,
-            )
-            # Bearing fusion may have upgraded the branch (fused position, refined
-            # range, new covariance/confidence/method). Re-extract the locals so the
-            # product below and the reporting branch carry the fused values instead of
-            # the pre-fusion single-node cone.
-            localization_position_m = rust_localization_branch.localization_position_m
-            localization_confidence = rust_localization_branch.localization_confidence
-            localization_gdop = rust_localization_branch.localization_gdop
-            localization_position_covariance_m2 = (
-                rust_localization_branch.localization_position_covariance_m2
-            )
-            localization_range_observability = (
-                rust_localization_branch.localization_range_observability
-            )
-            localization_residual_rms_seconds = (
-                rust_localization_branch.localization_residual_rms_seconds
-            )
-            localization_range_projection_mode = (
-                rust_localization_branch.localization_range_projection_mode
-            )
-            localization_method = rust_localization_branch.localization_method
-        localized_product = LocalizedCandidate(
-            candidate=candidate,
-            localization_branch=rust_localization_branch,
-            selected_sensor_ids=selected_sensor_ids,
-            selected_windows={},
-            selected_positions=selected_positions,
-            classification_selected_windows={},
-            omni_reference_sensor=reference_sensor,
-            omni_reference_signal=normalized_audio,
-            omni_position_m=localization_position_m,
-            omni_classification_reference_signal=normalized_audio,
-            localization_audio_quality=rust_audio_quality,
-            classification_audio_quality=rust_audio_quality,
-            classification_audio_quality_source="rust_classifier_render",
-            environment=dict(payload.environment),
-            extra_classification_features=rust_extra_features,
-        )
-        self._record_degraded_audio_quality_metrics(
-            candidate=candidate,
-            source_window_type=localized_product.classification_audio_quality_source,
-            audio_quality=localized_product.classification_audio_quality,
-        )
-        # Rust localized renders should be classified synchronously so callers can
-        # observe the resulting detection immediately after ingest_localized_render returns.
-        if self._classification_chunking_policy is not None and payload.authoritative_classification is None:
-            if self._should_suppress_chunked_classification(localized_product):
-                self._metrics.birdnet_chunk_dispatches_suppressed += 1
-                return
-
-        if payload.authoritative_classification is not None:
-            classified = await self._classification_orchestrator.adopt_authoritative_classification(
-                classification=payload.authoritative_classification,
-                event_time_ns=payload.event_time_ns,
-                classification_signal=normalized_audio,
-                sample_rate_hz=payload.sample_rate_hz,
-            )
-            classified.classification.features["rust_classification_authoritative"] = True
-        else:
-            classified = await self._classification_orchestrator.classify_omni_only(
-                reference_signal=normalized_audio,
-                sample_rate_hz=payload.sample_rate_hz,
-                event_time_ns=payload.event_time_ns,
-            )
-        classified.classification.features.update(rust_extra_features)
-        await self._maybe_trigger_speech_capture(
-            node_id=node.id,
-            sensor_id=reference_sensor,
-            event_time_ns=payload.event_time_ns,
-            scores=classified.classification.scores,
-        )
-        detection_product = await self._assemble_reporting_branch(
-            product=localized_product,
-            classified=classified,
-            reporting_modality=reporting_modality,
-            localization_position_m=localization_position_m,
-            localization_confidence=localization_confidence,
-            localization_gdop=localization_gdop,
-            localization_position_covariance_m2=localization_position_covariance_m2,
-            localization_range_observability=localization_range_observability,
-            localization_residual_rms_seconds=localization_residual_rms_seconds,
-            localization_range_projection_mode=localization_range_projection_mode,
-            reference_sensor=reference_sensor,
-            reference_signal=normalized_audio,
-            tdoa_s={},
-            capability_tier=capability_tier,
-            localization_method=localization_method,
-        )
-        if detection_product is None:
-            return
-        await self._process_rules_and_delivery(detection_product)
+        """Ingest one Rust classifier render; see ``LocalizedRenderHandoff``."""
+        await self._localized_render_handoff.ingest(payload)
 
     async def ingest_continuous_scan_result(self, scan) -> None:
         """Sink for :class:`ContinuousOmniScanner`.
@@ -1615,6 +1156,11 @@ class FusionNode:
                 for product in products:
                     if product is None:
                         continue
+                    await self._localization_seam_collaborators.position_observation_sink.observe_localized_solve(
+                        localized_product=product,
+                        reporting_modality="localized" if product.localization_branch is not None else "omni",
+                        solve_origin=SOLVE_ORIGIN_PYTHON_INGEST,
+                    )
                     if self._classification_priority_enabled:
                         product.classification_significance = (
                             await self._score_classification_significance(product)

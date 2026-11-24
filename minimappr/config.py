@@ -23,6 +23,8 @@ from minimappr.core.entity_reporting_config import (
     entity_reporting_setting_errors,
 )
 # --- end Field Mode W3-entity ---
+from minimappr.core import localization_overhaul_config as overhaul_defaults
+from minimappr.core.localization_overhaul_config import localization_overhaul_setting_errors
 
 if TYPE_CHECKING:
     from minimappr.core.effectors.registry import EffectorManagerConfig
@@ -88,6 +90,17 @@ def _env_list(key: str, default: tuple[str, ...]) -> tuple[str, ...]:
 
     values = [item.strip() for item in text.split(",") if item.strip()]
     return tuple(values) if values else default
+
+
+def _env_json_dict(key: str, default: dict) -> dict:
+    """Parse a JSON-object env var; an unset var keeps ``default``."""
+    raw = os.getenv(key)
+    if raw is None:
+        return dict(default)
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{key} must be a JSON object; got {raw!r}")
+    return parsed
 
 
 def _env_vec3_optional(
@@ -1424,7 +1437,7 @@ class Settings:
     # Ingest: also trigger when a frame stands this far above the node's own tracked floor
     # (OR with the absolute trigger_rms gate), so faint distant birds open windows.
     trigger_noise_floor_relative_enabled: bool = False
-    trigger_noise_floor_relative_snr_db: float = 8.0
+    trigger_noise_floor_relative_snr_db: float = overhaul_defaults.DEFAULT_NOISE_FLOOR_RELATIVE_TRIGGER_SNR_DB
     # Floor tracker: slow rise (a call barely lifts it) ...
     trigger_noise_floor_rise_seconds: float = 20.0
     # ... fast fall into quiet gaps.
@@ -1768,6 +1781,53 @@ class Settings:
     ble_tracking_period_s: float = 2.0
     ble_track_association_distance_m: float = 12.0
     ble_track_max_gate_m: float = 40.0
+
+    # --- localization overhaul --- meanings and defaults: core/localization_overhaul_config.py.
+    # Forwarded to the Rust sidecar as MINIMAPPR_<KEY> (ingest_sidecar_runtime.py).
+    localization_max_solve_sensors: int = overhaul_defaults.DEFAULT_LOCALIZATION_MAX_SOLVE_SENSORS
+    localization_min_pair_baseline_m: float = overhaul_defaults.DEFAULT_LOCALIZATION_MIN_PAIR_BASELINE_M
+    localization_cross_node_max_timeline_residual_seconds: float = (
+        overhaul_defaults.DEFAULT_LOCALIZATION_CROSS_NODE_MAX_TIMELINE_RESIDUAL_SECONDS
+    )
+    localization_clock_class_uncertainty_seconds: dict = field(
+        default_factory=overhaul_defaults.default_localization_clock_class_uncertainty_seconds
+    )
+    localization_clock_unknown_uncertainty_seconds: float = (
+        overhaul_defaults.DEFAULT_LOCALIZATION_CLOCK_UNKNOWN_UNCERTAINTY_SECONDS
+    )
+    localization_timestamp_step_threshold_seconds: float = (
+        overhaul_defaults.DEFAULT_LOCALIZATION_TIMESTAMP_STEP_THRESHOLD_SECONDS
+    )
+    localization_timestamp_step_recovery_holdoff_seconds: float = (
+        overhaul_defaults.DEFAULT_LOCALIZATION_TIMESTAMP_STEP_RECOVERY_HOLDOFF_SECONDS
+    )
+    localization_trigger_noise_floor_relative_enabled: bool = (
+        overhaul_defaults.DEFAULT_LOCALIZATION_TRIGGER_NOISE_FLOOR_RELATIVE_ENABLED
+    )
+    localization_trigger_noise_floor_relative_db: float = overhaul_defaults.DEFAULT_NOISE_FLOOR_RELATIVE_TRIGGER_SNR_DB
+    localization_solver_floor_relative_db: float = overhaul_defaults.DEFAULT_LOCALIZATION_SOLVER_FLOOR_RELATIVE_DB
+    localization_sensor_registry_stale_seconds: float = (
+        overhaul_defaults.DEFAULT_LOCALIZATION_SENSOR_REGISTRY_STALE_SECONDS
+    )
+    # Python-only.
+    sidecar_geometry_push_estimate_move_threshold_m: float = (
+        overhaul_defaults.DEFAULT_SIDECAR_GEOMETRY_PUSH_ESTIMATE_MOVE_THRESHOLD_M
+    )
+    sidecar_geometry_reconcile_interval_seconds: float = (
+        overhaul_defaults.DEFAULT_SIDECAR_GEOMETRY_RECONCILE_INTERVAL_SECONDS
+    )
+    localized_handoff_duplicate_merge_max_separation_m: float = (
+        overhaul_defaults.DEFAULT_LOCALIZED_HANDOFF_DUPLICATE_MERGE_MAX_SEPARATION_M
+    )
+    tracking_mode_by_category: dict = field(default_factory=overhaul_defaults.default_tracking_mode_by_category)
+    position_observation_queue_max_items: int = overhaul_defaults.DEFAULT_POSITION_OBSERVATION_QUEUE_MAX_ITEMS
+    position_observation_unclassified_track_policy: str = (
+        overhaul_defaults.DEFAULT_POSITION_OBSERVATION_UNCLASSIFIED_TRACK_POLICY
+    )
+    point_network_clip_classification_enabled: bool = (
+        overhaul_defaults.DEFAULT_POINT_NETWORK_CLIP_CLASSIFICATION_ENABLED
+    )
+    # --- end localization overhaul ---
 
     node_audio_overrides: dict = field(default_factory=dict)
 
@@ -2305,6 +2365,9 @@ class Settings:
         if entity_reporting_errors:
             raise ValueError("; ".join(entity_reporting_errors))
         # --- end Field Mode W3-entity ---
+        localization_overhaul_errors = localization_overhaul_setting_errors(self)
+        if localization_overhaul_errors:
+            raise ValueError("; ".join(localization_overhaul_errors))
         # --- Field Mode W3-attribution ---
         if self.onset_attribution_loco_max_reruns_per_window < 0:
             raise ValueError("onset_attribution_loco_max_reruns_per_window must be >= 0")
@@ -3051,7 +3114,10 @@ class Settings:
                 "MINIMAPPR_LOCALIZATION_COLLINEAR_MIRROR_MAX_ASPECT_RATIO", 0.2
             ),
             trigger_noise_floor_relative_enabled=_env_bool("MINIMAPPR_TRIGGER_NOISE_FLOOR_RELATIVE_ENABLED", False),
-            trigger_noise_floor_relative_snr_db=_env_float("MINIMAPPR_TRIGGER_NOISE_FLOOR_RELATIVE_SNR_DB", 8.0),
+            trigger_noise_floor_relative_snr_db=_env_float(
+                "MINIMAPPR_TRIGGER_NOISE_FLOOR_RELATIVE_SNR_DB",
+                overhaul_defaults.DEFAULT_NOISE_FLOOR_RELATIVE_TRIGGER_SNR_DB,
+            ),
             trigger_noise_floor_rise_seconds=_env_float("MINIMAPPR_TRIGGER_NOISE_FLOOR_RISE_SECONDS", 20.0),
             trigger_noise_floor_fall_seconds=_env_float("MINIMAPPR_TRIGGER_NOISE_FLOOR_FALL_SECONDS", 0.5),
             trigger_noise_floor_warmup_seconds=_env_float("MINIMAPPR_TRIGGER_NOISE_FLOOR_WARMUP_SECONDS", 1.0),
@@ -3331,6 +3397,80 @@ class Settings:
                 "MINIMAPPR_BLE_TRACK_ASSOCIATION_DISTANCE_M", 12.0
             ),
             ble_track_max_gate_m=_env_float("MINIMAPPR_BLE_TRACK_MAX_GATE_M", 40.0),
+            # --- localization overhaul ---
+            localization_max_solve_sensors=_env_int(
+                "MINIMAPPR_LOCALIZATION_MAX_SOLVE_SENSORS",
+                overhaul_defaults.DEFAULT_LOCALIZATION_MAX_SOLVE_SENSORS,
+            ),
+            localization_min_pair_baseline_m=_env_float(
+                "MINIMAPPR_LOCALIZATION_MIN_PAIR_BASELINE_M",
+                overhaul_defaults.DEFAULT_LOCALIZATION_MIN_PAIR_BASELINE_M,
+            ),
+            localization_cross_node_max_timeline_residual_seconds=_env_float(
+                "MINIMAPPR_LOCALIZATION_CROSS_NODE_MAX_TIMELINE_RESIDUAL_SECONDS",
+                overhaul_defaults.DEFAULT_LOCALIZATION_CROSS_NODE_MAX_TIMELINE_RESIDUAL_SECONDS,
+            ),
+            localization_clock_class_uncertainty_seconds=_env_json_dict(
+                "MINIMAPPR_LOCALIZATION_CLOCK_CLASS_UNCERTAINTY_SECONDS",
+                overhaul_defaults.default_localization_clock_class_uncertainty_seconds(),
+            ),
+            localization_clock_unknown_uncertainty_seconds=_env_float(
+                "MINIMAPPR_LOCALIZATION_CLOCK_UNKNOWN_UNCERTAINTY_SECONDS",
+                overhaul_defaults.DEFAULT_LOCALIZATION_CLOCK_UNKNOWN_UNCERTAINTY_SECONDS,
+            ),
+            localization_timestamp_step_threshold_seconds=_env_float(
+                "MINIMAPPR_LOCALIZATION_TIMESTAMP_STEP_THRESHOLD_SECONDS",
+                overhaul_defaults.DEFAULT_LOCALIZATION_TIMESTAMP_STEP_THRESHOLD_SECONDS,
+            ),
+            localization_timestamp_step_recovery_holdoff_seconds=_env_float(
+                "MINIMAPPR_LOCALIZATION_TIMESTAMP_STEP_RECOVERY_HOLDOFF_SECONDS",
+                overhaul_defaults.DEFAULT_LOCALIZATION_TIMESTAMP_STEP_RECOVERY_HOLDOFF_SECONDS,
+            ),
+            localization_trigger_noise_floor_relative_enabled=_env_bool(
+                "MINIMAPPR_LOCALIZATION_TRIGGER_NOISE_FLOOR_RELATIVE_ENABLED",
+                overhaul_defaults.DEFAULT_LOCALIZATION_TRIGGER_NOISE_FLOOR_RELATIVE_ENABLED,
+            ),
+            localization_trigger_noise_floor_relative_db=_env_float(
+                "MINIMAPPR_LOCALIZATION_TRIGGER_NOISE_FLOOR_RELATIVE_DB",
+                overhaul_defaults.DEFAULT_NOISE_FLOOR_RELATIVE_TRIGGER_SNR_DB,
+            ),
+            localization_solver_floor_relative_db=_env_float(
+                "MINIMAPPR_LOCALIZATION_SOLVER_FLOOR_RELATIVE_DB",
+                overhaul_defaults.DEFAULT_LOCALIZATION_SOLVER_FLOOR_RELATIVE_DB,
+            ),
+            localization_sensor_registry_stale_seconds=_env_float(
+                "MINIMAPPR_LOCALIZATION_SENSOR_REGISTRY_STALE_SECONDS",
+                overhaul_defaults.DEFAULT_LOCALIZATION_SENSOR_REGISTRY_STALE_SECONDS,
+            ),
+            sidecar_geometry_push_estimate_move_threshold_m=_env_float(
+                "MINIMAPPR_SIDECAR_GEOMETRY_PUSH_ESTIMATE_MOVE_THRESHOLD_M",
+                overhaul_defaults.DEFAULT_SIDECAR_GEOMETRY_PUSH_ESTIMATE_MOVE_THRESHOLD_M,
+            ),
+            sidecar_geometry_reconcile_interval_seconds=_env_float(
+                "MINIMAPPR_SIDECAR_GEOMETRY_RECONCILE_INTERVAL_SECONDS",
+                overhaul_defaults.DEFAULT_SIDECAR_GEOMETRY_RECONCILE_INTERVAL_SECONDS,
+            ),
+            localized_handoff_duplicate_merge_max_separation_m=_env_float(
+                "MINIMAPPR_LOCALIZED_HANDOFF_DUPLICATE_MERGE_MAX_SEPARATION_M",
+                overhaul_defaults.DEFAULT_LOCALIZED_HANDOFF_DUPLICATE_MERGE_MAX_SEPARATION_M,
+            ),
+            tracking_mode_by_category=_env_json_dict(
+                "MINIMAPPR_TRACKING_MODE_BY_CATEGORY",
+                overhaul_defaults.default_tracking_mode_by_category(),
+            ),
+            position_observation_queue_max_items=_env_int(
+                "MINIMAPPR_POSITION_OBSERVATION_QUEUE_MAX_ITEMS",
+                overhaul_defaults.DEFAULT_POSITION_OBSERVATION_QUEUE_MAX_ITEMS,
+            ),
+            position_observation_unclassified_track_policy=_env_str(
+                "MINIMAPPR_POSITION_OBSERVATION_UNCLASSIFIED_TRACK_POLICY",
+                overhaul_defaults.DEFAULT_POSITION_OBSERVATION_UNCLASSIFIED_TRACK_POLICY,
+            ),
+            point_network_clip_classification_enabled=_env_bool(
+                "MINIMAPPR_POINT_NETWORK_CLIP_CLASSIFICATION_ENABLED",
+                overhaul_defaults.DEFAULT_POINT_NETWORK_CLIP_CLASSIFICATION_ENABLED,
+            ),
+            # --- end localization overhaul ---
         )
 
         overrides_path = config_overrides_path(os.getenv("MINIMAPPR_CONFIG_PATH"))
