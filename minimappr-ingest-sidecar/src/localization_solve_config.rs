@@ -13,7 +13,7 @@ use minimappr_core::localization_sensor_entry::SiteGeometryPush;
 /// microsecond-class; NTP is millisecond-class; a free-running clock is only
 /// bounded by how long ago it was last set, so it gets a deliberately wide
 /// default that still admits its pairs (weak clocks widen, never exclude).
-const DEFAULT_CLOCK_CLASS_UNCERTAINTY_JSON: &str = r#"{"gps_locked":1e-6,"gps_holdover":1e-5,"ntp_disciplined":0.002,"ntp_sync":0.002,"free_running":0.05}"#;
+const DEFAULT_CLOCK_CLASS_UNCERTAINTY_JSON: &str = r#"{"gps_locked":1e-6,"gps_holdover":1e-4,"ntp_disciplined":0.002,"ntp_sync":0.002,"free_running":0.05}"#;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClockClassUncertaintySeconds(pub BTreeMap<String, f64>);

@@ -303,7 +303,7 @@ must equal the Python `Settings` defaults.
 | `MINIMAPPR_LOCALIZATION_MAX_SOLVE_SENSORS` | integer | `16` |
 | `MINIMAPPR_LOCALIZATION_MIN_PAIR_BASELINE_M` | float | `0.02` |
 | `MINIMAPPR_LOCALIZATION_CROSS_NODE_MAX_TIMELINE_RESIDUAL_SECONDS` | float | `0.010` |
-| `MINIMAPPR_LOCALIZATION_CLOCK_CLASS_UNCERTAINTY_SECONDS` | JSON object `{time_quality: seconds}` | `{"gps_locked":1e-6,"gps_holdover":1e-5,"ntp_disciplined":0.002,"ntp_sync":0.002,"free_running":0.05}` |
+| `MINIMAPPR_LOCALIZATION_CLOCK_CLASS_UNCERTAINTY_SECONDS` | JSON object `{time_quality: seconds}` | `{"gps_locked":1e-6,"gps_holdover":1e-4,"ntp_disciplined":0.002,"ntp_sync":0.002,"free_running":0.05}` |
 | `MINIMAPPR_LOCALIZATION_CLOCK_UNKNOWN_UNCERTAINTY_SECONDS` | float | `0.005` |
 | `MINIMAPPR_LOCALIZATION_TIMESTAMP_STEP_THRESHOLD_SECONDS` | float | `0.002` |
 | `MINIMAPPR_LOCALIZATION_TIMESTAMP_STEP_RECOVERY_HOLDOFF_SECONDS` | float | `30.0` |

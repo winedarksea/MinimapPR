@@ -32,20 +32,21 @@ DEFAULT_LOCALIZATION_TRIGGER_NOISE_FLOOR_RELATIVE_ENABLED = True
 # ingest paths admit the same events by default.
 DEFAULT_NOISE_FLOOR_RELATIVE_TRIGGER_SNR_DB = 8.0
 # The relative trigger only admits windows >= its SNR above the floor, so a
-# solver floor at the noise floor itself never rejects an admitted faint event
+# solver floor 3 dB above the noise floor never rejects an admitted faint event
 # while still rejecting dead or muted channels.
-DEFAULT_LOCALIZATION_SOLVER_FLOOR_RELATIVE_DB = 0.0
+DEFAULT_LOCALIZATION_SOLVER_FLOOR_RELATIVE_DB = 3.0
 DEFAULT_LOCALIZATION_SENSOR_REGISTRY_STALE_SECONDS = 120.0
 
 # Per-class clock uncertainty. A disciplined GPS/PPS clock is ~1 us; holdover
 # drifts away from that (the reported holdover error wins when larger); NTP is
-# ms-class; an undisciplined clock is bounded only by the residual hard gate.
+# ms-class; an undisciplined clock gets a wide (50 ms) uncertainty: weak clocks
+# widen the error rather than being excluded (only the measured residual gates).
 _CLOCK_CLASS_UNCERTAINTY_SECONDS_BY_TIME_QUALITY: dict[TimeQuality, float] = {
     TimeQuality.GPS_LOCKED: 1.0e-6,
     TimeQuality.GPS_HOLDOVER: 1.0e-4,
     TimeQuality.NTP_DISCIPLINED: 2.0e-3,
     TimeQuality.NTP_SYNC: 2.0e-3,
-    TimeQuality.FREE_RUNNING: DEFAULT_LOCALIZATION_CROSS_NODE_MAX_TIMELINE_RESIDUAL_SECONDS,
+    TimeQuality.FREE_RUNNING: 5.0e-2,
 }
 
 
