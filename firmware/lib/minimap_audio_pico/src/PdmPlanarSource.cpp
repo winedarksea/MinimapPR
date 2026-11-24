@@ -72,8 +72,9 @@ bool PdmPlanarSource::initPioStateMachine() {
   }
 
   // D2: clk_sys / (2 * chip_rate) must be a whole number of SM cycles per
-  // half PDM period (50 for the 153.6 MHz bench overclock, 40 for the final
-  // 122.88 MHz TCXO board). Y = cyclesPerHalf - 3 (see mmpr_pdm_rx.pio).
+  // half PDM period (25 for the 153.6 MHz bench overclock, 20 for the final
+  // board at 122.88 MHz, 24 at 147.456 MHz). Y = cyclesPerHalf - 3 (see
+  // mmpr_pdm_rx.pio).
   const double clkSysHz = static_cast<double>(clock_get_hz(clk_sys));
   const double cyclesPerHalfExact = clkSysHz / (2.0 * kChipRateHz);
   const uint32_t cyclesPerHalf = static_cast<uint32_t>(cyclesPerHalfExact + 0.5);

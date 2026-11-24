@@ -246,8 +246,9 @@ mmpr::GpsRuntimeStats gGpsRuntimeStats = {};
 void setClockForPdm() {
   // Bench (Pico 2 W, 12 MHz XO): 153.6 MHz = 50 x 3.072 MHz gives a jitter-free
   // integer PDM divider (2.4% overclock, flagged -- see D2/PDM_DESIGN.md). The
-  // final RP2354A board uses a 12.288 MHz TCXO -> 122.88 MHz = 40 x 3.072 MHz,
-  // requiring no overclock. Set this BEFORE any PIO init so downstream clock
+  // final RP2354A board uses a 12.288 MHz oscillator (crystal or CMOS TCXO) ->
+  // 122.88 MHz = 40 x 3.072 MHz, or 147.456 MHz = 48 x, both without an
+  // overclock. Set this BEFORE any PIO init so downstream clock
   // math (PPS/holdover, PdmPlanarSource's PIO cycle-count derivation) reads
   // the real clk_sys via clock_get_hz(clk_sys), never a hardcoded constant.
   //

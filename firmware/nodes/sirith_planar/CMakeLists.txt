@@ -24,7 +24,7 @@ endif()
 # PICO_BOARD pico2 (NOT pico2_w): guarantees no CYW43 driver is pulled in. The
 # bench board is a Pico 2 W with its radio unused; the final board is an
 # RP2354A (firmware/boards/sirith_planar_rp2354a.h added at board bring-up:
-# 2 MB flash, 12.288 MHz TCXO XOSC).
+# 2 MB flash, 12.288 MHz XOSC, PLL_SYS_*/PLL_USB_* constants).
 set(PICO_BOARD pico2 CACHE STRING "Board type")
 
 include(pico_sdk_import.cmake)

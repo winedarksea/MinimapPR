@@ -300,7 +300,8 @@ static constexpr bool kEnableExternalPeripheralBuses = !kBareBoardValidationMode
 // ============================================================================
 // Pin map (RP2354A QFN-60) — see HARDWARE_REVIEW.md for the authoritative table.
 // ============================================================================
-// PSRAM CS reserved (QMI CS1n): GP0 primary / GP8 fallback (unconnected).
+// PSRAM CS (QMI CS1n): GP0, part populated on the first spin with an external
+// pull-up (HARDWARE_REVIEW.md item 2); GP8 stays free as the fallback.
 static constexpr int kPsramCsPinPrimary = 0;
 static constexpr int kPsramCsPinFallback = 8;
 
@@ -308,8 +309,8 @@ static constexpr int kPsramCsPinFallback = 8;
 static constexpr uint8_t kPdmDataPinBase = 1;   // GP1..GP3 (count 3)
 static constexpr uint8_t kPdmDataPinCount = 3;
 static constexpr uint8_t kPdmClockPin = 4;      // GP4
-// E9: never use the internal pull-down on PDM inputs — external ~10k pull-downs
-// on GP1/GP2/GP3 define the float behaviour of the shared lines.
+// Never use the internal pull-down on PDM inputs (erratum E9 on A2 silicon).
+// External 8.2k pull-downs on GP1/GP2/GP3 define the lines while no mic drives.
 static constexpr AudioDataPinBias kPdmDataPinBias = AudioDataPinBias::kDisabled;
 
 // Buzzer (piezo driver, PWM) — reserved; stub firmware (Phase 6).
@@ -367,16 +368,19 @@ static constexpr bool kEnableSht45Environment = true;
 static constexpr uint8_t kSht4xI2cAddress7Bit = 0x44;
 static constexpr uint32_t kSht4xSampleIntervalMs = 2000;
 
-// ESP32-C5 link pins (transport groundwork lands in Phase 3).
-static constexpr uint8_t kEspUartTxPin = 28;   // UART1 TX -> C5 U0RXD
-static constexpr uint8_t kEspUartRxPin = 29;   // UART1 RX <- C5 U0TXD
+// ESP32-C5 link pins (transport groundwork lands in Phase 3). The UART must be
+// UART1: GP28/29 (the earlier assignment) is UART0, which the GPS already uses
+// on GP12/13. The C5 side uses its dedicated SPI pins; SDIO is not wired.
+static constexpr uint8_t kEspUartTxPin = 24;   // UART1 TX -> C5 GPIO12 (U0RXD)
+static constexpr uint8_t kEspUartRxPin = 25;   // UART1 RX <- C5 GPIO11 (U0TXD)
 static constexpr uint8_t kEspEnablePin = 14;   // EN / CHIP_PU
-static constexpr uint8_t kEspBootPin = 15;     // BOOT strap
-static constexpr uint8_t kEspHostWakePin = 11; // host-wake IRQ
-static constexpr uint8_t kEspSpiRxPin = 20;    // SPI0 RX (MISO)
-static constexpr uint8_t kEspSpiCsPin = 21;    // SPI0 CSn
-static constexpr uint8_t kEspSpiSckPin = 22;   // SPI0 SCK
-static constexpr uint8_t kEspSpiTxPin = 23;    // SPI0 TX (MOSI)
+static constexpr uint8_t kEspBootPin = 15;     // C5 GPIO28 boot strap: low = download, else high
+static constexpr uint8_t kEspHostWakePin = 11; // <- C5 GPIO4, response ready
+static constexpr uint8_t kEspReadyPin = 16;    // <- C5 GPIO1, ready for the next frame (routed, unused)
+static constexpr uint8_t kEspSpiRxPin = 20;    // SPI0 RX (MISO) <- C5 GPIO2
+static constexpr uint8_t kEspSpiCsPin = 21;    // SPI0 CSn -> C5 GPIO10
+static constexpr uint8_t kEspSpiSckPin = 22;   // SPI0 SCK -> C5 GPIO6
+static constexpr uint8_t kEspSpiTxPin = 23;    // SPI0 TX (MOSI) -> C5 GPIO7
 
 // PSRAM readiness: reserved-but-unset. Setting this to a valid CS pin (see
 // kPsramCsPin*) and expanding the ring ceiling is the one-constant path to a
@@ -395,10 +399,11 @@ static constexpr long kGmtOffsetSeconds = 0;
 static constexpr int kDaylightOffsetSeconds = 0;
 
 // --- GPS holdover / crystal frequency model ---
-// Final board uses a 12.288 MHz 2.5 ppm TCXO -> tighter drift than the tetra
-// crystal. Keep the legacy budget until bench-characterised.
+// The board has a dual footprint: a 12.288 MHz crystal by default, a 2.5 ppm
+// CMOS TCXO as the option. 0.1 ppm below is the TCXO figure; a crystal build
+// needs the tetra's 1.0. Not yet build-selectable; bench-characterise both.
 static constexpr bool kEnableHoldoverTempComp = false;
-static constexpr double kHoldoverDriftUncertaintyPpm = 0.1;   // TCXO
+static constexpr double kHoldoverDriftUncertaintyPpm = 0.1;   // TCXO; crystal: 1.0
 static constexpr uint64_t kHoldoverErrorBudgetNs = 60000ULL;
 static constexpr uint64_t kHoldoverMaxAgeUs = 900000000ULL;
 

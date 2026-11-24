@@ -16,15 +16,17 @@ acceptable for a studio-grade capture path.
 - Bench (Pico 2 W, stock 12 MHz crystal): `clk_sys = 153.6 MHz = 50 x
   3.072 MHz` (a 2.4% overclock over the RP2350's nominal 150 MHz -- flagged,
   not bench-validated against flash timing at the time of writing).
-- Final board (RP2354A + 12.288 MHz 2.5 ppm TCXO): `clk_sys = 122.88 MHz =
-  40 x 3.072 MHz`, no overclock.
+- Final board (RP2354A + 12.288 MHz oscillator; crystal by default, CMOS TCXO
+  optional, see `HARDWARE_REVIEW.md` item 4): `clk_sys = 122.88 MHz =
+  40 x 3.072 MHz`, no overclock. `147.456 MHz = 48 x 3.072 MHz` is also in
+  spec from the same oscillator if the decimator needs more CPU.
 
 `sirith_planar.cpp`'s `setClockForPdm()` calls `set_sys_clock_khz(153600,
 false)` before any PIO init, and only when PDM audio is active
 (`MMPR_NODECFG_AUDIO_INPUT_MODE=2`) -- synthetic-audio bring-up
 (`=3`) intentionally skips the clock change. `mmpr_pdm_rx.pio`'s SM runs at
 `clkdiv=1.0` in both cases; the per-half-period cycle count (25 for the
-bench overclock, 20 for the final TCXO clock) is a **host-loaded runtime
+bench overclock, 20 for the final board at 122.88 MHz) is a **host-loaded runtime
 parameter** (`Y`, computed from `clock_get_hz(clk_sys)`), not a hardcoded
 delay immediate, so the same compiled program is correct on both clocks --
 this mirrors the `mmpr_sirith_tdm_in` Y-preload idiom already used in

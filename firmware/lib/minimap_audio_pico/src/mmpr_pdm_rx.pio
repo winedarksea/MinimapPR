@@ -8,7 +8,7 @@
 ;
 ; Cycle budget: D2 requires an *integer* clk_sys/PDM-clock ratio to avoid
 ; fractional-clkdiv edge dither. clk_sys differs between the bench overclock
-; (153.6 MHz = 50 x 3.072 MHz) and the final TCXO-derived clock
+; (153.6 MHz = 50 x 3.072 MHz) and the final board's 12.288 MHz-derived clock
 ; (122.88 MHz = 40 x 3.072 MHz), so the per-half-cycle cycle count (25 vs 20)
 ; is a host-loaded runtime parameter rather than a hardcoded delay immediate
 ; -- the same idiom mmpr_sirith_tdm_in (mmpr_audio_rx.pio) uses for its
