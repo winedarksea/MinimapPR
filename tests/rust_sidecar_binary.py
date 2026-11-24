@@ -26,6 +26,12 @@ def cargo_is_available() -> bool:
 @functools.lru_cache(maxsize=1)
 def build_rust_sidecar_binary() -> Path:
     """Build the sidecar (debug profile) once per session and return its executable path."""
+    return build_rust_sidecar_binary_in(REPOSITORY_ROOT)
+
+
+@functools.lru_cache(maxsize=4)
+def build_rust_sidecar_binary_in(repository_root: Path) -> Path:
+    """Build the sidecar of the checkout at ``repository_root`` (the E10 gate measures other checkouts)."""
     completed = subprocess.run(
         [
             "cargo",
@@ -37,7 +43,7 @@ def build_rust_sidecar_binary() -> Path:
             "--bin",
             SIDECAR_BINARY_NAME,
         ],
-        cwd=str(REPOSITORY_ROOT),
+        cwd=str(repository_root),
         check=False,
         capture_output=True,
         text=True,
