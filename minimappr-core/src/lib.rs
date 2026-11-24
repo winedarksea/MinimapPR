@@ -12,6 +12,9 @@ pub mod gcc_phat;
 // Localization overhaul R0: Rust <-> Python solve-provenance + geometry-push wire types.
 pub mod localization_sensor_entry;
 pub mod range_projection;
+// Localization overhaul R2: Python-identical site ENU projection + sensor rotation.
+pub mod sensor_world_position;
+pub mod site_frame_projection;
 pub mod sensor_stream_buffer;
 pub mod sirith_array_geometry;
 pub mod srp_layout;

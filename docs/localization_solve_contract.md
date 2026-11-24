@@ -80,7 +80,7 @@ Only event-triggered solves may start a provisional track (P5).
 | Value | `origin` / `projection` | Meaning |
 |---|---|---|
 | `site_enu` | set | East/north/up metres about the pushed `site_origin`; `frame_id` echoes the push. |
-| `sidecar_automatic_enu` | `origin` set; `projection` `null` until milestone 1 (R2) | ENU about an origin the sidecar chose (first GPS node) because nothing was pushed. Its legacy spherical projection is not a contract projection, so Python must not accept these positions as site positions. |
+| `sidecar_automatic_enu` | both set once the first trusted GPS fix is seen (both `null` before); `projection` is `flat_wgs84_series` | ENU about an origin the sidecar chose (first trusted GPS fix) because nothing was pushed. `frame_id` is `null`, so Python must not accept these positions as site positions. |
 | `explicit_cluster_positions` | both `null` | Positions copied verbatim from the manifest's explicit cluster geometry. |
 | `node_body` | both `null` | The reporting node's own body-frame mic offsets (node-local solve). |
 
@@ -285,6 +285,31 @@ Response:
 ```json
 {"site_frame_id": "site-7", "applied_geometry_push_revision": 3, "node_placement_count": 2}
 ```
+
+Status codes: `200` applied; `409` when `geometry_push_revision` is lower
+than the applied one (an equal revision is accepted as a full replace), body
+`{"error": "stale_geometry_push_revision", "detail", "applied_geometry_push_revision"}`;
+`422` for a malformed or invalid body (`invalid_site_geometry_body` /
+`invalid_site_geometry`: empty `site_frame_id`, origin out of range,
+non-finite `position_m`, negative `position_std_m`, zero or non-finite
+quaternion). The revision is held in sidecar memory only, so a Python process
+that restarts while the sidecar keeps running must read `GET` first and push
+above the applied revision.
+
+`GET /api/v1/dsp/geometry` reports what a solve started now would use:
+
+```json
+{"coordinate_frame": {"frame_id": "site-7", "kind": "site_enu",
+                      "origin": {"lat": 45.0, "lon": -93.0, "alt_m": 250.0},
+                      "projection": "flat_wgs84_series"},
+ "applied_geometry_push_revision": 3, "node_placement_count": 2}
+```
+
+Placement resolution per node: pushed placement (its `position_std_m` and
+quaternion) > raw GPS projected into the frame in effect (`position_std_m`
+null, the node's reported orientation) > untrusted
+(`node_position_untrusted_no_override`) for a `fallback_static` source
+(`gps_fallback` / `static` / `fallback_static`) or no fix at all.
 
 Rotation convention: R is the matrix of Python `orientation_rotation_matrix`
 (`minimappr/spatial_audio/geometry.py`, Rz(yaw) Ry(pitch) Rx(roll), world =

@@ -114,11 +114,10 @@ pub struct DspWorkerState {
     pub recent_results: Vec<DspManifest>,
     /// Per-node audio overrides applied during ingest (set via POST /api/v1/dsp/config).
     pub node_audio_overrides: HashMap<String, NodeAudioConfig>,
-    /// Latest full-snapshot site geometry (launch env or
-    /// `POST /api/v1/dsp/geometry`). Applied by milestone 1 (R2); a solve
-    /// already parked keeps the layout it triggered with.
-    #[cfg_attr(not(test), expect(dead_code, reason = "applied by milestone 1 (R2)"))]
-    pub site_geometry: Option<Arc<minimappr_core::localization_sensor_entry::SiteGeometryPush>>,
+    /// Site frame + node placements (launch env or `POST /api/v1/dsp/geometry`,
+    /// else automatic GPS); a solve already parked keeps the layout it
+    /// triggered with.
+    pub site_geometry: crate::dsp_geometry_config::SiteGeometryState,
 }
 
 pub type SharedDspState = Arc<RwLock<DspWorkerState>>;

@@ -317,7 +317,7 @@ async fn deliver_late_frame(
 }
 
 #[tokio::test]
-#[ignore = "localization overhaul milestone 1: geometry push not applied and no solve provenance (R2, R6)"]
+#[ignore = "localization overhaul milestone 1: R2 state/API in place; needs the R1 sensor registry to read DspWorkerState.site_geometry and R6 solve provenance"]
 async fn geometry_push_while_a_solve_is_parked_applies_only_to_later_solves() {
     const SITE_FRAME_ID: &str = "e1-site-frame";
     const GEOMETRY_PUSH_REVISION: u64 = 7;
@@ -341,11 +341,17 @@ async fn geometry_push_while_a_solve_is_parked_applies_only_to_later_solves() {
     drain_published_manifests(&mut harness.events);
 
     // Operator moves node b while the trigger-frame solve is parked.
-    harness.state.write().await.site_geometry = Some(Arc::new(fixture_site_geometry_push(
-        SITE_FRAME_ID,
-        GEOMETRY_PUSH_REVISION,
-        &[&tetra_a, &tetra_b_overridden],
-    )));
+    harness
+        .state
+        .write()
+        .await
+        .site_geometry
+        .apply_push(fixture_site_geometry_push(
+            SITE_FRAME_ID,
+            GEOMETRY_PUSH_REVISION,
+            &[&tetra_a, &tetra_b_overridden],
+        ))
+        .expect("fixture push is valid");
     deliver_late_frame(&mut harness, &tetra_b, &source, FIRST_SHARED_TRIGGER_FRAME).await;
     assert!(!harness.has_pending_localization(AUTOMATIC_CLUSTER_BUFFER_KEY));
     let published = drain_published_manifests(&mut harness.events);

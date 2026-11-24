@@ -11,6 +11,8 @@ mod deferred_localization;
 mod derived_cache;
 mod diagnostics;
 mod dsp_events;
+mod dsp_geometry_config;
+mod dsp_geometry_config_api;
 mod dsp_render_output;
 mod dsp_worker;
 mod env_payload;
@@ -27,6 +29,7 @@ mod manifests;
 mod onset_clustering_oracle;
 mod render_mvdr;
 mod runtime;
+mod site_geometry_oracle;
 mod spatial_audio;
 mod storage_class;
 mod tdoa_solver_oracle;
@@ -740,6 +743,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if raw_args.get(1).map(String::as_str) == Some("wildlife-tracking-oracle") {
         return wildlife_tracking_oracle::run_wildlife_tracking_oracle();
     }
+    if raw_args.get(1).map(String::as_str) == Some("site-geometry-oracle") {
+        return site_geometry_oracle::run_site_geometry_oracle();
+    }
     if raw_args.get(1).map(String::as_str) == Some("preprocess-oracle") {
         return run_preprocess_oracle();
     }
@@ -801,8 +807,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     )
     .await?;
 
+    // A launch geometry that fails validation stops startup: solving in a
+    // frame Python did not ask for would publish positions it then rejects.
+    let site_geometry = match args.localization_solve.clone().into_config().site_geometry_at_launch {
+        Some(push) => dsp_geometry_config::SiteGeometryState::from_push(push)
+            .map_err(|error| format!("MINIMAPPR_SITE_GEOMETRY_JSON: {error}"))?,
+        None => dsp_geometry_config::SiteGeometryState::default(),
+    };
     let dsp_state: SharedDspState = Arc::new(RwLock::new(DspWorkerState {
         node_audio_overrides,
+        site_geometry,
         ..DspWorkerState::default()
     }));
     let env_cache = EnvironmentCache::new();
@@ -1008,6 +1022,11 @@ fn app(state: AppState) -> Router {
         .route("/api/v1/dsp/results", get(dsp_results))
         .route("/api/v1/dsp/stream", get(dsp_stream))
         .route("/api/v1/dsp/config", post(post_dsp_config))
+        .route(
+            dsp_geometry_config_api::SITE_GEOMETRY_ENDPOINT,
+            get(dsp_geometry_config_api::get_dsp_geometry)
+                .post(dsp_geometry_config_api::post_dsp_geometry),
+        )
         // Capture pipeline: MVDR beamforming
         .route("/api/v1/capture/render/mvdr", post(render_mvdr_endpoint))
         .route(
