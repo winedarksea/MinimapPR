@@ -24,6 +24,12 @@ pub struct PairTdoaDiagnostic {
     pub delay_samples: f32,
     pub lag_seconds: f32,
     pub confidence: f32,
+    /// Contract fields filled by milestone 1/2 (R6/R7); omitted while unset so
+    /// the wire is unchanged. `ch_a`/`ch_b` index `solve_provenance.sensors`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_cross_node: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing_uncertainty_seconds: Option<f32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -55,6 +61,10 @@ pub struct LocalizationManifestPayload {
     #[serde(default)]
     pub half_space_applied: bool,
     pub pair_tdoas: Vec<PairTdoaDiagnostic>,
+    /// Shared Rust <-> Python contract (`docs/localization_solve_contract.md`);
+    /// emitted from milestone 1 (R6), omitted until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solve_provenance: Option<minimappr_core::localization_sensor_entry::SolveProvenance>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -63,6 +63,10 @@ mod dsp_manifest_buffering;
 mod dsp_manifest_publish;
 #[path = "dsp_preprocess.rs"]
 mod dsp_preprocess;
+#[path = "dsp_solve_pair_admission.rs"]
+mod dsp_solve_pair_admission;
+#[path = "dsp_solve_sensor_layout.rs"]
+mod dsp_solve_sensor_layout;
 #[path = "dsp_window_geometry.rs"]
 mod dsp_window_geometry;
 
@@ -71,6 +75,8 @@ pub(crate) use self::dsp_compute_payload::*;
 use self::dsp_manifest_buffering::*;
 pub(crate) use self::dsp_manifest_publish::*;
 pub(crate) use self::dsp_preprocess::*;
+pub(crate) use self::dsp_solve_pair_admission::*;
+pub(crate) use self::dsp_solve_sensor_layout::*;
 pub(crate) use self::dsp_window_geometry::*;
 
 pub use minimappr_core::gcc_phat::PairTdoa;
@@ -108,6 +114,11 @@ pub struct DspWorkerState {
     pub recent_results: Vec<DspManifest>,
     /// Per-node audio overrides applied during ingest (set via POST /api/v1/dsp/config).
     pub node_audio_overrides: HashMap<String, NodeAudioConfig>,
+    /// Latest full-snapshot site geometry (launch env or
+    /// `POST /api/v1/dsp/geometry`). Applied by milestone 1 (R2); a solve
+    /// already parked keeps the layout it triggered with.
+    #[expect(dead_code, reason = "applied by milestone 1 (R2)")]
+    pub site_geometry: Option<Arc<minimappr_core::localization_sensor_entry::SiteGeometryPush>>,
 }
 
 pub type SharedDspState = Arc<RwLock<DspWorkerState>>;
@@ -434,9 +445,9 @@ impl DspWorker {
             let last = owned_segments.last()?;
             if last.channel_count > 4 {
                 let geometry_usable = last.channel_count <= MAX_SPATIAL_CHANNELS
-                    && last.mic_positions_m.len() == last.channel_count
+                    && last.sensor_layout.sensor_count() == last.channel_count
                     && crate::dsp_math::array_spans_at_least_2d(
-                        &last.mic_positions_m,
+                        &last.sensor_layout.positions_m,
                         SPATIAL_GEOMETRY_MIN_SPAN_M,
                     );
                 if !geometry_usable {

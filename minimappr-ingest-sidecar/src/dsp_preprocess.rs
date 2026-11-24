@@ -70,6 +70,12 @@ pub struct DspWorkerConfig {
     pub localization_coverage_wait_all_streaming_nodes_enabled: bool,
     pub localization_coverage_stall_budget_seconds: f64,
     pub localization_coverage_total_cap_seconds: f64,
+    /// Localization-overhaul keys (`localization_solve_config.rs`).
+    #[expect(
+        dead_code,
+        reason = "consumed by milestone 1-2 items (R1, R2, R4, R5, R7)"
+    )]
+    pub localization_solve: crate::localization_solve_config::LocalizationSolveConfig,
 }
 
 impl Default for DspWorkerConfig {
@@ -122,6 +128,7 @@ impl Default for DspWorkerConfig {
             localization_coverage_wait_all_streaming_nodes_enabled: true,
             localization_coverage_stall_budget_seconds: 0.5,
             localization_coverage_total_cap_seconds: 1.0,
+            localization_solve: Default::default(),
         }
     }
 }

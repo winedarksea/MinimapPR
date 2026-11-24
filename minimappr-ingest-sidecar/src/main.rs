@@ -22,6 +22,7 @@ mod ingest_backend;
 mod journal_reader;
 mod leases;
 mod localization_coverage_wait;
+mod localization_solve_config;
 mod manifests;
 mod onset_clustering_oracle;
 mod render_mvdr;
@@ -430,6 +431,9 @@ struct Args {
 
     #[arg(long, env = "MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON")]
     classifier_command_json: Option<String>,
+
+    #[command(flatten)]
+    localization_solve: localization_solve_config::LocalizationSolveArgs,
 }
 
 #[derive(Clone, Debug)]
@@ -905,6 +909,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 classification_audio_source: args.classification_audio_source.clone(),
                 min_localization_confidence: args.min_localization_confidence as f32,
                 query_persisted_raw_manifests: false,
+                localization_solve: args.localization_solve.clone().into_config(),
                 ..DspWorkerConfig::default()
             },
             dsp_state.clone(),

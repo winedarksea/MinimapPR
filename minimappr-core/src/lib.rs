@@ -9,6 +9,8 @@ pub mod audio_payload;
 pub mod butterworth_biquad;
 pub mod dsp_math;
 pub mod gcc_phat;
+// Localization overhaul R0: Rust <-> Python solve-provenance + geometry-push wire types.
+pub mod localization_sensor_entry;
 pub mod range_projection;
 pub mod sensor_stream_buffer;
 pub mod sirith_array_geometry;
