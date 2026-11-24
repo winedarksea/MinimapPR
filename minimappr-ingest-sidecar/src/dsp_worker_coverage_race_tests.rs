@@ -91,6 +91,13 @@ impl RaceHarness {
         self._tmp.path()
     }
 
+    pub(super) fn buffer_sample_rates_hz(&self, buffer_key: &str) -> Vec<u32> {
+        self.worker.buffers[buffer_key]
+            .iter()
+            .map(SensorStreamBuffer::sample_rate_hz_value)
+            .collect()
+    }
+
     pub(super) fn has_pending_localization(&self, buffer_key: &str) -> bool {
         self.worker.deferred_localizations.has_pending(buffer_key)
     }
