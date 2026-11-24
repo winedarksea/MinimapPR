@@ -42,6 +42,32 @@ def _payload_to_geo(entry: object) -> GeoPoint | None:
         return None
 
 
+@dataclass(frozen=True, slots=True)
+class CheckpointedStationaryEstimate:
+    """The settled KDE output of a persisted checkpoint (no reservoir)."""
+
+    estimate_geo: GeoPoint
+    horizontal_std_m: float
+
+
+def checkpointed_stationary_estimate(checkpoint: object) -> CheckpointedStationaryEstimate | None:
+    """Read only the estimate from a persisted checkpoint, skipping the reservoir.
+
+    Lets a process that does not run the estimator (the split-mode API process,
+    the sidecar geometry push) use its output without reprojecting thousands of
+    samples. None while warming up or for a pre-geodetic checkpoint.
+    """
+    if not isinstance(checkpoint, dict) or checkpoint.get("format") != _SNAPSHOT_FORMAT_GEODETIC:
+        return None
+    estimate_geo = _payload_to_geo(checkpoint.get("estimate"))
+    horizontal_std_m = checkpoint.get("horizontal_std_m")
+    if estimate_geo is None or not isinstance(horizontal_std_m, (int, float)) or isinstance(horizontal_std_m, bool):
+        return None
+    if not math.isfinite(float(horizontal_std_m)):
+        return None
+    return CheckpointedStationaryEstimate(estimate_geo=estimate_geo, horizontal_std_m=float(horizontal_std_m))
+
+
 @dataclass(slots=True)
 class StationaryKdeState:
     samples: list[tuple[float, float, float]] = field(default_factory=list)

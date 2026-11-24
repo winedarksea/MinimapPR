@@ -206,7 +206,7 @@ class TestPatchNodeAudio:
             captured["payload"] = payload
             return {"applied": True}
 
-        monkeypatch.setattr("minimappr.main._fetch_json_from_sidecar", fake_fetch_json_from_sidecar)
+        monkeypatch.setattr("minimappr.main._post_json_to_sidecar", fake_fetch_json_from_sidecar)
 
         with TestClient(app) as client:
             resp = client.patch(
@@ -218,8 +218,58 @@ class TestPatchNodeAudio:
         body = resp.json()
         assert body["rust_sidecar_active"] is True
         assert body["rust_sidecar_forwarded"] is True
+        assert body["rust_sidecar_forward_error"] is None
+        assert body["applied_to_pipeline"] is True
         assert captured["endpoint_path"] == "/api/v1/dsp/config"
         assert captured["payload"] == {
             "node_id": "rust-stage-node",
             "stages": [{"type": "gain", "db": 6.0}],
         }
+
+    @pytest.mark.parametrize(
+        ("sidecar_behaviour", "expected_error_fragment"),
+        [
+            ("unreachable", "unreachable"),
+            ("rejected", "HTTP 422"),
+            ("unconfirmed", "did not confirm"),
+        ],
+    )
+    def test_failed_forward_to_rust_sidecar_is_reported_truthfully(
+        self, monkeypatch, tmp_path, sidecar_behaviour, expected_error_fragment
+    ):
+        from minimappr.sidecar_json_http import SidecarRequestError
+
+        _configure_env(monkeypatch, tmp_path)
+        monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "rust")
+        monkeypatch.setattr("minimappr.main._ingest_sidecar_is_running", lambda state: True)
+
+        def failing_post(base_url: str, endpoint_path: str, payload: dict):
+            if sidecar_behaviour == "unreachable":
+                raise SidecarRequestError(f"{endpoint_path} unreachable: connection refused")
+            if sidecar_behaviour == "rejected":
+                raise SidecarRequestError(f"{endpoint_path} returned HTTP 422: bad stage", status_code=422)
+            return {}
+
+        monkeypatch.setattr("minimappr.main._post_json_to_sidecar", failing_post)
+
+        with TestClient(app) as client:
+            resp = client.patch(
+                "/api/v1/pipeline/nodes/rust-fail-node/audio",
+                json={"stages": [{"type": "gain", "db": 6.0}]},
+            )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["rust_sidecar_active"] is True
+        assert body["rust_sidecar_forwarded"] is False
+        assert body["applied_to_pipeline"] is False
+        assert expected_error_fragment in body["rust_sidecar_forward_error"]
+
+
+def test_post_json_to_sidecar_raises_when_the_sidecar_is_down() -> None:
+    from minimappr.main import _post_json_to_sidecar
+    from minimappr.sidecar_json_http import SidecarRequestError
+    from tests.rust_sidecar_e2e_helpers import pick_free_tcp_port
+
+    with pytest.raises(SidecarRequestError):
+        _post_json_to_sidecar(f"http://127.0.0.1:{pick_free_tcp_port()}", "/api/v1/dsp/config", {"node_id": "n"})

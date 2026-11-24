@@ -378,6 +378,23 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     # localized detections. The storage-level dedupe made the same call after
     # the render — ~89% of classification-lane CPU on the 2026-08-01 live box.
     "fusion_report_window_localized_emission_cap": int,
+    # --- localization overhaul ---
+    # Live: the sidecar geometry publisher re-reads both on every cycle.
+    "sidecar_geometry_push_estimate_move_threshold_m": float,
+    "sidecar_geometry_reconcile_interval_seconds": float,
+    # Sidecar-restart-required: forwarded to the sidecar as launch env. The
+    # dict-valued clock-class map is not patchable (no dict coercion here).
+    "localization_max_solve_sensors": int,
+    "localization_min_pair_baseline_m": float,
+    "localization_cross_node_max_timeline_residual_seconds": float,
+    "localization_clock_unknown_uncertainty_seconds": float,
+    "localization_timestamp_step_threshold_seconds": float,
+    "localization_timestamp_step_recovery_holdoff_seconds": float,
+    "localization_trigger_noise_floor_relative_enabled": bool,
+    "localization_trigger_noise_floor_relative_db": float,
+    "localization_solver_floor_relative_db": float,
+    "localization_sensor_registry_stale_seconds": float,
+    # --- end localization overhaul ---
 }
 
 

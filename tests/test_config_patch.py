@@ -546,3 +546,55 @@ def test_patch_texture_gate_validation(monkeypatch, tmp_path: Path, patch_body: 
     with TestClient(app) as client:
         resp = client.patch("/api/v1/config", json=patch_body)
         assert resp.status_code == 422
+
+
+def test_patch_sidecar_geometry_keys_apply_live(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "rust")
+    with TestClient(app) as client:
+        resp = client.patch(
+            "/api/v1/config",
+            json={
+                "sidecar_geometry_push_estimate_move_threshold_m": 1.25,
+                "sidecar_geometry_reconcile_interval_seconds": 12.0,
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["sidecar_geometry_push_estimate_move_threshold_m"] == 1.25
+        assert body["restart_required"] == []
+        assert app.state.settings.sidecar_geometry_reconcile_interval_seconds == 12.0
+
+
+def test_patch_rust_forwarded_localization_key_requires_sidecar_restart(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("MINIMAPPR_INGEST_BACKEND", "rust")
+    with TestClient(app) as client:
+        resp = client.patch("/api/v1/config", json={"localization_max_solve_sensors": 12})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["restart_required"] == ["localization_max_solve_sensors"]
+
+
+@pytest.mark.parametrize(
+    "invalid_patch",
+    [
+        {"localization_max_solve_sensors": 1},
+        {"sidecar_geometry_reconcile_interval_seconds": 0.0},
+        {"localization_min_pair_baseline_m": -1.0},
+    ],
+)
+def test_patch_localization_overhaul_keys_are_validated(monkeypatch, tmp_path: Path, invalid_patch) -> None:
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        resp = client.patch("/api/v1/config", json=invalid_patch)
+        assert resp.status_code == 422
+        assert next(iter(invalid_patch)) in json.dumps(resp.json())
+
+
+def test_dict_valued_localization_keys_are_not_patchable(monkeypatch, tmp_path: Path) -> None:
+    _configure_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        resp = client.patch(
+            "/api/v1/config", json={"localization_clock_class_uncertainty_seconds": {"gps_locked": 1e-6}}
+        )
+        assert resp.status_code == 422

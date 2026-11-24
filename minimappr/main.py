@@ -15,6 +15,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import fields as dataclass_fields, replace
+from types import SimpleNamespace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal
 import urllib.error
@@ -53,7 +54,12 @@ from minimappr.classifiers.birdnet_threshold_set import birdnet_cutover_setting_
 from minimappr.classifiers.birdnet_v3_label_migration import birdnet_v3_rule_transform
 # --- end Field Mode W3-birdnet-cutover ---
 from minimappr.core.config_groups import group_flat_config
-from minimappr.core.localization_overhaul_config import localization_overhaul_flat_config_entries
+from minimappr.core.localization_overhaul_config import (
+    LOCALIZATION_OVERHAUL_SETTING_KEYS,
+    RUST_FORWARDED_LOCALIZATION_SETTING_KEYS,
+    localization_overhaul_flat_config_entries,
+    localization_overhaul_setting_errors,
+)
 from minimappr.core.pipeline_graph import build_pipeline_graph
 from minimappr.config import (
     FusionConfig,
@@ -132,6 +138,15 @@ from minimappr.core.bit_report import BITReportEvaluator
 from minimappr.core.cluster_registry import ClusterRegistry
 from minimappr.core.effectors.registry import EffectorManager
 from minimappr.core.node_registry import NodeRegistry
+from minimappr.sidecar_json_http import SidecarRequestError, request_sidecar_json
+from minimappr.sidecar_site_geometry_publisher import (
+    PUSH_REASON_NODE_DELETED,
+    PUSH_REASON_NODE_OVERRIDE_CHANGED,
+    PUSH_REASON_POSITION_ESTIMATOR_RESET,
+    PUSH_REASON_SITE_ORIGIN_REBOUND,
+    HttpSiteGeometryTransport,
+    SidecarSiteGeometryPublisher,
+)
 from minimappr.core.environment import LiveEnvironmentProvider
 from minimappr.core.federation import ACTIVE_TRACK_STATUSES, FederationCoordinator
 from minimappr.core.hass.state_mapper import (
@@ -504,6 +519,7 @@ def _clear_bound_runtime_state(state) -> None:
         "site_origin_contributing_node_ids",
         "effector_manager",
         "hass_bridge",
+        "site_geometry_publisher",
     )
 
 
@@ -539,6 +555,52 @@ def _request_hass_reconcile(state) -> None:
     bridge = getattr(state, "hass_bridge", None)
     if bridge is not None:
         bridge.request_reconcile()
+
+
+def _request_site_geometry_push(state, reason: str) -> None:
+    """Queue a sidecar geometry push; a no-op where this process does not own the sidecar."""
+    publisher: SidecarSiteGeometryPublisher | None = getattr(state, "site_geometry_publisher", None)
+    if publisher is not None:
+        publisher.request_push(reason)
+
+
+def _build_site_geometry_publisher(
+    app: FastAPI,
+    settings: Settings,
+    *,
+    storage,
+    initial_coordinate_frame: LocalCoordinateFrame,
+) -> SidecarSiteGeometryPublisher | None:
+    """Publisher for the process that launches the managed sidecar, else None.
+
+    In split mode that is the API process: it handles node PATCH/delete and
+    adopts origin rebinds from storage, and reads stationary estimates from the
+    checkpoints the ingest process persists.
+    """
+    if not _should_autostart_ingest_sidecar(settings):
+        return None
+    state = app.state
+
+    def current_coordinate_frame() -> LocalCoordinateFrame:
+        # Before runtime state is bound the frame is the one about to be bound.
+        return getattr(state, "coordinate_frame", None) or initial_coordinate_frame
+
+    return SidecarSiteGeometryPublisher(
+        storage=storage,
+        coordinate_frame_provider=current_coordinate_frame,
+        transport=HttpSiteGeometryTransport(_ingest_runtime_base_url(settings)),
+        sidecar_is_running=lambda: _ingest_sidecar_is_running(state),
+        estimate_move_threshold_m_provider=lambda: settings.sidecar_geometry_push_estimate_move_threshold_m,
+        reconcile_interval_seconds_provider=lambda: settings.sidecar_geometry_reconcile_interval_seconds,
+    )
+
+
+async def _stop_site_geometry_publisher(state) -> None:
+    publisher: SidecarSiteGeometryPublisher | None = getattr(state, "site_geometry_publisher", None)
+    # Cleared so a later launch outside this lifespan cannot read closed storage.
+    state.site_geometry_publisher = None
+    if publisher is not None:
+        await publisher.stop()
 
 
 def _warn_when_direct_ingest_falls_back(settings: Settings, sidecar_state: _SidecarState) -> None:
@@ -583,8 +645,12 @@ async def _rebind_site_origin(app: FastAPI, resolved_site_origin) -> None:
         fusion_node.reproject_position_estimators(previous_coordinate_frame)
     state.classifier = new_classifier
     state.coordinate_frame = new_coordinate_frame
+    registry = getattr(state, "registry", None)
+    if registry is not None:
+        registry.set_coordinate_frame(new_coordinate_frame)
     state.diagnostics.replace_classifier(new_classifier)
     _apply_site_origin_resolution(state, resolved_site_origin)
+    _request_site_geometry_push(state, PUSH_REASON_SITE_ORIGIN_REBOUND)
 
     if previous_classifier is not None and previous_classifier is not new_classifier:
         try:
@@ -1356,6 +1422,9 @@ def _count_failed_spool_manifest_items(spool_dir: "Path") -> int:
 async def _start_ingest_sidecar(
     settings: "Settings",
 ) -> "asyncio.subprocess.Process | None":
+    # Read from app.state on every call so a supervised restart also launches
+    # with the latest adopted geometry.
+    publisher: SidecarSiteGeometryPublisher | None = getattr(app.state, "site_geometry_publisher", None)
     return await _runtime_start_ingest_sidecar(
         settings,
         default_classifier_command_json_builder=_default_sidecar_classifier_command_json,
@@ -1363,6 +1432,7 @@ async def _start_ingest_sidecar(
         wait_for_ready=_wait_for_ingest_sidecar_ready,
         create_subprocess_exec=asyncio.create_subprocess_exec,
         logger=logger,
+        site_geometry_json_provider=publisher.launch_geometry_json if publisher is not None else None,
     )
 
 
@@ -1432,12 +1502,18 @@ async def _api_only_lifespan(app: FastAPI, settings: Settings):
         environment_provider=common_live_runtime_services.environment_provider,
     )
 
+    app.state.site_geometry_publisher = _build_site_geometry_publisher(
+        app,
+        settings,
+        storage=storage,
+        initial_coordinate_frame=common_live_runtime_services.coordinate_frame,
+    )
     sidecar_state, sidecar_supervision_task = await _launch_managed_ingest_sidecar(
         settings,
         startup_failure_log_message="Ingest sidecar startup failed in API role",
     )
 
-    registry = NodeRegistry()
+    registry = NodeRegistry(coordinate_frame=common_live_runtime_services.coordinate_frame)
     await registry.load_overrides(await storage.list_node_overrides())
 
     _bind_runtime_state(
@@ -1478,11 +1554,14 @@ async def _api_only_lifespan(app: FastAPI, settings: Settings):
             federation=federation,
             storage=storage,
         )
+        if app.state.site_geometry_publisher is not None:
+            app.state.site_geometry_publisher.start()
         if settings.effectors_enabled:
             await effector_manager.start()
         yield
     finally:
         shutdown_timeout_s = 15.0
+        await _stop_site_geometry_publisher(app.state)
         await _shutdown_managed_ingest_sidecar(
             sidecar_state,
             sidecar_supervision_task,
@@ -1527,8 +1606,15 @@ async def lifespan(app: FastAPI):
         storage=storage,
         tracking_cfg=tracking_cfg,
     )
+    combined_runtime_core_services.registry.set_coordinate_frame(common_live_runtime_services.coordinate_frame)
     await combined_runtime_core_services.registry.load_overrides(await storage.list_node_overrides())
 
+    app.state.site_geometry_publisher = _build_site_geometry_publisher(
+        app,
+        settings,
+        storage=storage,
+        initial_coordinate_frame=common_live_runtime_services.coordinate_frame,
+    )
     sidecar_state, sidecar_supervision_task = await _launch_managed_ingest_sidecar(
         settings,
         startup_failure_log_message="Ingest sidecar startup failed; continuing with direct ingest fallback",
@@ -1627,6 +1713,8 @@ async def lifespan(app: FastAPI):
             settings=settings,
             storage=storage,
         )
+        if app.state.site_geometry_publisher is not None:
+            app.state.site_geometry_publisher.start()
         if settings.effectors_enabled:
             await effector_manager.start()
         if settings.hass_enabled:
@@ -1645,6 +1733,7 @@ async def lifespan(app: FastAPI):
             task_handles,
             shutdown_timeout_seconds=shutdown_timeout_s,
         )
+        await _stop_site_geometry_publisher(app.state)
 
         # Stop the ingest sidecar before tearing down the rest of the Python
         # runtime so startup/bind failures do not leave it running.
@@ -2568,6 +2657,9 @@ async def patch_node(node_id: str, payload: NodePatchRequest, request: Request) 
             existing_overrides["updated_ns"] = time.time_ns()
         await state.storage.set_node_overrides(node_id, existing_overrides)
         await state.registry.set_overrides(node_id, existing_overrides)
+        overrides_changed = True
+    else:
+        overrides_changed = False
     updated = await state.storage.get_node_by_id(node_id)
     if updated is None:
         raise HTTPException(status_code=404, detail="Node not found")
@@ -2581,6 +2673,10 @@ async def patch_node(node_id: str, payload: NodePatchRequest, request: Request) 
         manager: EffectorManager = state.effector_manager
         await manager.detach(node_id)
         await manager.register_node(updated)
+    if overrides_changed:
+        # Position, accuracy, orientation, mobility and filter overrides all
+        # change the solve geometry (an estimator reset drops the estimate).
+        _request_site_geometry_push(state, PUSH_REASON_NODE_OVERRIDE_CHANGED)
     await _broadcast_node_updated(state, node_id)
     return _redact_node_transport(updated)
 
@@ -2595,6 +2691,7 @@ async def reset_node_position_estimator(node_id: str, request: Request) -> dict:
         await fusion_node.reset_node_position_estimator(node_id)
     else:
         await state.storage.delete_node_position_estimator_state(node_id)
+    _request_site_geometry_push(state, PUSH_REASON_POSITION_ESTIMATOR_RESET)
     await _broadcast_node_updated(state, node_id)
     return {"node_id": node_id, "reset": True}
 
@@ -2816,6 +2913,7 @@ async def delete_node(node_id: str, request: Request) -> dict:
     if callable(purge):
         purge(node_id)
     _request_hass_reconcile(state)
+    _request_site_geometry_push(state, PUSH_REASON_NODE_DELETED)
 
     return {"ok": True, "node_id": node_id}
 
@@ -3445,6 +3543,8 @@ _SIDECAR_RESTART_REQUIRED_KEYS = {
     # --- end Field Mode W2-tracker ---
     # Field Mode W3-entity: the entity coordinator is built with FusionNode.
     *(key for key in CONFIG_PATCH_ALLOWLIST if is_entity_reporting_setting_key(key)),
+    # Localization overhaul: forwarded to the sidecar as MINIMAPPR_<KEY> at spawn.
+    *(key for key in CONFIG_PATCH_ALLOWLIST if key in RUST_FORWARDED_LOCALIZATION_SETTING_KEYS),
 }
 
 
@@ -3692,6 +3792,17 @@ def _birdnet_cutover_patch_errors(coerced: dict[str, object], settings: Settings
     except (TypeError, ValueError) as exc:
         return [f"birdnet cutover settings: {exc}"]
 # --- end Field Mode W3-birdnet-cutover ---
+
+
+def _localization_overhaul_patch_errors(coerced: dict[str, object], settings: Settings) -> list[str]:
+    """Same validation Settings applies at startup, on the merged view, so a
+    persisted override can never fail the next startup."""
+    if not any(key in coerced for key in LOCALIZATION_OVERHAUL_SETTING_KEYS):
+        return []
+    merged_view = SimpleNamespace(
+        **{key: coerced.get(key, getattr(settings, key)) for key in LOCALIZATION_OVERHAUL_SETTING_KEYS}
+    )
+    return localization_overhaul_setting_errors(merged_view)
 
 
 @app.patch("/api/v1/config")
@@ -3970,6 +4081,7 @@ async def patch_config(request: Request) -> dict:
     errors.extend(_birdnet_cutover_patch_errors(coerced, settings))
     # --- end Field Mode W3-birdnet-cutover ---
     errors.extend(entity_reporting_patch_errors(coerced, settings))  # Field Mode W3-entity
+    errors.extend(_localization_overhaul_patch_errors(coerced, settings))
     hass_enabled = bool(coerced.get("hass_enabled", settings.hass_enabled))
     hass_host = str(coerced.get("hass_mqtt_host", settings.hass_mqtt_host)).strip()
     if hass_enabled and not hass_host:
@@ -4119,7 +4231,20 @@ def _build_rust_stages(dsp_status: dict) -> list[PipelineStageView]:
     ]
 
 
+# Status polls only: a dashboard read with a missing counter is harmless.
+SIDECAR_STATUS_POLL_TIMEOUT_SECONDS = 1.0
+# Commands wait a little longer: a reported failure must mean the sidecar did
+# not take the change, not that it was briefly slow.
+SIDECAR_COMMAND_TIMEOUT_SECONDS = 2.0
+
+
+def _post_json_to_sidecar(base_url: str, path: str, body: dict) -> dict:
+    """POST a command to the sidecar; raises ``SidecarRequestError`` if it was not accepted."""
+    return request_sidecar_json(base_url, path, body=body, timeout_seconds=SIDECAR_COMMAND_TIMEOUT_SECONDS)
+
+
 def _fetch_json_from_sidecar(base_url: str, path: str, body: dict | None = None) -> dict:
+    """Best-effort status read: ``{}`` on any failure. Never use it to confirm a command."""
     url = f"{base_url.rstrip('/')}{path}"
     try:
         if body is not None:
@@ -4130,7 +4255,7 @@ def _fetch_json_from_sidecar(base_url: str, path: str, body: dict | None = None)
             )
         else:
             req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=1.0) as resp:
+        with urllib.request.urlopen(req, timeout=SIDECAR_STATUS_POLL_TIMEOUT_SECONDS) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except Exception:
         return {}
@@ -4593,6 +4718,7 @@ async def patch_node_audio(node_id: str, body: NodeAudioOverride, request: Reque
     fusion_node: FusionNode | None = getattr(state, "fusion_node", None)
     rust_active = _ingest_sidecar_is_running(state) and settings.ingest_backend == "rust"
     sidecar_forward_ok = False
+    sidecar_forward_error: str | None = None
 
     if fusion_node is not None:
         # The Python-side factory remains the source of diagnostics and digital-trim
@@ -4604,21 +4730,31 @@ async def patch_node_audio(node_id: str, body: NodeAudioOverride, request: Reque
         # Remove None values — sidecar treats missing keys as "unchanged".
         sidecar_payload = {k: v for k, v in sidecar_payload.items() if v is not None}
         try:
-            sidecar_forward_ok = await asyncio.to_thread(
-                _fetch_json_from_sidecar,
+            sidecar_reply = await asyncio.to_thread(
+                _post_json_to_sidecar,
                 _ingest_runtime_base_url(settings),
                 "/api/v1/dsp/config",
                 sidecar_payload,
-            ) is not None
-        except Exception:
-            sidecar_forward_ok = False
+            )
+        except SidecarRequestError as exc:
+            sidecar_forward_error = str(exc)
+        else:
+            # The sidecar answers {"applied": true} once the override is stored.
+            sidecar_forward_ok = sidecar_reply.get("applied") is True
+            if not sidecar_forward_ok:
+                sidecar_forward_error = f"sidecar did not confirm the override: {sidecar_reply}"
+        if sidecar_forward_error is not None:
+            logger.warning("Node %s audio override was not applied by the Rust sidecar: %s", node_id, sidecar_forward_error)
 
     return {
         "node_id": node_id,
         "override": override_dict,
-        "applied_to_pipeline": (fusion_node is not None) or sidecar_forward_ok,
+        # With Rust ingest the live DSP path is the sidecar's; the Python-side
+        # copy alone does not change what the pipeline hears.
+        "applied_to_pipeline": sidecar_forward_ok if rust_active else fusion_node is not None,
         "rust_sidecar_active": rust_active,
         "rust_sidecar_forwarded": sidecar_forward_ok,
+        "rust_sidecar_forward_error": sidecar_forward_error,
     }
 
 

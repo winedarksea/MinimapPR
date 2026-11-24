@@ -181,10 +181,14 @@ def _sidecar_classifier_command_json(
     return default_classifier_command_json_builder(settings)
 
 
+SITE_GEOMETRY_LAUNCH_ENVIRONMENT_VARIABLE = "MINIMAPPR_SITE_GEOMETRY_JSON"
+
+
 def build_ingest_sidecar_environment(
     settings,
     *,
     default_classifier_command_json_builder: Callable[[object], str | None],
+    site_geometry_json: str | None = None,
 ) -> dict[str, str]:
     process_config = ingest_sidecar_process_config(settings)
     classification_window_seconds = sidecar_classification_window_seconds(settings)
@@ -281,6 +285,10 @@ def build_ingest_sidecar_environment(
     )
     if classifier_command_json is not None:
         env["MINIMAPPR_SIDECAR_CLASSIFIER_COMMAND_JSON"] = classifier_command_json
+    if site_geometry_json is not None:
+        # Same body as POST /api/v1/dsp/geometry, so the first solve already
+        # runs in Python's site frame instead of the sidecar's automatic one.
+        env[SITE_GEOMETRY_LAUNCH_ENVIRONMENT_VARIABLE] = site_geometry_json
     return env
 
 
@@ -611,8 +619,13 @@ async def start_ingest_sidecar(
     wait_for_ready: Callable[..., Awaitable[None]],
     create_subprocess_exec: Callable[..., Awaitable[asyncio.subprocess.Process]],
     logger,
+    site_geometry_json_provider: Callable[[], Awaitable[str | None]] | None = None,
 ) -> "asyncio.subprocess.Process | None":
-    """Launch the Rust ingest sidecar as a managed child process."""
+    """Launch the Rust ingest sidecar as a managed child process.
+
+    ``site_geometry_json_provider`` is awaited on every (re)launch so a
+    restarted sidecar starts from the latest adopted geometry, not the first.
+    """
     process_config = ingest_sidecar_process_config(settings)
     sidecar_startup = ingest_sidecar_startup_config(settings)
     binary = process_config.binary_path
@@ -632,9 +645,11 @@ async def start_ingest_sidecar(
             "Ingest sidecar readiness endpoint is already healthy on "
             f"port {process_config.sidecar_port}. Another ingest worker is likely already running."
         )
+    site_geometry_json = await site_geometry_json_provider() if site_geometry_json_provider is not None else None
     env = build_ingest_sidecar_environment(
         settings,
         default_classifier_command_json_builder=default_classifier_command_json_builder,
+        site_geometry_json=site_geometry_json,
     )
     if process_config.allow_non_tmpfs_journal and platform.system() == "Linux":
         logger.warning(

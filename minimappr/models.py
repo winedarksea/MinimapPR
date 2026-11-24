@@ -200,6 +200,9 @@ class NodeSafetyConfig(BaseModel):
 class NodeOverrides(BaseModel):
     position_m: Vec3 | None = None
     position_geo: GeoPoint | None = None
+    # 1-sigma accuracy (m) of the entered position; it widens the solve error
+    # where hand-measured nodes mix with GPS or surveyed ones.
+    position_std_m: float | None = Field(default=None, ge=0.0)
     orientation: NodeOrientation | None = None
     mobility: Literal["stationary", "mobile"] | None = None
     # Absent means the server derives the filter from mobility: KDE for fixed
