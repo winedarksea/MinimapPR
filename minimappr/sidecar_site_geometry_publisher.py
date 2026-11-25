@@ -186,22 +186,24 @@ class SidecarSiteGeometryPublisher:
     async def launch_geometry_json(self) -> str | None:
         """Body for ``MINIMAPPR_SITE_GEOMETRY_JSON`` at (re)launch.
 
-        A storage failure here must not stop the sidecar from starting, since
-        audio continuity outranks geometry: the sidecar then runs on its
-        automatic frame until the reconcile tick delivers a push.
+        No geometry failure (storage, or a body that will not serialize) may
+        stop the sidecar from starting, since audio continuity outranks
+        geometry: the sidecar then runs on its automatic frame until the
+        reconcile tick delivers a push.
         """
         try:
             self._adopt(await self.build_snapshot(), estimate_drift_counts=True)
+            body = self.adopted_push_body()
+            launch_json = json.dumps(body, separators=(",", ":"), allow_nan=False)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Site geometry for sidecar launch could not be built; launching without it: %s", exc)
             return None
-        body = self.adopted_push_body()
         logger.info(
             "Sidecar launch carries site geometry revision %d (%d node placements)",
             self._adopted_revision,
             len(body["node_placements"]) if body else 0,
         )
-        return json.dumps(body, separators=(",", ":"), allow_nan=False)
+        return launch_json
 
     def request_push(self, reason: str) -> None:
         """Ask for a fresh snapshot to be pushed soon; never blocks the caller."""

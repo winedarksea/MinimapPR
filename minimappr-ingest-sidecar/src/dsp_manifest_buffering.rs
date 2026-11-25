@@ -26,7 +26,6 @@ pub(super) struct OwnedManifestAudio {
     pub(super) end_sample_index: Option<i64>,
     pub(super) node_timestamp_is_available: bool,
     pub(super) buffer_uses_receipt_time: bool,
-    pub(super) arrived_via_channel: bool,
 }
 
 pub(super) struct BufferedManifestAudio {
@@ -57,6 +56,12 @@ impl DspWorker {
 
         let stream_key = first_handle.stream_key.clone();
         let arrived_via_channel = manifest.raw_payload.is_some();
+        if self
+            .should_skip_stale_manifest_for_live_buffer(&manifest, now_ns, arrived_via_channel)
+            .await
+        {
+            return None;
+        }
         let raw_payload = if let Some(bytes) = manifest.raw_payload.clone() {
             bytes
         } else {
@@ -231,7 +236,6 @@ impl DspWorker {
                 end_sample_index,
                 node_timestamp_is_available,
                 buffer_uses_receipt_time,
-                arrived_via_channel,
             });
         }
         Some(owned_segments)
@@ -258,27 +262,28 @@ impl DspWorker {
         .await;
     }
 
-    pub(super) async fn should_skip_stale_manifest_for_live_buffer(
+    /// Checked before routing: a stale manifest must not refresh the sensor
+    /// registry (or let the automatic frame adopt an origin from old GPS).
+    async fn should_skip_stale_manifest_for_live_buffer(
         &mut self,
-        owned: &OwnedManifestAudio,
+        manifest: &DspManifest,
+        now_ns: u128,
+        arrived_via_channel: bool,
     ) -> bool {
-        let source_manifest_is_stale = manifest_is_older_than_buffer_horizon(
-            &owned.manifest,
-            owned.now_ns,
-            self.config.max_buffer_seconds,
-        );
+        let source_manifest_is_stale =
+            manifest_is_older_than_buffer_horizon(manifest, now_ns, self.config.max_buffer_seconds);
         if source_manifest_is_stale
             && self.config.skip_stale_manifests_for_live_buffer
-            && !owned.arrived_via_channel
+            && !arrived_via_channel
         {
             debug!(
-                manifest_id = %owned.manifest.manifest_id,
+                manifest_id = %manifest.manifest_id,
                 "DSP worker skipped stale disk manifest to protect live buffer continuity"
             );
-            self.defer_source_manifest_consumption(&owned.manifest);
+            self.defer_source_manifest_consumption(manifest);
             let mut st = self.state.write().await;
             st.total_stale_manifest_skips += 1;
-            st.last_processed_ns = Some(owned.now_ns);
+            st.last_processed_ns = Some(now_ns);
             return true;
         }
         false

@@ -10,10 +10,8 @@ from typing import Any, Literal
 import numpy as np
 
 from minimappr.api.journal_reader import JournalPayloadHandle
-from minimappr.api.rust_localization_solve_contract import (
-    RustLocalizationSolve,
-    parse_rust_localization_solve,
-)
+from minimappr.api.rust_localization_solve_contract import RustLocalizationSolve
+from minimappr.api.rust_solve_contract_degradation import parse_rust_localization_solve_or_degrade
 from minimappr.api.rust_manifest_value_coercion import (
     coerce_covariance_matrix,
     coerce_pair_tdoas,
@@ -164,8 +162,22 @@ def load_localized_render_manifest_bundle(
     node_context_payload = manifest_payload.get("node_context")
     if not isinstance(node_context_payload, dict):
         raise ValueError("Rust DSP manifest omitted in-memory source node_context")
-    node, event_time_ns, source_type, time_quality, environment = \
-        _load_source_context_from_channel_manifest(node_context_payload)
+    # Parsed before the source context: a solve's window centre is the stored
+    # time, so only a legacy (no-provenance) manifest needs node_context.toa_ns.
+    localization_payload = manifest_payload.get("localization")
+    localization_solve, solve_contract_violation = parse_rust_localization_solve_or_degrade(
+        localization_payload, manifest_id=manifest_id
+    )
+    if solve_contract_violation is not None:
+        # None of the broken solve's numbers are trusted; omni at the node.
+        localization_payload = None
+        fallback_reason = solve_contract_violation
+    node, event_time_ns, source_type, time_quality, environment = _load_source_context_from_channel_manifest(
+        node_context_payload,
+        solve_window_center_time_ns=(
+            localization_solve.provenance.window_center_time_ns if localization_solve is not None else None
+        ),
+    )
     derived_handle = JournalPayloadHandle.from_mapping(derived_handle_payload, journal_streams_dir=journal_streams_dir)
     # Prefer inline base64 PCM from the SSE manifest (memory-only path, no disk read).
     # Fall back to reading the derived_handle segment_path for disk-backed (spool) consumers.
@@ -180,10 +192,6 @@ def load_localized_render_manifest_bundle(
         coverage_payload = paired_classifier_manifest_payload.get("coverage_stats")
     audio_quality = _load_audio_coverage_stats(coverage_payload)
 
-    localization_payload = manifest_payload.get("localization")
-    localization_solve = parse_rust_localization_solve(localization_payload)
-    if localization_solve is not None:
-        event_time_ns = localization_solve.provenance.window_center_time_ns
     if isinstance(localization_payload, dict) and isinstance(localization_payload.get("position_m"), list):
         localization_position_m = tuple(float(value) for value in localization_payload["position_m"])
         localization_confidence = float(localization_payload.get("confidence") or 0.0)
@@ -363,16 +371,22 @@ def _load_authoritative_classification(
 
 def _load_source_context_from_channel_manifest(
     node_context: dict[str, Any],
+    *,
+    solve_window_center_time_ns: int | None,
 ) -> tuple[NodeSpec, int, str, TimeQuality, dict[str, Any]]:
     """Reconstruct source context from node_context embedded in memory-path manifests.
 
-    The event time is packet-derived only (``toa_ns``). Receipt time (``tor_ns``)
-    is never substituted: it can sit seconds away from when the sound arrived.
+    The event time is packet-derived only: the solve's window centre, else
+    (legacy manifest) ``toa_ns``. Receipt time (``tor_ns``) is never
+    substituted: it can sit seconds away from when the sound arrived.
     """
     node = NodeSpec.model_validate(node_context["node"])
-    toa_ns = node_context.get("toa_ns")
-    if not toa_ns:
-        raise ValueError("Rust DSP manifest carries no packet-derived time (node_context.toa_ns)")
+    event_time_ns = solve_window_center_time_ns
+    if event_time_ns is None:
+        toa_ns = node_context.get("toa_ns")
+        if not toa_ns:
+            raise ValueError("Rust DSP manifest carries no packet-derived time (node_context.toa_ns)")
+        event_time_ns = int(toa_ns)
     source_type = str(node_context.get("source_type") or "raw_sensor")
     time_quality_str = str(node_context.get("time_quality") or "free_running")
     try:
@@ -383,12 +397,12 @@ def _load_source_context_from_channel_manifest(
     environment: EnvironmentSampleIn | None = None
     if isinstance(environment_payload, dict):
         sample_payload = dict(environment_payload)
-        sample_payload.setdefault("timestamp_ns", int(toa_ns))
+        sample_payload.setdefault("timestamp_ns", event_time_ns)
         try:
             environment = EnvironmentSampleIn.model_validate(sample_payload)
         except Exception:  # noqa: BLE001
             environment = None
-    return (node, int(toa_ns), source_type, time_quality, _environment_summary(environment))
+    return (node, event_time_ns, source_type, time_quality, _environment_summary(environment))
 
 
 def _decode_classifier_render_audio(

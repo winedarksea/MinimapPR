@@ -9,14 +9,23 @@
 //! solves that event's window:
 //!
 //! - when the buffers now cover exactly the sensors the event solve used, it
-//!   re-runs that solve (same windows, layout snapshot, centre and
-//!   `solve_id`), so the stored detection names the solve it came from. The
-//!   re-run is deterministic and on the render's own payload, which avoids a
-//!   cross-task wait on the trigger's result;
+//!   re-runs that solve (same windows, layout snapshot, centre, sample rate,
+//!   sound speed and `solve_id`), so the stored detection names the solve it
+//!   came from. The re-run is deterministic and on the render's own payload,
+//!   which avoids a cross-task wait on the trigger's result;
 //! - when a member whose audio was late now covers the window too, it solves
 //!   the fuller sensor set as a new solve of the same window (new `solve_id`)
 //!   and that solve becomes the one later renders repeat. Repeating the
 //!   poorer trigger-time solve would throw the late member away.
+//!
+//! A render reported at another sample rate than the event (mixed-rate
+//! cluster) never takes the event over: its windows and the event's are
+//! different sample grids, and the render beamforms at its own rate.
+//!
+//! An event solve parked by the coverage wait is only dispatched at a batch
+//! boundary (or later), so a covering render dispatched in the meantime would
+//! find no event and solve its own trailing window. Such a render is held
+//! until the parked event is dispatched, then takes it over as above.
 
 use super::*;
 
@@ -30,12 +39,18 @@ struct RecentEventTriggerSolve {
     sensor_layout: Arc<SolveSensorLayout>,
     pair_admission: SolvePairAdmission,
     node_clock_assessments: Arc<NodeClockAssessments>,
+    /// The rate the event's windows are sampled at; lags are counted in it.
+    sample_rate_hz: u32,
+    sound_speed_mps: f32,
 }
 
 /// One entry per buffer key, dropped with the buffer.
 #[derive(Default)]
 pub(crate) struct RecentEventTriggerSolves {
     by_buffer_key: HashMap<String, RecentEventTriggerSolve>,
+    /// Renders covering a parked event solve, in dispatch order. Bounded by
+    /// the coverage wait's total cap: the parked event is always released.
+    held_renders_by_buffer_key: HashMap<String, Vec<ComputePayload>>,
 }
 
 fn is_event_trigger(attempt_kind: SolveAttemptKind) -> bool {
@@ -54,6 +69,22 @@ fn same_sensor_order(a: &SolveSensorLayout, b: &SolveSensorLayout) -> bool {
             .all(|(left, right)| left.sensor_id == right.sensor_id)
 }
 
+/// The span of a render that could take over an event solve; omni renders
+/// (override channels) and sub-SRP buffers never solve.
+fn covering_render_span_ns(payload: &ComputePayload) -> Option<std::ops::RangeInclusive<i128>> {
+    if !payload.run_classifier_render
+        || payload.omni_channels_override.is_some()
+        || payload.sensor_layout.sensor_count() < MIN_SRP_CHANNEL_COUNT
+    {
+        return None;
+    }
+    Some(payload.classifier_render_start_ns? as i128..=payload.classifier_render_end_ns? as i128)
+}
+
+fn render_covers_window(payload: &ComputePayload, window_center_time_ns: i128) -> bool {
+    covering_render_span_ns(payload).is_some_and(|span| span.contains(&window_center_time_ns))
+}
+
 fn remembered_solve_of(payload: &ComputePayload) -> RecentEventTriggerSolve {
     RecentEventTriggerSolve {
         solve_id: payload.solve_id.clone(),
@@ -64,6 +95,8 @@ fn remembered_solve_of(payload: &ComputePayload) -> RecentEventTriggerSolve {
         sensor_layout: payload.sensor_layout.clone(),
         pair_admission: payload.pair_admission.clone(),
         node_clock_assessments: payload.node_clock_assessments.clone(),
+        sample_rate_hz: payload.sr,
+        sound_speed_mps: payload.effective_sound_speed_mps,
     }
 }
 
@@ -81,17 +114,7 @@ impl RecentEventTriggerSolves {
                 .insert(payload.stream_key.clone(), remembered_solve_of(payload));
             return;
         }
-        // Omni renders (override channels) and sub-SRP buffers never solve.
-        if !payload.run_classifier_render
-            || payload.omni_channels_override.is_some()
-            || payload.sensor_layout.sensor_count() < MIN_SRP_CHANNEL_COUNT
-        {
-            return;
-        }
-        let (Some(render_start_ns), Some(render_end_ns)) = (
-            payload.classifier_render_start_ns,
-            payload.classifier_render_end_ns,
-        ) else {
+        let Some(render_span_ns) = covering_render_span_ns(payload) else {
             return;
         };
         let Some(event) = self.by_buffer_key.get(&payload.stream_key) else {
@@ -100,11 +123,14 @@ impl RecentEventTriggerSolves {
         let Some(buffers) = buffers else {
             return;
         };
-        let covered = (render_start_ns as i128..=render_end_ns as i128)
-            .contains(&event.window_center_time_ns);
+        let covered = render_span_ns.contains(&event.window_center_time_ns);
         // The render beamforms its windows with the solve's positions, so the
-        // snapshot must index the same buffer channels as the render does.
-        if !covered || !same_sensor_order(&event.sensor_layout, &payload.sensor_layout) {
+        // snapshot must index the same buffer channels as the render does, on
+        // the same sample grid.
+        if !covered
+            || event.sample_rate_hz != payload.sr
+            || !same_sensor_order(&event.sensor_layout, &payload.sensor_layout)
+        {
             return;
         }
         let layout_buffers = &buffers[..payload.sensor_layout.sensor_count().min(buffers.len())];
@@ -147,9 +173,85 @@ impl RecentEventTriggerSolves {
         payload.sensor_layout = event.sensor_layout.clone();
         payload.pair_admission = event.pair_admission.clone();
         payload.node_clock_assessments = event.node_clock_assessments.clone();
+        payload.effective_sound_speed_mps = event.sound_speed_mps;
     }
 
+    /// Held renders are kept: the batch boundary releases them once their
+    /// parked event is gone, so a source manifest is never dropped unconsumed.
     pub(crate) fn forget(&mut self, buffer_key: &str) {
         self.by_buffer_key.remove(buffer_key);
+    }
+
+    fn hold_render(&mut self, payload: ComputePayload) {
+        self.held_renders_by_buffer_key
+            .entry(payload.stream_key.clone())
+            .or_default()
+            .push(payload);
+    }
+
+    fn take_held_renders(&mut self, buffer_key: &str) -> Vec<ComputePayload> {
+        self.held_renders_by_buffer_key
+            .remove(buffer_key)
+            .unwrap_or_default()
+    }
+
+    fn held_render_buffer_keys(&self) -> Vec<String> {
+        self.held_renders_by_buffer_key.keys().cloned().collect()
+    }
+}
+
+impl DspWorker {
+    /// The covered-event step of dispatch: returns the payloads to dispatch
+    /// now, in order (none when `payload` is a render held for a parked
+    /// event; the event plus its released renders when the event goes out).
+    pub(super) fn route_through_covered_event_solves(
+        &mut self,
+        mut payload: ComputePayload,
+    ) -> Vec<ComputePayload> {
+        let buffer_key = payload.stream_key.clone();
+        if self.parked_event_covered_by(&payload) {
+            self.recent_event_trigger_solves.hold_render(payload);
+            return Vec::new();
+        }
+        let buffers = self.buffers.get(&buffer_key).map(Vec::as_slice);
+        self.recent_event_trigger_solves
+            .remember_or_attach(&mut payload, buffers);
+        let mut ready = vec![payload];
+        ready.extend(self.release_held_renders_no_longer_waiting(&buffer_key));
+        ready
+    }
+
+    /// Batch boundary: a parked event can also end without a dispatch (its
+    /// buffer was evicted); renders held for it then go out on their own.
+    pub(super) fn release_every_held_render_no_longer_waiting(&mut self) -> Vec<ComputePayload> {
+        self.recent_event_trigger_solves
+            .held_render_buffer_keys()
+            .into_iter()
+            .flat_map(|buffer_key| self.release_held_renders_no_longer_waiting(&buffer_key))
+            .collect()
+    }
+
+    fn parked_event_covered_by(&self, payload: &ComputePayload) -> bool {
+        self.deferred_localizations
+            .pending_window_center_time_ns(&payload.stream_key)
+            .is_some_and(|center_time_ns| render_covers_window(payload, center_time_ns))
+    }
+
+    fn release_held_renders_no_longer_waiting(&mut self, buffer_key: &str) -> Vec<ComputePayload> {
+        let held_renders = self
+            .recent_event_trigger_solves
+            .take_held_renders(buffer_key);
+        let mut released = Vec::with_capacity(held_renders.len());
+        for mut render in held_renders {
+            if self.parked_event_covered_by(&render) {
+                self.recent_event_trigger_solves.hold_render(render);
+                continue;
+            }
+            let buffers = self.buffers.get(buffer_key).map(Vec::as_slice);
+            self.recent_event_trigger_solves
+                .remember_or_attach(&mut render, buffers);
+            released.push(render);
+        }
+        released
     }
 }

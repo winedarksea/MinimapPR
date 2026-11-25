@@ -100,6 +100,25 @@ def test_node_override_patch_requests_a_push(monkeypatch, tmp_path, recording_pu
     assert recording_publisher.stopped
 
 
+def test_non_finite_override_is_rejected_at_the_api(monkeypatch, tmp_path, recording_publisher) -> None:
+    # Starlette parses NaN/Infinity; Rust would refuse the geometry at launch.
+    _configure_managed_rust_sidecar_env(monkeypatch, tmp_path)
+    with TestClient(app) as client:
+        _register_offline_node(client, "pinned")
+        for overrides in (
+            {"position_m": [3.0, 4.0, 1.0], "position_std_m": float("inf")},
+            {"position_m": [float("nan"), 4.0, 1.0]},
+        ):
+            # httpx refuses to encode non-finite JSON; send what a client could.
+            response = client.patch(
+                "/api/v1/nodes/pinned",
+                content=json.dumps({"overrides": overrides}).encode(),
+                headers={"content-type": "application/json"},
+            )
+            assert response.status_code == 422, response.text
+    assert recording_publisher.requested_reasons == []
+
+
 def test_non_geometry_patch_does_not_push(monkeypatch, tmp_path, recording_publisher) -> None:
     _configure_managed_rust_sidecar_env(monkeypatch, tmp_path)
     with TestClient(app) as client:

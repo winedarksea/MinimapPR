@@ -93,6 +93,16 @@ impl DeferredLocalizationScheduler {
             .is_some_and(|state| state.pending.is_some())
     }
 
+    /// Window centre of the solve parked on `buffer_key`, if one is parked.
+    pub(crate) fn pending_window_center_time_ns(&self, buffer_key: &str) -> Option<i128> {
+        let pending = self
+            .states_by_buffer_key
+            .get(buffer_key)?
+            .pending
+            .as_ref()?;
+        Some(pending.span.center_time_ns)
+    }
+
     /// Record channel progress for `buffer_key` (stall accounting). Called
     /// after every append to that buffer; never dispatches mid-batch.
     pub(crate) fn observe_channel_progress(

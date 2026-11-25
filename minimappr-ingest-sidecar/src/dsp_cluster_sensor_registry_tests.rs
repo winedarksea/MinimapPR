@@ -11,7 +11,7 @@ use minimappr_core::sirith_array_geometry::SIRITH_PLANAR_MIC_OFFSETS_M;
 use minimappr_core::site_frame_projection::local_enu_to_geodetic;
 
 pub(super) const SECOND_NS: u128 = 1_000_000_000;
-const STALE_SECONDS: f64 = 120.0;
+pub(super) const STALE_SECONDS: f64 = 120.0;
 pub(super) const RATE_HZ: u32 = 16_000;
 pub(super) const SITE_ORIGIN: GeodeticOrigin = GeodeticOrigin {
     lat: 45.0,

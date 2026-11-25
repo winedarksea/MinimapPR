@@ -1,6 +1,9 @@
 //! Worker-level coverage race tests: two tetrahedral nodes share one cluster
 //! buffer and node b delivers each frame after node a's next frame.
 
+use super::dsp_worker_test_node_fixtures::{
+    fixture_frame_manifest, CoherentPointSource, FixtureClusterGeometry, FixtureNode,
+};
 use super::dsp_worker_tests::{
     drain_published_manifests, encode_pcm16le_b64, raw_manifest_for_payload_with_metadata,
     store_forward_payload_with_channel_count,
@@ -85,6 +88,11 @@ impl RaceHarness {
     /// Delivers a caller-built manifest (fixture nodes, custom geometry).
     pub(super) async fn deliver_manifest(&mut self, manifest: DspManifest) {
         self.worker.process_one(manifest, 1).await;
+    }
+
+    /// Delivers caller-built manifests as one poll batch.
+    pub(super) async fn deliver_batch(&mut self, manifests: Vec<DspManifest>) {
+        self.worker.process_batch_inline(manifests).await;
     }
 
     pub(super) fn storage_root(&self) -> &std::path::Path {
@@ -578,4 +586,35 @@ async fn render_on_a_parked_trigger_frame_publishes_one_result_carrying_the_rend
         total_localization_results,
         real_results_by_segment.len() as u64
     );
+}
+
+#[tokio::test]
+async fn stale_disk_manifest_is_skipped_before_it_reaches_the_sensor_registry() {
+    // A disk-spooled manifest received long ago must not refresh the sensor
+    // registry, nor let the automatic frame adopt its origin from old GPS.
+    const STALE_BY_SECONDS: u64 = 3_600;
+    let mut harness = RaceHarness::new(DspWorkerConfig {
+        skip_stale_manifests_for_live_buffer: true,
+        ..race_config(true)
+    })
+    .await;
+    let node = FixtureNode::tetra("stale-tetra", [0.0, 0.0, 0.0]);
+    let source = CoherentPointSource::new([5.0, 5.0, 1.0], 1);
+    let mut manifest = fixture_frame_manifest(
+        harness.storage_root(),
+        &node,
+        0,
+        &source,
+        &FixtureClusterGeometry::AutomaticGps,
+    )
+    .await;
+    // As read back from the spool: no in-memory payload, old receipt time.
+    manifest.raw_payload = None;
+    let stale_received_ns = system_now_ns() as u64 - STALE_BY_SECONDS * 1_000_000_000;
+    manifest.source_handles[0].tor_ns = Some(stale_received_ns);
+    manifest.source_handles[0].received_ns = Some(u128::from(stale_received_ns));
+    harness.deliver_manifest(manifest).await;
+    let st = harness.state.read().await;
+    assert_eq!(st.total_stale_manifest_skips, 1);
+    assert_eq!(st.site_geometry.coordinate_frame().origin, None);
 }

@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from minimappr.api import rust_solve_contract_degradation
 from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest, load_localized_render_manifest_bundle
 from minimappr.api.rust_localization_solve_contract import (
     CoordinateFrameKind,
@@ -21,6 +22,7 @@ from minimappr.api.rust_localization_solve_contract import (
     parse_rust_localization_solve,
     parse_solve_provenance,
 )
+from minimappr.api.rust_solve_contract_degradation import SOLVE_CONTRACT_VIOLATION_FALLBACK_REASON
 from minimappr.models import NodeSpec
 from tests.localization_solve_manifest_fixtures import (
     classifier_render_manifest,
@@ -204,13 +206,54 @@ def test_loader_never_substitutes_receipt_time_for_a_missing_packet_time() -> No
         load_localized_render_manifest_bundle(manifest_payload=_classifier_render_manifest(None, toa_ns=None))
 
 
-def test_loader_rejects_a_manifest_whose_provenance_breaks_the_contract() -> None:
+def _broken_by_unknown_attempt_kind(provenance: dict) -> None:
+    provenance["attempt_kind"] = "event_trigger_from_the_future"
+
+
+def _broken_by_null_window_seconds(provenance: dict) -> None:
+    # serde_json writes a non-finite f32 as null.
+    provenance["window_seconds"] = None
+
+
+@pytest.mark.parametrize("break_provenance", [_broken_by_unknown_attempt_kind, _broken_by_null_window_seconds])
+def test_loader_degrades_a_render_whose_solve_breaks_the_contract_to_omni(break_provenance) -> None:
     provenance = contract_doc_example_solve_provenance()
-    provenance["sensors"][0].pop("sensor_id")
-    with pytest.raises(SolveContractError):
-        load_localized_render_manifest_bundle(
-            manifest_payload=_classifier_render_manifest({"position_m": [5.0, 6.0, 1.0], "solve_provenance": provenance})
-        )
+    break_provenance(provenance)
+    manifest = _classifier_render_manifest({"position_m": [5.0, 6.0, None], "solve_provenance": provenance})
+    manifest["birdnet"] = {"label": "American Robin", "label_confidence": 0.9}
+
+    request = load_localized_render_manifest_bundle(manifest_payload=manifest).request
+
+    assert request.localization_solve is None
+    assert request.reporting_modality == "omni"
+    assert request.fallback_reason == SOLVE_CONTRACT_VIOLATION_FALLBACK_REASON
+    assert request.localization_position_m == tuple(planar_node_payload()["position_m"])
+    assert request.event_time_ns == PACKET_TOA_NS
+    assert request.authoritative_classification is not None
+    assert request.authoritative_classification.label == "American Robin"
+
+
+def test_solve_contract_error_is_logged_once_per_distinct_message(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(rust_solve_contract_degradation, "_logged_solve_contract_errors", set())
+    provenance = contract_doc_example_solve_provenance()
+    _broken_by_unknown_attempt_kind(provenance)
+    manifest = _classifier_render_manifest({"position_m": [5.0, 6.0, 1.0], "solve_provenance": provenance})
+    with caplog.at_level("WARNING", logger=rust_solve_contract_degradation.__name__):
+        for _ in range(3):
+            load_localized_render_manifest_bundle(manifest_payload=manifest)
+    assert len([record for record in caplog.records if "solve contract" in record.getMessage()]) == 1
+
+
+def test_loader_takes_the_time_of_a_solve_whose_manifest_has_no_toa_ns() -> None:
+    localization = {"position_m": [5.0, 6.0, 1.0], "solve_provenance": contract_doc_example_solve_provenance()}
+    for toa_ns in (None, 0):
+        request = load_localized_render_manifest_bundle(
+            manifest_payload=_classifier_render_manifest(localization, toa_ns=toa_ns)
+        ).request
+        assert request.event_time_ns == 1764000000016000000
+        assert request.localization_solve is not None
 
 
 def test_request_refuses_an_event_time_other_than_the_solve_window_center(tmp_path: Path) -> None:
