@@ -279,6 +279,15 @@ planar + point strict xfail passes in every run and left the known gaps, the
 passing cell regressed (41 passed; the one failure, the 1 km four-node
 hand-measured cell, also fails at the branch head).
 
+### With the geometry-derived event span (merged branch, 2026-11-25)
+
+The km-range change derives the event span from the layout's largest baseline / c
+(bounded at 10 s) instead of the 1 s cap. Re-run on the fully merged branch,
+held-out seeds: production recall 0.491 (156 calls fixed), median 1.0 m, p90
+57.7 m, 95 % coverage 0.769, two-caller attribution error 0.362. Production now
+equals `production_uncapped_window` on every bake-off layout. The verdict is
+unchanged: onset clustering (recall 0.298, p90 133.5 m) stays shadow-only.
+
 ## Production findings (reported when found)
 
 The bake-off changed no production behaviour. These findings come from it:

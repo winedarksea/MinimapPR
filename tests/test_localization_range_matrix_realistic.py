@@ -121,7 +121,9 @@ DEFAULT_DIAGONAL_CELL_IDS = (
     "10m-planar_point_coplanar-gps_locked-gps",
     "10m-four_node_spread-ntp_timed-gps",
     "100m-single_tetra-gps_locked-hand_measured",
-    "1000m-four_node_spread-gps_locked-gps",
+    # The one passing four-node cross-node cell (4 of 4 runs on the merged
+    # overhaul, either reporter); its gps sibling stays a known gap.
+    "1000m-four_node_spread-gps_locked-hand_measured",
 )
 
 # Measured with --runxfail on the milestone-2 integration head (R4, R5, R7, P9,
@@ -213,11 +215,6 @@ KNOWN_PIPELINE_GAPS: dict[str, str] = {
     ),
     # -- spread far field --
     "100m-four_node_spread-gps_locked-gps": _gap(_SPREAD_FAR_FIELD, "no stored detection covers the event"),
-    "1000m-four_node_spread-gps_locked-hand_measured": _gap(
-        _SPREAD_FAR_FIELD,
-        "no stored detection covers the event (NOT_HEARD, 0 of 4 event detections; 7 of 7 runs on the "
-        "localization-core-overhaul head, 2026-11-25, with and without the review fixes)",
-    ),
     "100m-four_node_spread-ntp_timed-gps": _gap(_SPREAD_FAR_FIELD, "stored omni"),
     "100m-four_node_spread-ntp_timed-hand_measured": _gap(_SPREAD_FAR_FIELD, "stored omni"),
     "1000m-four_node_spread-ntp_timed-gps": _gap(_SPREAD_FAR_FIELD, "stored omni"),
