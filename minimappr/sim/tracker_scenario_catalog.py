@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from minimappr.core.tracking_mode_config import TrackingMode, tracking_mode_by_category_with
 from minimappr.sim.tracker_detection_scenarios import SyntheticBout, TrackerScenario
 
 ROBIN = "american robin"
@@ -109,8 +110,22 @@ TRACKER_SCENARIOS = (
     flock_same_species,
 )
 
+# Wildlife held on its perch (stationary_hold, the shipped default since
+# localization overhaul milestone 3) or moving under the constant-velocity filter.
+WILDLIFE_STATIONARY_HOLD = {
+    "tracking_mode_by_category": tracking_mode_by_category_with("wildlife", TrackingMode.STATIONARY_HOLD)
+}
+WILDLIFE_CONTINUOUS_MOTION = {
+    "tracking_mode_by_category": tracking_mode_by_category_with("wildlife", TrackingMode.CONTINUOUS_MOTION)
+}
+# The tracker before milestone 3 changed the defaults: wildlife on the
+# constant-velocity filter and no bird entities. "Legacy" rows compare to this.
+LEGACY_TRACKER_SETTINGS = {**WILDLIFE_CONTINUOUS_MOTION, "entity_reporting_enabled": False}
+
 ALL_TRACKER_FLAGS_ON = {
-    "tracking_perched_filter_enabled": True,
+    **WILDLIFE_STATIONARY_HOLD,
+    # Entity rows add it on top; these rows score the tracker alone.
+    "entity_reporting_enabled": False,
     "tracking_species_log_odds_enabled": True,
     "tracking_partial_constraint_binding_enabled": True,
     "birdnet_two_threshold_enabled": True,

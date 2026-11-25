@@ -38,7 +38,9 @@ from minimappr.sim.fixture_audio_scenarios import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 V3 = {"birdnet_model_version": "3.0"}
-COMPANIONS_ON = {"tracking_perched_filter_enabled": True, "tracking_species_log_odds_enabled": True}
+# Wildlife stationary_hold is the default companion; log-odds is opt-in.
+COMPANIONS_ON = {"tracking_species_log_odds_enabled": True}
+WILDLIFE_CONTINUOUS_MOTION = {"tracking_mode_by_category": {"wildlife": "continuous_motion", "default": "continuous_motion"}}
 
 
 def _load_script(name: str):
@@ -112,10 +114,12 @@ def test_factory_two_threshold_floors_follow_v3_set(monkeypatch):
 # ── two-threshold constraint ────────────────────────────────────────────────
 
 def test_two_threshold_without_companions_warns_by_default(caplog):
-    settings = Settings(birdnet_two_threshold_enabled=True)  # constructs fine: default is warn-only
+    # Constructs fine: default is warn-only.
+    settings = Settings(birdnet_two_threshold_enabled=True, **WILDLIFE_CONTINUOUS_MOTION)
     with caplog.at_level(logging.WARNING):
         warn_on_two_threshold_without_companions(settings)
-    assert "tracking_perched_filter_enabled" in caplog.text and "tracking_species_log_odds_enabled" in caplog.text
+    assert "tracking_mode_by_category[wildlife]=stationary_hold" in caplog.text
+    assert "tracking_species_log_odds_enabled" in caplog.text
     caplog.clear()
     with caplog.at_level(logging.WARNING):
         warn_on_two_threshold_without_companions(Settings(birdnet_two_threshold_enabled=True, **COMPANIONS_ON))
@@ -123,7 +127,14 @@ def test_two_threshold_without_companions_warns_by_default(caplog):
 
 
 def test_two_threshold_companions_enforced_when_required():
-    with pytest.raises(ValueError, match="tracking_perched_filter_enabled"):
+    with pytest.raises(ValueError, match=r"tracking_mode_by_category\[wildlife\]=stationary_hold"):
+        Settings(
+            birdnet_two_threshold_enabled=True,
+            birdnet_two_threshold_require_tracker_companions=True,
+            **COMPANIONS_ON,
+            **WILDLIFE_CONTINUOUS_MOTION,
+        )
+    with pytest.raises(ValueError, match="tracking_species_log_odds_enabled"):
         Settings(birdnet_two_threshold_enabled=True, birdnet_two_threshold_require_tracker_companions=True)
     Settings(birdnet_two_threshold_enabled=True, birdnet_two_threshold_require_tracker_companions=True, **COMPANIONS_ON)
     Settings(birdnet_two_threshold_require_tracker_companions=True)  # two-threshold off: nothing to enforce

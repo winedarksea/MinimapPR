@@ -1,7 +1,8 @@
-//! The perched wildlife tracker: the wildlife path of the server's
-//! `TrackManager.update` with the S3 flags on (perched filter, relocation
-//! gate + ghost revert, concurrent-perch guard, capped species log-odds and
-//! the species association gate).
+//! The perched wildlife tracker: the server's `TrackManager.update` for a
+//! category in the `stationary_hold` tracking mode (wildlife by default, see
+//! [`super::tracking_mode`]) with species log-odds on (perched filter,
+//! relocation gate + ghost revert, concurrent-perch guard, capped species
+//! log-odds and the species association gate).
 //!
 //! Per fix: age tracks → undo a hop if the fix lands back on a ghost perch →
 //! predict → drop species-incompatible and concurrently-sung perches → nearest

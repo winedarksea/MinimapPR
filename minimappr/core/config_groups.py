@@ -300,8 +300,6 @@ CONFIG_STAGE_GROUPS: tuple[tuple[str, str, PipelineStageKind | None, tuple[str, 
             "dormant_confidence_half_life_seconds",
             "dormant_max_records",
             # --- Field Mode W2-tracker ---
-            "tracking_perched_filter_enabled",
-            "tracking_perched_label_categories",
             "tracking_perched_position_diffusion_m2_per_second",
             "tracking_perched_relocation_snap_distance_m",
             "tracking_perched_relocation_gate_max_m",

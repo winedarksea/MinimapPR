@@ -23,6 +23,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from minimappr.core.tracking_mode_config import TrackingModeConfig
+
 logger = logging.getLogger(__name__)
 
 BIRDNET_V3_MODEL_VERSION = "3.0"
@@ -35,10 +37,11 @@ UNIT_INTERVAL_V3_THRESHOLD_KEYS: tuple[str, ...] = (
     "birdnet_v3_localize_to_track_min_confidence",
     "birdnet_v3_species_display_min_belief",
 )
-TWO_THRESHOLD_COMPANION_KEYS: tuple[str, ...] = (
-    "tracking_perched_filter_enabled",
-    "tracking_species_log_odds_enabled",
-)
+# Weak detections need the wildlife tracker to hold perches and fuse species
+# belief, or they land on the wrong track.
+TWO_THRESHOLD_WILDLIFE_CATEGORY = "wildlife"
+TWO_THRESHOLD_STATIONARY_HOLD_COMPANION = "tracking_mode_by_category[wildlife]=stationary_hold"
+TWO_THRESHOLD_SPECIES_LOG_ODDS_COMPANION = "tracking_species_log_odds_enabled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,7 +101,21 @@ def two_threshold_missing_companions(values) -> list[str]:
     """Companion flags that are off while two-threshold BirdNET is on."""
     if not bool(getattr(values, "birdnet_two_threshold_enabled", False)):
         return []
-    return [key for key in TWO_THRESHOLD_COMPANION_KEYS if not bool(getattr(values, key, False))]
+    missing: list[str] = []
+    if not _wildlife_holds_station(values):
+        missing.append(TWO_THRESHOLD_STATIONARY_HOLD_COMPANION)
+    if not bool(getattr(values, TWO_THRESHOLD_SPECIES_LOG_ODDS_COMPANION, False)):
+        missing.append(TWO_THRESHOLD_SPECIES_LOG_ODDS_COMPANION)
+    return missing
+
+
+def _wildlife_holds_station(values) -> bool:
+    try:
+        modes = TrackingModeConfig.from_mapping(getattr(values, "tracking_mode_by_category", None))
+    except ValueError:
+        # An invalid mapping is reported by its own validation.
+        return True
+    return modes.holds_station(TWO_THRESHOLD_WILDLIFE_CATEGORY)
 
 
 def two_threshold_companion_message(missing: list[str]) -> str:

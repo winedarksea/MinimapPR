@@ -191,8 +191,9 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "dormant_max_records": int,
     # --- Field Mode W2-tracker --- restart-required: TrackManager and the
     # classifier read these once at startup.
-    "tracking_perched_filter_enabled": bool,
-    "tracking_perched_label_categories": str,
+    # Per-category tracking mode (core/tracking_mode_config.py); the only
+    # dict-valued patchable key, validated as a whole mapping.
+    "tracking_mode_by_category": dict,
     "tracking_perched_position_diffusion_m2_per_second": float,
     "tracking_perched_relocation_snap_distance_m": float,
     "tracking_perched_relocation_gate_max_m": float,

@@ -3257,8 +3257,6 @@ async def get_config(request: Request) -> dict:
         "dormant_confidence_half_life_seconds": settings.dormant_confidence_half_life_seconds,
         "dormant_max_records": settings.dormant_max_records,
         # --- Field Mode W2-tracker ---
-        "tracking_perched_filter_enabled": settings.tracking_perched_filter_enabled,
-        "tracking_perched_label_categories": settings.tracking_perched_label_categories,
         "tracking_perched_position_diffusion_m2_per_second": settings.tracking_perched_position_diffusion_m2_per_second,
         "tracking_perched_relocation_snap_distance_m": settings.tracking_perched_relocation_snap_distance_m,
         "tracking_perched_relocation_gate_max_m": settings.tracking_perched_relocation_gate_max_m,
@@ -3526,6 +3524,7 @@ _CONFIG_PATCH_ALLOWLIST = CONFIG_PATCH_ALLOWLIST
 
 # --- Field Mode W2-tracker ---
 _FIELD_MODE_TRACKER_KEY_PREFIXES = (
+    "tracking_mode_",
     "tracking_perched_",
     "tracking_species_",
     "tracking_partial_",
@@ -3795,7 +3794,7 @@ _BIRDNET_CUTOVER_KEYS = frozenset(
         "birdnet_v3_label_migration_enabled",
         "birdnet_two_threshold_require_tracker_companions",
         "birdnet_two_threshold_enabled",
-        "tracking_perched_filter_enabled",
+        "tracking_mode_by_category",
         "tracking_species_log_odds_enabled",
     }
 )
@@ -3855,6 +3854,11 @@ async def patch_config(request: Request) -> dict:
                 value = float(raw)
             elif target_type is int:
                 value = int(raw)
+            elif target_type is dict:
+                # Mapping-valued keys are validated whole by their own module.
+                if not isinstance(raw, dict):
+                    raise ValueError("must be an object")
+                value = dict(raw)
             else:
                 value = str(raw)
         except (TypeError, ValueError) as exc:

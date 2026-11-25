@@ -3,7 +3,8 @@
 Python is the reference. Component cases call the S3/S6 Python functions
 directly (log-odds belief, perched filter, nearest-neighbour association,
 species association gate, concurrent-perch guard, entity geometry and
-absorption). Scenario cases drive the real ``TrackManager`` (S3 flags on,
+absorption, per-category tracking modes). Scenario cases drive the real
+``TrackManager`` (wildlife in stationary_hold, log-odds on,
 dormant reacquire and fingerprints off: not ported), ``BirdEntityRegistry``
 and ``EntityReportingPolicy`` in FusionNode order (see
 ``tests/wildlife_pipeline_reference.py``) on scripted bird scenes.
@@ -33,6 +34,7 @@ from minimappr.core.track_filters_perched import PerchedRandomWalkTrackFilter
 from minimappr.core.track_perched_concurrency import ConcurrentPerchGuardConfig, concurrently_active_perch_conflicts
 from minimappr.core.track_species_association_gate import species_claims_contradict
 from minimappr.core.track_species_belief import SpeciesBeliefConfig, SpeciesLogOddsBelief
+from minimappr.core.tracking_mode_config import TrackingModeConfig
 from minimappr.models import TrackState
 from tests.wildlife_pipeline_reference import entity_config, run_pipeline_case
 from tests.wildlife_scenario_scripts import SCENARIO_BUILDERS
@@ -222,6 +224,36 @@ def entity_geometry_degenerate_case() -> tuple[dict, dict]:
     return {"kind": "entity_geometry", "samples": samples}, {"samples": _entity_geometry_outputs(samples, config)}
 
 
+# Mappings as [category, mode] pairs (null = shipped defaults). Valid ones cover
+# defaults, a category switched off, a "none" default and unnormalised keys;
+# invalid ones are each a distinct validation rule.
+TRACKING_MODE_MAPPINGS: tuple[list[list[str]] | None, ...] = (
+    None,
+    [["wildlife", "stationary_hold"], ["default", "continuous_motion"]],
+    [["wildlife", "continuous_motion"], ["default", "continuous_motion"]],
+    [["wildlife", "stationary_hold"], ["vehicle", "none"], ["default", "continuous_motion"]],
+    [[" Security ", "stationary_hold"], ["default", "none"]],
+    [["wildlife", "stationary_hold"]],
+    [["unknown", "none"], ["default", "continuous_motion"]],
+    [["", "none"], ["default", "continuous_motion"]],
+    [["wildlife", "hover"], ["default", "continuous_motion"]],
+)
+TRACKING_MODE_CATEGORIES = ("wildlife", "Wildlife ", "vehicle", "human", "security", "unknown", "", "drone_swarm")
+
+
+def tracking_mode_case() -> tuple[dict, dict]:
+    results = []
+    for mapping in TRACKING_MODE_MAPPINGS:
+        try:
+            modes = TrackingModeConfig.from_mapping(None if mapping is None else dict(map(tuple, mapping)))
+        except ValueError:
+            results.append({"valid": False, "modes": None})
+            continue
+        results.append({"valid": True, "modes": [modes.mode_for_category(c).value for c in TRACKING_MODE_CATEGORIES]})
+    configurations = [{"mapping": mapping, "categories": list(TRACKING_MODE_CATEGORIES)} for mapping in TRACKING_MODE_MAPPINGS]
+    return {"kind": "tracking_mode", "configurations": configurations}, {"results": results}
+
+
 def all_cases() -> list[tuple[dict, dict]]:
     cases = []
     for seed in range(4):
@@ -230,6 +262,7 @@ def all_cases() -> list[tuple[dict, dict]]:
         cases.append(species_gate_case(200 + seed))
         cases.append(entity_geometry_case(300 + seed))
     cases.append(entity_geometry_degenerate_case())
+    cases.append(tracking_mode_case())
     cases.extend(association_case(400 + seed) for seed in range(24))
     cases.extend(concurrency_case(500 + seed) for seed in range(16))
     for name, builder in SCENARIO_BUILDERS.items():
