@@ -102,18 +102,6 @@ class SyncGrade(str, Enum):
     NTP     = "ntp"
     FREE    = "free"
 
-    def weight(self) -> float:
-        """Localization residual weight for this sync grade."""
-        return _SYNC_GRADE_WEIGHTS[self]
-
-
-_SYNC_GRADE_WEIGHTS: dict[str, float] = {
-    SyncGrade.GPS_PPS: 1.0,
-    SyncGrade.PTP:     1.0,
-    SyncGrade.NTP:     0.25,
-    SyncGrade.FREE:    0.05,
-}
-
 
 def sync_grade_from_time_quality(tq: "TimeQuality") -> SyncGrade:
     """Map a runtime TimeQuality to the equivalent SyncGrade."""
@@ -531,7 +519,6 @@ class LocalizationResult(BaseModel):
     # measure pairs, e.g. Rust-manifest passthrough). Folded into FusionMetrics
     # so a dead cross-node path is distinguishable from a working one.
     cross_node_pairs_measured: int | None = Field(default=None, ge=0)
-    cross_node_pairs_rejected_sync: int | None = Field(default=None, ge=0)
 
 
 class ContributorSummary(BaseModel):

@@ -270,13 +270,13 @@ class LocalizationConfig:
     # engine, so a 7.9 m baseline was clipped by the 0.02 s (~6.9 m) cap.
     localization_cross_node_tdoa_enabled: bool = True
     localization_cross_node_max_tau_seconds: float = 0.35
-    localization_cross_node_min_sync_weight: float = 0.25
     # Cross-node sensor admission (default off = today's behavior). Selection
     # historically pinned to the top-3 RMS sensors — always one node's mics —
     # so a cross-node pair could never exist. When enabled and the
     # energy-selected set is single-node, other nodes' sensors are admitted if
-    # they clear a floor RELATIVE to the loudest selected sensor and pass the
-    # cross-node sync gate, letting 3+4 sensors reach full-3D geometry.
+    # they clear a floor RELATIVE to the loudest selected sensor, letting 3+4
+    # sensors reach full-3D geometry. Clock class never blocks admission; weak
+    # clocks are down-weighted in the solve (core/pair_timing_uncertainty.py).
     localization_cross_node_admission_enabled: bool = False
     localization_cross_node_relative_energy_floor: float = 0.25
     localization_cross_node_max_extra_sensors: int = 4
@@ -1072,7 +1072,6 @@ class Settings:
     localization_cross_node_tdoa_enabled: bool = True
     localization_cross_node_max_tau_seconds: float = 0.35
     localization_cross_node_max_baseline_m: float = 150.0
-    localization_cross_node_min_sync_weight: float = 0.25
     localization_cross_node_admission_enabled: bool = False
     localization_cross_node_relative_energy_floor: float = 0.25
     localization_cross_node_max_extra_sensors: int = 4
@@ -2774,10 +2773,6 @@ class Settings:
                 "MINIMAPPR_LOCALIZATION_CROSS_NODE_MAX_BASELINE_M",
                 150.0,
             ),
-            localization_cross_node_min_sync_weight=_env_float(
-                "MINIMAPPR_LOCALIZATION_CROSS_NODE_MIN_SYNC_WEIGHT",
-                0.25,
-            ),
             localization_cross_node_admission_enabled=_env_bool(
                 "MINIMAPPR_LOCALIZATION_CROSS_NODE_ADMISSION_ENABLED",
                 False,
@@ -3533,7 +3528,6 @@ class Settings:
             localization_obs_factor_bearing_floor=self.localization_obs_factor_bearing_floor,
             localization_cross_node_tdoa_enabled=self.localization_cross_node_tdoa_enabled,
             localization_cross_node_max_tau_seconds=self.localization_cross_node_max_tau_seconds,
-            localization_cross_node_min_sync_weight=self.localization_cross_node_min_sync_weight,
             localization_cross_node_admission_enabled=self.localization_cross_node_admission_enabled,
             localization_cross_node_relative_energy_floor=self.localization_cross_node_relative_energy_floor,
             localization_cross_node_max_extra_sensors=self.localization_cross_node_max_extra_sensors,

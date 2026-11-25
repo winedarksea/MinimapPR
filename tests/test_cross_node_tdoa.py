@@ -1,7 +1,8 @@
 """Phase 5: true cross-node TDOA (tier c).
 
 Synthetic, sample-accurate multi-node scenes exercising the widened cross-node tau
-ceiling, the sync gate, and geometry weighting in ``measure_pair_tdoas`` +
+ceiling, clock-uncertainty weighting (P9: weak clocks are kept, never gated),
+and geometry weighting in ``measure_pair_tdoas`` +
 ``solve_cartesian_tdoa``.
 """
 
@@ -24,7 +25,7 @@ def _broadband(seed: int, duration_s: float = 0.4) -> np.ndarray:
     return rng.normal(0.0, 0.3, size=int(duration_s * SAMPLE_RATE_HZ)).astype(np.float32)
 
 
-def _localize(source_m, nodes, *, cross_node_tau, sensor_weights=None, min_sync=None):
+def _localize(source_m, nodes, *, cross_node_tau, sensor_timing_uncertainty_seconds=None):
     positions, windows, node_ids = synthesize_multinode_windows(
         _broadband(3),
         SAMPLE_RATE_HZ,
@@ -37,11 +38,10 @@ def _localize(source_m, nodes, *, cross_node_tau, sensor_weights=None, min_sync=
         max_tau_s=0.02,
         interp_factor=8,
         cross_node_max_tau_s=cross_node_tau,
-        cross_node_min_sync_weight=min_sync,
     )
     result = engine.localize(
         positions, windows, SAMPLE_RATE_HZ, 20.0, 0.5,
-        sensor_weights=sensor_weights, sensor_node_ids=node_ids,
+        sensor_timing_uncertainty_seconds=sensor_timing_uncertainty_seconds, sensor_node_ids=node_ids,
     )
     centroid = np.mean(np.vstack(list(positions.values())), axis=0)
     return result, centroid
@@ -76,7 +76,7 @@ def test_cross_node_tau_lift_unclamps_wide_baseline_lag() -> None:
         sound_speed_mps=SOUND_SPEED_MPS,
         max_tau_s=0.02,
         interpolation_factor=8,
-        sensor_weights=None,
+        sensor_timing_uncertainty_seconds=None,
         gcc_phat_function=gcc_phat,
         sensor_node_ids=node_ids,
     )
@@ -115,9 +115,9 @@ def test_three_node_cross_node_tdoa_range_error_under_10pct() -> None:
     assert abs(est_range - true_range) / true_range < 0.10
 
 
-def test_ntp_nodes_excluded_at_min_sync_weight_one() -> None:
-    """With min_sync_weight=1.0 (PPS/PTP-only), a node whose sensors carry a sub-1.0
-    sync weight is excluded from cross-node pairs."""
+def test_weak_clock_cross_node_pairs_are_kept_and_down_weighted() -> None:
+    """P9: a free-running node's cross-node pairs are measured, never gated by
+    clock class, but count for far less than the same pairs on a GPS clock."""
     positions = {
         "a:ch0": np.array([0.0, 0.0, 0.0]),
         "a:ch1": np.array([0.05, 0.0, 0.0]),
@@ -127,44 +127,35 @@ def test_ntp_nodes_excluded_at_min_sync_weight_one() -> None:
     }
     node_ids = {sid: sid.split(":")[0] for sid in positions}
     windows = {sid: _broadband(1) for sid in positions}
-    # Node b is NTP-grade (sync weight 0.5); node a is PPS (1.0).
-    weights = {sid: (0.5 if sid.startswith("b") else 1.0) for sid in positions}
 
-    excluded = measure_pair_tdoas(
-        sensor_positions=positions,
-        sensor_windows=windows,
-        sensor_ids=sorted(positions),
-        sample_rate_hz=SAMPLE_RATE_HZ,
-        sound_speed_mps=SOUND_SPEED_MPS,
-        max_tau_s=0.02,
-        interpolation_factor=4,
-        sensor_weights=weights,
-        gcc_phat_function=gcc_phat,
-        sensor_node_ids=node_ids,
-        cross_node_max_tau_s=0.35,
-        cross_node_min_sync_weight=1.0,
-    )
-    # No pair should straddle nodes a and b.
-    assert not any(
-        node_ids[m.sensor_a] != node_ids[m.sensor_b] for m in excluded
-    )
+    def _measure(node_b_uncertainty_s: float):
+        return measure_pair_tdoas(
+            sensor_positions=positions,
+            sensor_windows=windows,
+            sensor_ids=sorted(positions),
+            sample_rate_hz=SAMPLE_RATE_HZ,
+            sound_speed_mps=SOUND_SPEED_MPS,
+            max_tau_s=0.02,
+            interpolation_factor=4,
+            sensor_timing_uncertainty_seconds={
+                sid: (node_b_uncertainty_s if sid.startswith("b") else 1.0e-6) for sid in positions
+            },
+            gcc_phat_function=gcc_phat,
+            sensor_node_ids=node_ids,
+            cross_node_max_tau_s=0.35,
+        )
 
-    # At the default 0.25 gate the cross-node pair is admitted.
-    admitted = measure_pair_tdoas(
-        sensor_positions=positions,
-        sensor_windows=windows,
-        sensor_ids=sorted(positions),
-        sample_rate_hz=SAMPLE_RATE_HZ,
-        sound_speed_mps=SOUND_SPEED_MPS,
-        max_tau_s=0.02,
-        interpolation_factor=4,
-        sensor_weights=weights,
-        gcc_phat_function=gcc_phat,
-        sensor_node_ids=node_ids,
-        cross_node_max_tau_s=0.35,
-        cross_node_min_sync_weight=0.25,
-    )
-    assert any(node_ids[m.sensor_a] != node_ids[m.sensor_b] for m in admitted)
+    def _cross(pairs):
+        return {(m.sensor_a, m.sensor_b): m.weight for m in pairs if node_ids[m.sensor_a] != node_ids[m.sensor_b]}
+
+    gps_cross = _cross(_measure(1.0e-6))
+    free_running = _measure(5.0e-2)
+    free_running_cross = _cross(free_running)
+    assert set(free_running_cross) == set(gps_cross) and len(free_running_cross) == 4
+    for pair_id, weight in free_running_cross.items():
+        assert weight < gps_cross[pair_id] * 1.0e-3
+    # Same-node pairs share one clock, so node b's clock never touches them.
+    assert len(free_running) == 10
 
 
 def test_node_position_std_inflates_downweights_cross_node_pair() -> None:
@@ -187,7 +178,7 @@ def test_node_position_std_inflates_downweights_cross_node_pair() -> None:
             sound_speed_mps=SOUND_SPEED_MPS,
             max_tau_s=0.02,
             interpolation_factor=4,
-            sensor_weights=None,
+            sensor_timing_uncertainty_seconds=None,
             gcc_phat_function=gcc_phat,
             sensor_node_ids=node_ids,
             cross_node_max_tau_s=0.35,
@@ -225,12 +216,13 @@ def test_build_localizer_from_localization_config_carries_cross_node_settings() 
     )
     assert resolved is not None, "gcc_phat LocalizationEngine not found on dispatcher"
     assert resolved.cross_node_max_tau_s == pytest.approx(0.35)
-    assert resolved.cross_node_min_sync_weight == pytest.approx(0.25)
+    # P9: no clock-class gate exists to carry any more.
+    assert not hasattr(resolved, "cross_node_min_sync_weight")
 
 
 def test_pair_measurement_stats_count_cross_node_activity() -> None:
-    """PairMeasurementStats must count measured cross-node pairs and sync-gate
-    rejections — the FusionMetrics counters these feed read 0 forever before."""
+    """PairMeasurementStats must count measured cross-node pairs — the
+    FusionMetrics counter it feeds read 0 forever before."""
     from minimappr.core.tdoa_measurements import PairMeasurementStats
 
     positions, windows, node_ids = synthesize_multinode_windows(
@@ -250,7 +242,7 @@ def test_pair_measurement_stats_count_cross_node_activity() -> None:
         sound_speed_mps=SOUND_SPEED_MPS,
         max_tau_s=0.02,
         interpolation_factor=4,
-        sensor_weights=None,
+        sensor_timing_uncertainty_seconds=None,
         gcc_phat_function=gcc_phat,
         sensor_node_ids=node_ids,
         cross_node_max_tau_s=0.35,
@@ -258,11 +250,10 @@ def test_pair_measurement_stats_count_cross_node_activity() -> None:
     )
     assert measurements
     assert stats.cross_node_pairs_measured > 0
-    assert stats.cross_node_pairs_rejected_sync == 0
 
-    # Sub-gate sync weights on one node reject every cross-node pair.
-    gated_stats = PairMeasurementStats()
-    weights = {sid: (0.05 if node_ids[sid] == "node-b" else 1.0) for sid in positions}
+    # A free-running node's cross-node pairs are still measured (P9).
+    weak_clock_stats = PairMeasurementStats()
+    uncertainty = {sid: (5.0e-2 if node_ids[sid] == "node-b" else 1.0e-6) for sid in positions}
     measure_pair_tdoas(
         sensor_positions=positions,
         sensor_windows=windows,
@@ -271,15 +262,13 @@ def test_pair_measurement_stats_count_cross_node_activity() -> None:
         sound_speed_mps=SOUND_SPEED_MPS,
         max_tau_s=0.02,
         interpolation_factor=4,
-        sensor_weights=weights,
+        sensor_timing_uncertainty_seconds=uncertainty,
         gcc_phat_function=gcc_phat,
         sensor_node_ids=node_ids,
         cross_node_max_tau_s=0.35,
-        cross_node_min_sync_weight=0.25,
-        stats=gated_stats,
+        stats=weak_clock_stats,
     )
-    assert gated_stats.cross_node_pairs_rejected_sync > 0
-    assert gated_stats.cross_node_pairs_measured == 0
+    assert weak_clock_stats.cross_node_pairs_measured == stats.cross_node_pairs_measured
 
 
 def test_engine_localize_surfaces_cross_node_pair_stats() -> None:
@@ -303,14 +292,13 @@ def test_engine_localize_surfaces_cross_node_pair_stats() -> None:
     )
     assert result.cross_node_pairs_measured is not None
     assert result.cross_node_pairs_measured > 0
-    assert result.cross_node_pairs_rejected_sync == 0
 
 
 def test_localize_2d_is_node_aware() -> None:
     """Phase 5: the 2D tier — ~98% of a compact-array site's solves — was
     node-blind. It must (a) lift the tau ceiling for cross-node pairs so a wide
-    baseline isn't clipped by the same-node cap, (b) apply the cross-node sync
-    gate, and (c) stamp range-mode provenance so bearing-fusion gate G3 can
+    baseline isn't clipped by the same-node cap, (b) weight cross-node pairs by
+    clock uncertainty, and (c) stamp range-mode provenance so bearing-fusion gate G3 can
     engage on 2D solves."""
     positions, windows, node_ids = synthesize_multinode_windows(
         _broadband(17),
@@ -324,7 +312,6 @@ def test_localize_2d_is_node_aware() -> None:
         max_tau_s=0.002,  # ~0.7 m same-node cap: would clip the 12 m baseline
         interp_factor=8,
         cross_node_max_tau_s=0.35,
-        cross_node_min_sync_weight=0.25,
     )
     result = engine.localize_2d(
         positions,
@@ -342,7 +329,9 @@ def test_localize_2d_is_node_aware() -> None:
     assert 0.0 <= result.range_observability <= 1.0
 
 
-def test_localize_2d_sync_gate_excludes_unsynchronized_cross_node_sensors() -> None:
+def test_localize_2d_keeps_free_running_cross_node_sensors_with_wider_covariance() -> None:
+    """P9 on the 2D tier: a free-running node's sensors still contribute
+    cross-node pairs, and the published covariance widens accordingly."""
     positions, windows, node_ids = synthesize_multinode_windows(
         _broadband(19),
         SAMPLE_RATE_HZ,
@@ -351,26 +340,25 @@ def test_localize_2d_sync_gate_excludes_unsynchronized_cross_node_sensors() -> N
         tetra_node_ids=("node-a", "node-b"),
         sound_speed_mps=SOUND_SPEED_MPS,
     )
-    engine = LocalizationEngine(
-        max_tau_s=0.02,
-        interp_factor=8,
-        cross_node_max_tau_s=0.35,
-        cross_node_min_sync_weight=0.25,
+    engine = LocalizationEngine(max_tau_s=0.02, interp_factor=8, cross_node_max_tau_s=0.35)
+
+    def _solve(node_b_uncertainty_s: float):
+        return engine.localize_2d(
+            positions,
+            windows,
+            SAMPLE_RATE_HZ,
+            20.0,
+            0.5,
+            sensor_timing_uncertainty_seconds={
+                sid: (node_b_uncertainty_s if node_ids[sid] == "node-b" else 1.0e-6) for sid in positions
+            },
+            sensor_node_ids=node_ids,
+        )
+
+    locked = _solve(1.0e-6)
+    free_running = _solve(5.0e-2)
+    assert free_running.cross_node_pairs_measured == locked.cross_node_pairs_measured > 0
+    assert set(free_running.tdoa_s) == set(locked.tdoa_s)
+    assert np.trace(np.asarray(free_running.position_covariance_m2)) > np.trace(
+        np.asarray(locked.position_covariance_m2)
     )
-    # node-b sensors carry a free-running-clock sync weight below the gate.
-    weights = {sid: (0.05 if node_ids[sid] == "node-b" else 1.0) for sid in positions}
-    result = engine.localize_2d(
-        positions,
-        windows,
-        SAMPLE_RATE_HZ,
-        20.0,
-        0.5,
-        sensor_weights=weights,
-        sensor_node_ids=node_ids,
-    )
-    assert result.cross_node_pairs_rejected_sync is not None
-    assert result.cross_node_pairs_rejected_sync > 0
-    assert result.cross_node_pairs_measured == 0
-    # Only node-a sensors contribute measurements (reference is on node-a: it
-    # has the higher weights and identical RMS).
-    assert all(node_ids[sid] == node_ids[result.reference_sensor] for sid in result.tdoa_s)

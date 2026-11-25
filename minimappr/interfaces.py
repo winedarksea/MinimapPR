@@ -66,7 +66,7 @@ class Localizer(Protocol):
         sample_rate_hz: int,
         temperature_c: float,
         humidity_fraction: float,
-        sensor_weights: dict[str, float] | None = None,
+        sensor_timing_uncertainty_seconds: dict[str, float] | None = None,
         sensor_node_ids: dict[str, str] | None = None,
         sensor_gain_offsets_db: dict[str, float] | None = None,
     ) -> LocalizationResult:

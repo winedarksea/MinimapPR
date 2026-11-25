@@ -68,8 +68,8 @@ def test_run_algorithm_gcc_phat_error_propagates() -> None:
     assert dispatcher.fallback_count() == 0
 
 
-def test_sensor_weights_trigger_gcc_fallback_for_unsupported_algorithm() -> None:
-    """Weighted localization should not silently ignore weights on non-gcc algorithms."""
+def test_sensor_timing_uncertainty_triggers_gcc_fallback_for_unsupported_algorithm() -> None:
+    """Clock-weighted localization must not silently ignore clock uncertainty on non-gcc algorithms."""
 
     class WeightedGccStub:
         def __init__(self) -> None:
@@ -82,11 +82,11 @@ def test_sensor_weights_trigger_gcc_fallback_for_unsupported_algorithm() -> None
             sample_rate_hz: int,
             temperature_c: float,
             humidity_fraction: float,
-            sensor_weights: dict[str, float] | None = None,
+            sensor_timing_uncertainty_seconds: dict[str, float] | None = None,
         ) -> LocalizationResult:
             del sensor_windows, sample_rate_hz, temperature_c, humidity_fraction
             self.calls += 1
-            assert sensor_weights is not None
+            assert sensor_timing_uncertainty_seconds is not None
             reference_sensor = sorted(sensor_positions.keys())[0]
             return LocalizationResult(
                 position_m=(0.0, 0.0, 0.0),
@@ -110,7 +110,7 @@ def test_sensor_weights_trigger_gcc_fallback_for_unsupported_algorithm() -> None
         _SR,
         _TEMP,
         _HUM,
-        sensor_weights={sid: 1.0 for sid in _POSITIONS},
+        sensor_timing_uncertainty_seconds={sid: 1.0e-6 for sid in _POSITIONS},
     )
 
     assert music.calls == 0

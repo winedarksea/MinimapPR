@@ -80,6 +80,7 @@ from minimappr.core.localization_uncertainty import (
     range_observability_from_covariance,
 )
 from minimappr.core.node_registry import NodeRegistry
+from minimappr.core.pair_timing_uncertainty import ClockUncertaintyPolicy
 from minimappr.core.pipeline_realtime import PipelineRealtimeTracker
 from minimappr.core.range_projection import (
     LEGACY_PRIOR_PROJECTED,
@@ -198,7 +199,6 @@ class FusionMetrics:
     # described a coalescing/wait stage that was never implemented — no writer
     # existed, so they read 0 forever and masqueraded as runtime signals.)
     localization_cross_node_pairs_measured_count: int = 0
-    localization_cross_node_pairs_rejected_sync_count: int = 0
     last_cross_node_pair_count: int = 0
     # Other-node sensors admitted past the top-N energy selection (Phase 5
     # cross-node admission; 0 unless localization_cross_node_admission_enabled).
@@ -1399,12 +1399,8 @@ class FusionNode:
             return await self._onset_srp_stage.localize_candidate(self, candidate)
         # --- end Field Mode W2-onset-srp ---
         sensor_positions = await self.registry.sensor_positions()
-        sensor_grades = await self.registry.sensor_sync_grades()
-        sensor_weights: dict[str, float] | None = {
-            sensor_id: grade.weight()
-            for sensor_id, grade in sensor_grades.items()
-            if sensor_id in sensor_positions
-        }
+        clock_policy = ClockUncertaintyPolicy.from_settings(self.settings)
+        sensor_timing_uncertainty_seconds = await self.registry.sensor_timing_uncertainty_seconds(clock_policy)
 
         if (
             self.localization_config.cluster_aware_localization
@@ -1417,8 +1413,10 @@ class FusionNode:
                 )
                 if cluster_positions:
                     sensor_positions = cluster_positions
-                    sensor_weights = await self.cluster_registry.cluster_sensor_weights(
-                        cluster.id, self.registry
+                    sensor_timing_uncertainty_seconds = (
+                        await self.cluster_registry.cluster_sensor_timing_uncertainty_seconds(
+                            cluster.id, self.registry, clock_policy
+                        )
                     )
 
         sensor_ids = sorted(sensor_positions.keys())
@@ -1522,7 +1520,6 @@ class FusionNode:
         selected_ids = await self._admit_cross_node_sensors(
             selected_ids=selected_ids,
             energies=energies,
-            sensor_weights=sensor_weights,
         )
 
         tier = self.degradation_model.tier_for_sensor_count(len(selected_ids))
@@ -1594,11 +1591,13 @@ class FusionNode:
 
         localization_kwargs: dict[str, object] = {}
         localize_parameters, localize_2d_parameters = self._localizer_signature_parameters()
-        if sensor_weights is not None and "sensor_weights" in localize_parameters:
-            localization_kwargs["sensor_weights"] = {
-                sensor_id: sensor_weights.get(sensor_id, 1.0)
-                for sensor_id in selected_ids
-            }
+        # A sensor with no clock report is an unknown clock, not a perfect one.
+        selected_timing_uncertainty_seconds = {
+            sensor_id: sensor_timing_uncertainty_seconds.get(sensor_id, clock_policy.unknown_uncertainty_seconds)
+            for sensor_id in selected_ids
+        }
+        if "sensor_timing_uncertainty_seconds" in localize_parameters:
+            localization_kwargs["sensor_timing_uncertainty_seconds"] = selected_timing_uncertainty_seconds
         if "sensor_node_ids" in localize_parameters:
             localization_kwargs["sensor_node_ids"] = selected_sensor_node_ids
         if "sensor_gain_offsets_db" in localize_parameters:
@@ -1609,13 +1608,10 @@ class FusionNode:
             localization_kwargs["half_space"] = selected_half_space
         localization_2d_kwargs: dict[str, object] = {}
         if localize_2d_parameters is not None:
-            if sensor_weights is not None and "sensor_weights" in localize_2d_parameters:
-                localization_2d_kwargs["sensor_weights"] = {
-                    sensor_id: sensor_weights.get(sensor_id, 1.0)
-                    for sensor_id in selected_ids
-                }
+            if "sensor_timing_uncertainty_seconds" in localize_2d_parameters:
+                localization_2d_kwargs["sensor_timing_uncertainty_seconds"] = selected_timing_uncertainty_seconds
             # Phase 5: the 2D tier (~98% of compact-array solves) was node-blind —
-            # no cross-node tau lift or sync gate could ever apply to it.
+            # no cross-node tau lift or clock weighting could ever apply to it.
             if "sensor_node_ids" in localize_2d_parameters:
                 localization_2d_kwargs["sensor_node_ids"] = selected_sensor_node_ids
         localization_branch: LocalizationBranch | None = None
@@ -2859,15 +2855,15 @@ class FusionNode:
         *,
         selected_ids: list[str],
         energies: dict[str, float],
-        sensor_weights: dict[str, float] | None,
     ) -> list[str]:
         """Admit other nodes' sensors past the top-N energy selection (Phase 5).
 
         Energy selection pins to the loudest sensors — in practice one node's
         mics (the 2026-08-01 live box: 18991 single-node 2D solves, 0 cross-node
         pairs measured). When enabled and the selection is single-node, sensors
-        from OTHER nodes are admitted if they clear a relative energy floor and
-        the cross-node sync gate, so the solve can span nodes. Default off.
+        from OTHER nodes are admitted if they clear a relative energy floor, so
+        the solve can span nodes. Clock class never blocks admission: a weak
+        clock's pairs are down-weighted in the solve instead (P9). Default off.
         """
         cfg = self.localization_config
         if not getattr(cfg, "localization_cross_node_admission_enabled", False):
@@ -2887,8 +2883,6 @@ class FusionNode:
         energy_floor = (
             cfg.localization_cross_node_relative_energy_floor * max_selected_energy
         )
-        sync_gate = getattr(cfg, "localization_cross_node_min_sync_weight", 0.25) or 0.0
-        weights = sensor_weights or {}
         admissible = sorted(
             (
                 (energies[sensor_id], sensor_id)
@@ -2897,7 +2891,6 @@ class FusionNode:
                 and node_ids_by_sensor.get(sensor_id) is not None
                 and node_ids_by_sensor[sensor_id] not in selected_nodes
                 and energies[sensor_id] >= energy_floor
-                and weights.get(sensor_id, 1.0) >= sync_gate
             ),
             reverse=True,
         )
@@ -2916,12 +2909,9 @@ class FusionNode:
         """Fold a solve's cross-node pair stats into FusionMetrics. None fields
         (solve path measures no pairs) leave the counters untouched."""
         measured = getattr(localization, "cross_node_pairs_measured", None)
-        rejected = getattr(localization, "cross_node_pairs_rejected_sync", None)
         if measured is not None:
             self._metrics.localization_cross_node_pairs_measured_count += int(measured)
             self._metrics.last_cross_node_pair_count = int(measured)
-        if rejected is not None:
-            self._metrics.localization_cross_node_pairs_rejected_sync_count += int(rejected)
 
     def _should_skip_saturated_report_window(self, product: LocalizedCandidate) -> bool:
         """Pre-render report-window gate (cap = 0 disables).

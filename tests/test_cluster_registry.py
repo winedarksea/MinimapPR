@@ -8,14 +8,17 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from minimappr.config import Settings
 from minimappr.core.cluster_registry import ClusterRegistry, _min_grade
 from minimappr.core.node_registry import NodeRegistry
+from minimappr.core.pair_timing_uncertainty import ClockUncertaintyPolicy, NodeClockEvidence
 from minimappr.models import (
     ClusterSpec,
     IamfRenderMode,
     NodeSpec,
     NodeType,
     SyncGrade,
+    TimeQuality,
 )
 
 
@@ -143,21 +146,25 @@ async def test_declared_caps_effective_grade() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cluster_sensor_weights_uses_sync_grade_weights() -> None:
+async def test_cluster_sensor_timing_uncertainty_uses_clock_class_defaults() -> None:
     nodes = NodeRegistry()
     await nodes.upsert(_node("n0", 0.0, 0.0), last_seen_ns=1)
     await nodes.upsert(_node("n1", 1.0, 0.0), last_seen_ns=1)
-    await nodes.update_sensor_sync_grade("n0:ch0", SyncGrade.GPS_PPS)
-    await nodes.update_sensor_sync_grade("n1:ch0", SyncGrade.NTP)
+    await nodes.upsert(_node("n2", 2.0, 0.0), last_seen_ns=1)
+    await nodes.record_node_clock_evidence("n0", NodeClockEvidence(TimeQuality.GPS_LOCKED.value))
+    await nodes.record_node_clock_evidence("n1", NodeClockEvidence(TimeQuality.NTP_DISCIPLINED.value))
+    # n2 never reported a clock: unknown default, admitted with a wide error.
 
     reg = ClusterRegistry()
     await reg.upsert(ClusterSpec(
-        id="c1", member_node_ids=["n0", "n1"], declared_sync_grade=SyncGrade.GPS_PPS,
+        id="c1", member_node_ids=["n0", "n1", "n2"], declared_sync_grade=SyncGrade.GPS_PPS,
     ))
 
-    weights = await reg.cluster_sensor_weights("c1", nodes)
-    assert weights["n0:ch0"] == pytest.approx(1.0)
-    assert weights["n1:ch0"] == pytest.approx(0.25)
+    policy = ClockUncertaintyPolicy.from_settings(Settings())
+    uncertainty = await reg.cluster_sensor_timing_uncertainty_seconds("c1", nodes, policy)
+    assert uncertainty["n0:ch0"] == pytest.approx(1.0e-6)
+    assert uncertainty["n1:ch0"] == pytest.approx(2.0e-3)
+    assert uncertainty["n2:ch0"] == pytest.approx(policy.unknown_uncertainty_seconds)
 
 
 @pytest.mark.asyncio
@@ -209,9 +216,3 @@ def test_min_grade_helper_orders_grades_correctly() -> None:
     assert _min_grade(SyncGrade.NTP, SyncGrade.GPS_PPS) == SyncGrade.NTP
     assert _min_grade(SyncGrade.PTP, SyncGrade.FREE) == SyncGrade.FREE
 
-
-def test_sync_grade_weight_table() -> None:
-    assert SyncGrade.GPS_PPS.weight() == 1.0
-    assert SyncGrade.PTP.weight() == 1.0
-    assert SyncGrade.NTP.weight() == 0.25
-    assert SyncGrade.FREE.weight() == 0.05

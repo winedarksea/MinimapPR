@@ -60,6 +60,7 @@ class SnapshotGeometrySolutionResolver:
                     "ch_b": pair.ch_b,
                     "lag_seconds": pair.lag_seconds,
                     "confidence": pair.confidence,
+                    "timing_uncertainty_seconds": pair.timing_uncertainty_seconds,
                 }
                 for pair in solve.admitted_pair_tdoas
             ],

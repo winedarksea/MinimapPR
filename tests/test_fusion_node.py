@@ -241,6 +241,12 @@ async def test_fusion_node_ingest_and_status(tmp_path: Path) -> None:
         grade.value == "gps_pps"
         for grade in (await registry.sensor_sync_grades()).values()
     )
+    # P9: the frame's clock report reaches the cross-node pair weighting.
+    from minimappr.core.pair_timing_uncertainty import ClockUncertaintyPolicy
+
+    clock_policy = ClockUncertaintyPolicy.from_settings(fusion.settings)
+    sensor_clock_uncertainty = await registry.sensor_timing_uncertainty_seconds(clock_policy)
+    assert set(sensor_clock_uncertainty.values()) == {clock_policy.class_uncertainty_for("gps_locked")}
 
     await asyncio.sleep(0.1)
 
@@ -3533,7 +3539,7 @@ def test_localizer_signature_parameters_cached_per_instance(tmp_path: Path) -> N
     fusion = _make_fusion_node(settings, Storage(settings.db_path))
 
     params, params_2d = fusion._localizer_signature_parameters()
-    assert "sensor_weights" in params
+    assert "sensor_timing_uncertainty_seconds" in params
     assert params_2d is not None
     # Second call serves the cache (same parameter mappings, no re-reflection).
     again, again_2d = fusion._localizer_signature_parameters()
@@ -3556,7 +3562,7 @@ def test_localizer_signature_parameters_cached_per_instance(tmp_path: Path) -> N
     fusion.localizer = _MinimalLocalizer()
     swapped, swapped_2d = fusion._localizer_signature_parameters()
     assert "custom_kw" in swapped
-    assert "sensor_weights" not in swapped
+    assert "sensor_timing_uncertainty_seconds" not in swapped
     assert swapped_2d is None
 
 
@@ -3564,7 +3570,8 @@ def test_localizer_signature_parameters_cached_per_instance(tmp_path: Path) -> N
 async def test_cross_node_sensor_admission_default_off_and_enabled() -> None:
     """Phase 5 admission: default-off preserves the historical single-node
     selection exactly; enabled, other-node sensors clearing the relative energy
-    floor + sync gate are admitted so a solve can span nodes."""
+    floor are admitted so a solve can span nodes. Clock class never blocks
+    admission (P9): weak clocks are down-weighted in the solve instead."""
     from types import SimpleNamespace
 
     from minimappr.core.fusion_node import FusionMetrics, FusionNode
@@ -3606,7 +3613,7 @@ async def test_cross_node_sensor_admission_default_off_and_enabled() -> None:
     # Default off: selection unchanged, counter untouched.
     off = _fake(False)
     result = await FusionNode._admit_cross_node_sensors(
-        off, selected_ids=selected, energies=energies, sensor_weights=None
+        off, selected_ids=selected, energies=energies
     )
     assert result == selected
     assert off._metrics.localization_cross_node_admitted_sensor_count == 0
@@ -3614,7 +3621,7 @@ async def test_cross_node_sensor_admission_default_off_and_enabled() -> None:
     # Enabled: node-b sensors (0.5 >= 0.25 × 1.0) are admitted, capped.
     on = _fake(True)
     result = await FusionNode._admit_cross_node_sensors(
-        on, selected_ids=selected, energies=energies, sensor_weights=None
+        on, selected_ids=selected, energies=energies
     )
     assert set(result) >= set(selected)
     admitted = [sid for sid in result if sid.startswith("node-b:")]
@@ -3624,21 +3631,13 @@ async def test_cross_node_sensor_admission_default_off_and_enabled() -> None:
     # Relative floor gates quiet nodes out.
     high_floor = _fake(True, floor=0.75)
     result = await FusionNode._admit_cross_node_sensors(
-        high_floor, selected_ids=selected, energies=energies, sensor_weights=None
-    )
-    assert result == selected
-
-    # Sub-gate sync weights exclude unsynchronized nodes.
-    gated = _fake(True)
-    weights = {sid: (0.05 if sid.startswith("node-b:") else 1.0) for sid in energies}
-    result = await FusionNode._admit_cross_node_sensors(
-        gated, selected_ids=selected, energies=energies, sensor_weights=weights
+        high_floor, selected_ids=selected, energies=energies
     )
     assert result == selected
 
     # max_extra_sensors caps the admitted set.
     capped = _fake(True, max_extra=2)
     result = await FusionNode._admit_cross_node_sensors(
-        capped, selected_ids=selected, energies=energies, sensor_weights=None
+        capped, selected_ids=selected, energies=energies
     )
     assert len([sid for sid in result if sid.startswith("node-b:")]) == 2

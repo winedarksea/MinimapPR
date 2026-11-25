@@ -13,6 +13,7 @@ from minimappr.core.far_field_model_selection import (
     far_field_alternative_if_curvature_unsupported,
 )
 from minimappr.core.localization_uncertainty import covariance_to_nested_list
+from minimappr.core.pair_timing_uncertainty import optimizer_residual_scale
 from minimappr.core.radial_range_refinement import (
     adaptive_radial_refinement,
     radial_standard_deviation,
@@ -309,11 +310,16 @@ def solve_cartesian_tdoa(
             )
         )
 
+    residual_scale = optimizer_residual_scale(measurement.weight for measurement in measurements)
+
+    def optimized_residual(position_m: np.ndarray) -> np.ndarray:
+        return combined_residual_seconds(position_m) * residual_scale
+
     for initial_position in initial_positions[:MAX_REFINEMENT_START_COUNT]:
         solved = None
         try:
             solved = least_squares(
-                combined_residual_seconds,
+                optimized_residual,
                 x0=initial_position,
                 method="trf",
                 loss="soft_l1",
@@ -327,7 +333,7 @@ def solve_cartesian_tdoa(
         if not solved.success and np.all(np.isfinite(solved.x)):
             try:
                 solved = least_squares(
-                    combined_residual_seconds,
+                    optimized_residual,
                     x0=solved.x,
                     method="trf",
                     loss="soft_l1",
