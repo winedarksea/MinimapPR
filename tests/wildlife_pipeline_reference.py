@@ -25,8 +25,8 @@ from minimappr.core.bird_entity_registry import BirdEntityObservation, BirdEntit
 from minimappr.core.entity_reporting_policy import EntityReportingPolicy
 from minimappr.core.tracking import TrackManager
 
+# Wildlife stationary_hold (the S3 perched tracker) is the shipped default.
 PIPELINE_SETTINGS = dict(
-    tracking_perched_filter_enabled=True,
     tracking_species_log_odds_enabled=True,
     dormant_reacquire_enabled=False,
     association_fingerprint_weight=0.0,

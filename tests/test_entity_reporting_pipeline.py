@@ -109,7 +109,8 @@ def _entity_events(payloads: list[dict]) -> list[dict]:
 
 
 async def test_flag_off_keeps_legacy_policy_and_fires_rules_per_detection(tmp_path: Path) -> None:
-    fusion, storage, payloads, rules = await _fusion(tmp_path)
+    # Entity reporting defaults on since localization overhaul milestone 3.
+    fusion, storage, payloads, rules = await _fusion(tmp_path, entity_reporting_enabled=False)
     try:
         assert fusion.entity_reporting is None
         assert isinstance(fusion.reporting_policy, ReportingFusionPolicy)

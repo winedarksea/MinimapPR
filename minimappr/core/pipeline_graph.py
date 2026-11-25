@@ -33,6 +33,7 @@ from ..classifiers.birdnet_threshold_set import BIRDNET_V3_MODEL_VERSION
 from ..config import Settings, TrackingConfig
 from ..core.config_groups import EXPOSED_CONFIG_KEYS
 from ..core.rules import RuleDef
+from ..core.tracking_mode_config import TrackingMode, TrackingModeConfig
 from ..models import (
     NodeCapability,
     NodeSpec,
@@ -714,9 +715,13 @@ def _settings_params(settings, specs: tuple[tuple[str, str, str], ...]) -> list[
 
 # --- Field Mode W2-tracker ---
 def _field_mode_tracker_params(tc, settings) -> list[PipelineParam]:
-    """Perched filter / species log-odds / partial binding switches + key knobs."""
+    """Species log-odds / partial binding switches + stationary_hold knobs.
+
+    Which categories hold station is the "Tracking mode by category" param."""
+    stationary_hold_in_use = TrackingModeConfig.from_mapping(tc.tracking_mode_by_category).any_category_uses(
+        TrackingMode.STATIONARY_HOLD
+    )
     params = [
-        _param("Perched filter", bool(tc.tracking_perched_filter_enabled), "tracking_perched_filter_enabled"),
         _param("Species log-odds", bool(tc.tracking_species_log_odds_enabled), "tracking_species_log_odds_enabled"),
         _param(
             "Partial binding",
@@ -724,7 +729,7 @@ def _field_mode_tracker_params(tc, settings) -> list[PipelineParam]:
             "tracking_partial_constraint_binding_enabled",
         ),
     ]
-    if tc.tracking_perched_filter_enabled:
+    if stationary_hold_in_use:
         params.append(
             _param(
                 "Relocation gate",
@@ -753,7 +758,7 @@ def _field_mode_tracker_params(tc, settings) -> list[PipelineParam]:
                 "tracking_species_association_gate_enabled",
             )
         )
-    if tc.tracking_perched_filter_enabled:
+    if stationary_hold_in_use:
         params.append(
             _param(
                 "Concurrent-perch guard",
@@ -783,7 +788,7 @@ def _birdnet_two_threshold_params(settings) -> list[PipelineParam]:
 # --- Field Mode W3-entity ---
 def _field_mode_entity_params(settings) -> list[PipelineParam]:
     """Bird-entity reporting (replaces bucketed reporting for its categories) + grace window."""
-    enabled = bool(getattr(settings, "entity_reporting_enabled", False))
+    enabled = bool(settings.entity_reporting_enabled)
     params = [_param("Bird entities", enabled, "entity_reporting_enabled")]
     if enabled:
         params.extend(

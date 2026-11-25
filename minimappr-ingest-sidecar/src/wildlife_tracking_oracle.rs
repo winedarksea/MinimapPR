@@ -1,5 +1,6 @@
 //! Hidden `wildlife-tracking-oracle` subcommand: runs the ported S3/S6
-//! server-track pieces (`minimappr_core::wildlife_tracking`,
+//! server-track pieces and the per-category tracking modes
+//! (`minimappr_core::wildlife_tracking`,
 //! `minimappr_core::bird_entity`) on cases supplied as JSON on stdin and
 //! prints one JSON result per case. Used by
 //! `tests/test_wildlife_tracking_cross_language_parity.py` against goldens
@@ -29,6 +30,7 @@ use minimappr_core::wildlife_tracking::species_association_gate::species_claims_
 use minimappr_core::wildlife_tracking::species_log_odds::{
     LabelScores, SpeciesBeliefConfig, SpeciesLogOddsBelief,
 };
+use minimappr_core::wildlife_tracking::tracking_mode::TrackingModeConfig;
 use minimappr_core::wildlife_tracking::{Covariance3, Position3};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -229,6 +231,43 @@ fn run_entity_geometry_case(case: &Value) -> Result<Value, serde_json::Error> {
     Ok(json!({ "samples": outputs }))
 }
 
+/// Each configuration: `mapping` as `[category, mode]` pairs (null = shipped
+/// defaults) and the categories to resolve; an invalid mapping resolves none.
+fn run_tracking_mode_case(case: &Value) -> Result<Value, serde_json::Error> {
+    #[derive(Deserialize)]
+    struct ModeConfiguration {
+        mapping: Option<Vec<(String, String)>>,
+        categories: Vec<String>,
+    }
+    let configurations: Vec<ModeConfiguration> =
+        serde_json::from_value(case["configurations"].clone())?;
+    let results: Vec<Value> = configurations
+        .iter()
+        .map(|configuration| {
+            let parsed = match &configuration.mapping {
+                None => Ok(TrackingModeConfig::default()),
+                Some(pairs) => TrackingModeConfig::from_category_modes(
+                    pairs
+                        .iter()
+                        .map(|(category, mode)| (category.as_str(), mode.as_str())),
+                ),
+            };
+            match parsed {
+                Ok(modes) => json!({
+                    "valid": true,
+                    "modes": configuration
+                        .categories
+                        .iter()
+                        .map(|category| modes.mode_for_category(category).name())
+                        .collect::<Vec<_>>(),
+                }),
+                Err(_) => json!({ "valid": false, "modes": Value::Null }),
+            }
+        })
+        .collect();
+    Ok(json!({ "results": results }))
+}
+
 pub fn run_wildlife_tracking_oracle() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::io::Read;
 
@@ -244,6 +283,7 @@ pub fn run_wildlife_tracking_oracle() -> Result<(), Box<dyn std::error::Error + 
             "species_gate" => run_species_gate_case(case),
             "concurrency" => run_concurrency_case(case)?,
             "entity_geometry" => run_entity_geometry_case(case)?,
+            "tracking_mode" => run_tracking_mode_case(case)?,
             "pipeline" => wildlife_pipeline_oracle::run_pipeline_case(case)?,
             other => return Err(format!("unknown case kind {other:?}").into()),
         };

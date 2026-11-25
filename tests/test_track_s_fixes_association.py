@@ -9,6 +9,7 @@ from minimappr.core.track_perched_concurrency import (
 )
 from minimappr.core.track_species_association_gate import species_claims_contradict
 from minimappr.core.tracking import TrackManager
+from minimappr.sim.tracker_scenario_catalog import WILDLIFE_CONTINUOUS_MOTION
 
 T0 = 1_700_000_000_000_000_000
 SECOND = 1_000_000_000
@@ -22,7 +23,8 @@ TIGHT_FIX_COVARIANCE_M2 = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 4.0]]
 # Three perches 12.5 m apart: beyond the plain gate, inside the relocation gate.
 FLOCK_PERCHES_M = ((0.0, 0.0, 3.0), (15.0, 0.0, 3.0), (7.5, 10.0, 3.0))
 FLOCK_ROTATION_SECONDS = 1.2
-ALL_TRACKER_FLAGS = dict(tracking_perched_filter_enabled=True, tracking_species_log_odds_enabled=True)
+# Wildlife stationary_hold is the default; log-odds is the remaining opt-in.
+ALL_TRACKER_FLAGS = dict(tracking_species_log_odds_enabled=True)
 
 
 def test_contradiction_needs_two_confident_disagreeing_claims() -> None:
@@ -90,8 +92,8 @@ async def test_weak_misclassified_bout_on_the_same_perch_joins_the_bird() -> Non
 async def test_species_gate_off_or_log_odds_off_keeps_legacy_merge() -> None:
     for settings in (
         Settings(**ALL_TRACKER_FLAGS, tracking_species_association_gate_enabled=False),
-        Settings(tracking_perched_filter_enabled=True, tracking_perched_concurrent_perch_guard_enabled=False),
-        Settings(),
+        Settings(tracking_perched_concurrent_perch_guard_enabled=False),
+        Settings(**WILDLIFE_CONTINUOUS_MOTION),
     ):
         tanager, grosbeak = await _tanager_then_grosbeak(settings, grosbeak_confidence=0.9)
         assert grosbeak.id == tanager.id

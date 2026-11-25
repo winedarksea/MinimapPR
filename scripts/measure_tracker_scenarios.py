@@ -19,16 +19,22 @@ from minimappr.sim.tracker_detection_scenarios import score_tracker_scenario  # 
 from minimappr.sim.entity_scenario_catalog import ENTITY_SCENARIOS  # noqa: E402
 from minimappr.sim.tracker_scenario_catalog import (  # noqa: E402
     ALL_TRACKER_FLAGS_ON,
+    LEGACY_TRACKER_SETTINGS,
     TRACKER_SCENARIOS,
+    WILDLIFE_STATIONARY_HOLD,
 )
 
 CONFIGURATIONS = {
-    "off": {},
-    "perched": {"tracking_perched_filter_enabled": True},
-    "log-odds+2thr": {"tracking_species_log_odds_enabled": True, "birdnet_two_threshold_enabled": True},
+    "off": LEGACY_TRACKER_SETTINGS,
+    "perched": {**LEGACY_TRACKER_SETTINGS, **WILDLIFE_STATIONARY_HOLD},
+    "log-odds+2thr": {
+        **LEGACY_TRACKER_SETTINGS,
+        "tracking_species_log_odds_enabled": True,
+        "birdnet_two_threshold_enabled": True,
+    },
     "all-on": ALL_TRACKER_FLAGS_ON,
     # Field Mode W3-entity: bird entities on top of the tracker.
-    "off+entity": {"entity_reporting_enabled": True},
+    "off+entity": {**LEGACY_TRACKER_SETTINGS, "entity_reporting_enabled": True},
     "all-on+entity": {**ALL_TRACKER_FLAGS_ON, "entity_reporting_enabled": True},
 }
 

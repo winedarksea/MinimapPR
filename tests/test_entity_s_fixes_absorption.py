@@ -172,7 +172,7 @@ async def _noop(*_args) -> None:
 async def _hop_then_back(*, with_coordinator: bool) -> list[str]:
     """Bird A sings, bird B's first fix 2.4 s later reads as A hopping (nobody else
     sang), then A sings on its old perch 1.2 s after that: the tracker reverts the hop."""
-    manager = TrackManager(Settings(tracking_perched_filter_enabled=True, tracking_species_log_odds_enabled=True))
+    manager = TrackManager(Settings(tracking_species_log_odds_enabled=True))
     registry = sequential_registry()
     if with_coordinator:
         registry = EntityReportingCoordinator(
@@ -231,7 +231,7 @@ def test_nan_fix_neither_absorbs_nor_counts_as_a_concurrent_bird() -> None:
 
 
 async def test_a_failing_revert_listener_does_not_break_the_tracker_update() -> None:
-    manager = TrackManager(Settings(tracking_perched_filter_enabled=True, tracking_species_log_odds_enabled=True))
+    manager = TrackManager(Settings(tracking_species_log_odds_enabled=True))
     heard = []
 
     def broken_listener(_revert) -> None:

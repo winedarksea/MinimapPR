@@ -25,6 +25,7 @@ from minimappr.core.track_filters import KalmanTrackFilter
 from minimappr.core.tracking import TrackManager
 from minimappr.interfaces import AssociationContext
 from minimappr.models import TrackState, TrackStatus
+from minimappr.sim.tracker_scenario_catalog import WILDLIFE_CONTINUOUS_MOTION
 
 T0 = 1_700_000_000_000_000_000
 SECOND = 1_000_000_000
@@ -120,7 +121,8 @@ async def test_security_track_coasts_while_wildlife_stays_confirmed() -> None:
 
 @pytest.mark.asyncio
 async def test_per_category_process_noise_reaches_the_filter() -> None:
-    manager = TrackManager(Settings())
+    # The constant-velocity Kalman's q: wildlife moved off stationary_hold for this.
+    manager = TrackManager(Settings(**WILDLIFE_CONTINUOUS_MOTION))
     wildlife = await manager.update(
         timestamp_ns=T0,
         position_m=(0.0, 0.0, 0.0),
@@ -220,7 +222,8 @@ async def test_coast_guard_keeps_a_drifting_singer_after_a_long_silence() -> Non
     lands out of gate; the coast guard is what actually re-associates it."""
 
     async def run(**overrides) -> list[str]:
-        manager = TrackManager(Settings(**overrides))
+        # A Kalman coast guard test: wildlife on constant velocity, not stationary_hold.
+        manager = TrackManager(Settings(**WILDLIFE_CONTINUOUS_MOTION, **overrides))
         ids: list[str] = []
         for index in range(4):  # drifting at 1.5 m/s, detections 5 s apart
             track = await manager.update(

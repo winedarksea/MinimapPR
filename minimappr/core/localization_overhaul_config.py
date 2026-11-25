@@ -12,6 +12,11 @@ from __future__ import annotations
 import json
 import math
 
+from minimappr.core.tracking_mode_config import (  # noqa: F401  (re-exported vocabulary)
+    TRACKING_MODE_DEFAULT_CATEGORY_KEY,
+    default_tracking_mode_by_category,
+    tracking_mode_by_category_errors,
+)
 from minimappr.models import TimeQuality
 
 # --- Rust-forwarded defaults ---------------------------------------------------
@@ -66,21 +71,6 @@ DEFAULT_SIDECAR_GEOMETRY_RECONCILE_INTERVAL_SECONDS = 30.0
 DEFAULT_LOCALIZED_HANDOFF_DUPLICATE_MERGE_MAX_SEPARATION_M = 15.0
 DEFAULT_POSITION_OBSERVATION_QUEUE_MAX_ITEMS = 1024
 DEFAULT_POINT_NETWORK_CLIP_CLASSIFICATION_ENABLED = True
-
-TRACKING_MODE_CONTINUOUS_MOTION = "continuous_motion"
-TRACKING_MODE_STATIONARY_HOLD = "stationary_hold"
-TRACKING_MODE_NONE = "none"
-TRACKING_MODES = frozenset({TRACKING_MODE_CONTINUOUS_MOTION, TRACKING_MODE_STATIONARY_HOLD, TRACKING_MODE_NONE})
-# The mode for every label category not listed explicitly.
-TRACKING_MODE_DEFAULT_CATEGORY_KEY = "default"
-
-
-def default_tracking_mode_by_category() -> dict[str, str]:
-    return {
-        "wildlife": TRACKING_MODE_STATIONARY_HOLD,
-        TRACKING_MODE_DEFAULT_CATEGORY_KEY: TRACKING_MODE_CONTINUOUS_MOTION,
-    }
-
 
 # An unclassified fix may start a track that stays hidden until classified, or
 # must wait for a classification before any track starts.
@@ -184,7 +174,7 @@ def localization_overhaul_setting_errors(settings) -> list[str]:
     if settings.position_observation_queue_max_items < 1:
         errors.append("position_observation_queue_max_items must be >= 1")
     errors.extend(_clock_class_uncertainty_errors(settings.localization_clock_class_uncertainty_seconds))
-    errors.extend(_tracking_mode_by_category_errors(settings.tracking_mode_by_category))
+    errors.extend(tracking_mode_by_category_errors(settings.tracking_mode_by_category))
     if settings.position_observation_unclassified_track_policy not in POSITION_OBSERVATION_UNCLASSIFIED_TRACK_POLICIES:
         errors.append(
             "position_observation_unclassified_track_policy must be one of "
@@ -206,18 +196,4 @@ def _clock_class_uncertainty_errors(uncertainty_by_class: object) -> list[str]:
             )
         if not _is_positive_finite(seconds):
             errors.append(f"localization_clock_class_uncertainty_seconds[{clock_class!r}] must be a finite value > 0")
-    return errors
-
-
-def _tracking_mode_by_category_errors(mode_by_category: object) -> list[str]:
-    if not isinstance(mode_by_category, dict):
-        return ["tracking_mode_by_category must be a mapping of label category -> tracking mode"]
-    errors: list[str] = []
-    if TRACKING_MODE_DEFAULT_CATEGORY_KEY not in mode_by_category:
-        errors.append(f"tracking_mode_by_category must include a {TRACKING_MODE_DEFAULT_CATEGORY_KEY!r} entry")
-    for category, mode in mode_by_category.items():
-        if mode not in TRACKING_MODES:
-            errors.append(
-                f"tracking_mode_by_category[{category!r}] must be one of {sorted(TRACKING_MODES)}; got {mode!r}"
-            )
     return errors
