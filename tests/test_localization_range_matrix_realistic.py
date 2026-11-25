@@ -194,11 +194,9 @@ KNOWN_PIPELINE_GAPS: dict[str, str] = {
         _NTP_CROSS_NODE_UNUSABLE, "stored omni (render fallback); oracle guarantees a 3-D fix"
     ),
     # -- planar far field --
-    **{
-        f"1000m-single_planar-{clock}-{position}": _gap(_PLANAR_FAR_FIELD, "stored omni (low_localization_confidence)")
-        for clock in CLOCK_CLASSES
-        for position in POSITION_SOURCES
-    },
+    # (The four 1000m-single_planar cells pass since loc/km-range: bearing right
+    # and inside the stated uncertainty, after the far-field envelope, bounded
+    # radial search and unobservable-range covariance changes.)
     "100m-planar_point_coplanar-gps_locked-gps": _gap(_PLANAR_FAR_FIELD, "stored omni (low_localization_confidence)"),
     "100m-planar_point_coplanar-gps_locked-hand_measured": _gap(
         _PLANAR_FAR_FIELD, "bearing 51 deg wrong vs stated angular std 8 deg (Mahalanobis^2 46 > 13.8)"

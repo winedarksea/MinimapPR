@@ -127,9 +127,14 @@ def test_kilometre_point_network_solves_with_every_cross_node_pair(point_network
     assert len(pairs) == expected_pair_count and all(pair["is_cross_node"] for pair in pairs)
     truth_m = np.asarray(realized.scene.source_position_enu_m, dtype=np.float64)
     sensor_ids = [entry["sensor_id"] for entry in provenance["sensors"]]
+    # Lags are measured in the scene's air (20 C, 344.04 m/s); the sidecar's
+    # stated sound speed is its fixed 343.2 m/s (TODO, far-source limiters).
+    scene_sound_speed_mps = realized.scene.sound_speed_mps
     for pair in pairs:
         position_a, position_b = positions[sensor_ids[pair["ch_a"]]], positions[sensor_ids[pair["ch_b"]]]
-        expected_lag_seconds = (np.linalg.norm(truth_m - position_a) - np.linalg.norm(truth_m - position_b)) / sound_speed_mps
+        expected_lag_seconds = (
+            np.linalg.norm(truth_m - position_a) - np.linalg.norm(truth_m - position_b)
+        ) / scene_sound_speed_mps
         assert pair["lag_seconds"] == pytest.approx(expected_lag_seconds, abs=CROSS_NODE_LAG_TOLERANCE_SECONDS)
     # The solve's fix is on the source horizontally (the stored detection is
     # judged by the oracle test below).
@@ -159,7 +164,7 @@ def test_kilometre_point_network_meets_the_oracle(point_network_run) -> None:
 _FOUR_NODE_FAR_ELEVATION_OVERCONFIDENT = (
     "open after loc/km-range (same gap as E5 1000m-four_node_spread-gps_locked-gps): the ~10 m cluster stores "
     "a range_refined fix 1.3 km short with weak range observability (a bearing claim) whose elevation is 0.77 deg "
-    "off against a stated angular std of 0.01 deg; the 2 km impulse is admitted, solved and stored, not dropped"
+    "off against a stated angular std of 0.01 deg; in another run no stored render covered the impulse at all"
 )
 
 

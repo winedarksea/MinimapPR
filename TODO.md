@@ -294,10 +294,10 @@ Contract: `docs/localization_solve_contract.md`; tracking: `docs/tracking.md`; c
 - [ ] **Covariance calibration** — stated 95 % regions cover about 0.73 on E8 point networks (0.54 before the position-accuracy term). Correlation structure on coplanar and collinear layouts blocks starting the stationary filter from the fix covariance (`docs/tracking.md`, branch `loc/m3-hold-filter-init`, which also carries a relocation-gate double-fusion fix). `onset_overlap_two_species` stays at 0.44 m (was 0.33 m) until then.
 - [x] **Re-solve radial divergence** — the radial search now stops at `localization_far_field_max_range_m` (`radial_range_refinement.py`, Rust oracle mirror). A cost still falling there gives `range_asymptotic` at the envelope with radial std ≥ that radius: the bearing is kept and the stored fix no longer diverges to 10⁸ m (branch `loc/km-range`).
 - [ ] **`solve_3x3` / `invert_3x3` absolute 1e-9 pivot** (`srp_phat.rs`) — near-field normal-matrix entries are 1e-5 to 1e-10, so the base covariance often falls back or comes out non-symmetric.
-- [ ] **E5 open cells** (25 strict xfails, reasons in `tests/test_localization_range_matrix_realistic.py`):
+- [ ] **E5 open cells** (21 strict xfails, reasons in `tests/test_localization_range_matrix_realistic.py`; the four 1000m-single_planar cells pass since `loc/km-range`):
   - a compact planar array plus one weak-clock point collapses near the array with too small a covariance;
   - NTP cross-node solves;
-  - planar arrays at 100 m and beyond;
+  - a planar array with its coplanar point node at 100 m and beyond;
   - the four-node spread at 100 m and beyond;
   - a hand-measured planar-plus-point cell claims a range the oracle allows only as heard.
 - [ ] **Python 2-D path** — NTP-mixed solves can stall at the centroid; `localize_2d` lacks the node-position covariance term.
