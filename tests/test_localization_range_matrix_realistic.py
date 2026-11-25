@@ -124,25 +124,29 @@ DEFAULT_DIAGONAL_CELL_IDS = (
     "1000m-four_node_spread-gps_locked-gps",
 )
 
-MILESTONE_2_WIDENING_REASON = "milestone 2: needs R5/R7/P9 widening"
-_HAND_MEASURED_WIDENING = (
-    MILESTONE_2_WIDENING_REASON + " (hand-measured position_std_m 0.3 m is not reflected: stated std ~0.05 m)"
+# Measured with --runxfail on the milestone-2 integration head (R4, R5, R7, P9,
+# E4 merged). Every reason below is an open defect, not pending milestone-2
+# work: remove an entry when the fix lands (strict: an unexpected pass fails).
+_AFTER_M2 = "open after milestone 2 (R4/R5/R7/P9 on base)"
+_HAND_POSITION_NOT_WIDENED = (
+    f"{_AFTER_M2}: a hand-measured position_std_m of 0.3 m does not widen the cross-node solve covariance"
 )
-_NTP_CROSS_NODE_WIDENING = (
-    MILESTONE_2_WIDENING_REASON + " (NTP cross-node pairs weighted as if GPS-locked: stated std ~0.05 m)"
+_NTP_CROSS_NODE_UNUSABLE = f"{_AFTER_M2}: the NTP-timed (2 ms class) cross-node solve is still unusable or overconfident"
+_PLANAR_FAR_FIELD = (
+    f"{_AFTER_M2}: a planar array at 100 m+ (alone or with its coplanar point node) is stored omni "
+    "(low_localization_confidence) or points the wrong way, where a tetra at the same range localizes"
 )
-_PLANAR_FAR_FIELD_GAP = (
-    "pipeline gap, not milestone 2: a planar array at 100 m+ (alone, or with its coplanar point node) solves "
-    "below min_localization_confidence and is stored omni, where a tetra at the same range localizes"
+_SPREAD_FAR_FIELD = (
+    f"{_AFTER_M2}: the four-node cross-node solve at 100 m+ is unusable (stored omni, no detection covering "
+    "the event, or the right bearing at about half the range with a covariance that excludes the truth)"
 )
-_SPREAD_FAR_FIELD_GAP = (
-    "pipeline gap, not milestone 2: the four-node cross-node solve at 100 m+ is unusable (event solve "
-    "range_asymptotic at confidence ~0.1, or the right bearing at about half the range with a covariance "
-    "that excludes the truth); no stored detection reaches the oracle class even GPS-locked"
+_COMPACT_PLANAR_POINT_WEAK_CLOCK = (
+    "solver gap reported by P9: compact planar + one point node with a biased NTP clock collapses near the "
+    "array with a too-small covariance"
 )
-_COMPACT_PLANAR_POINT_WEAK_CLOCK_GAP = (
-    "solver gap reported by P9, persists after milestone 2: compact planar + one point node with a biased "
-    "NTP clock collapses near the array with a too-small covariance"
+_SINGLE_TETRA_100M_REGRESSION = (
+    "regression on the milestone-2 head (passed on the milestone-1 base): a lone tetra at 100 m now returns "
+    "range_refined at the node, 99.7 m off, stated std [0.19, 0.14, 0.07] m, claiming a 3-D fix"
 )
 
 
@@ -150,84 +154,105 @@ def _gap(base: str, detail: str) -> str:
     return f"{base}; measured: {detail}"
 
 
-# Cells the pipeline cannot pass yet (measured with --runxfail on this branch),
-# with the reason; the integrator removes an entry when the milestone that
-# fixes it lands (strict: an unexpected pass fails). Entries whose reason starts
-# with "milestone 2" are expected to flip; "pipeline gap" / "solver gap" ones are
-# open defects outside milestone 2.
 KNOWN_PIPELINE_GAPS: dict[str, str] = {
     # -- diagonal --
     "10m-four_node_spread-ntp_timed-gps": _gap(
-        _NTP_CROSS_NODE_WIDENING, "localized 6.8 m off at 6.2 deg bearing error; oracle guarantees a 3-D fix"
+        _NTP_CROSS_NODE_UNUSABLE, "stored omni (render fallback); earlier 6.8 m off at 6.2 deg; oracle guarantees a 3-D fix"
     ),
     "100m-four_node_spread-gps_locked-hand_measured": _gap(
-        _SPREAD_FAR_FIELD_GAP + "; also " + MILESTONE_2_WIDENING_REASON,
-        "85 m off, bearing 45 deg wrong vs stated angular std 17 deg (Mahalanobis^2 55 > 13.8), or omni at confidence 0.15",
+        _SPREAD_FAR_FIELD + "; also " + _HAND_POSITION_NOT_WIDENED,
+        "stored omni; earlier 85 m off with bearing 45 deg wrong vs stated angular std 17 deg",
     ),
     "1000m-four_node_spread-gps_locked-gps": _gap(
-        _SPREAD_FAR_FIELD_GAP, "bearing right but 460-710 m short with stated std 11-81 m, or no detection covers the event"
+        _SPREAD_FAR_FIELD,
+        "bearing right (0.03 deg) but 458 m short; stated angular std 0.01 deg vs 0.77 deg elevation error "
+        "(Mahalanobis^2 3551 > 13.8); earlier runs 460-710 m short or no covering detection",
     ),
-    # -- milestone 2 widening, cross-node --
+    # -- near range, cross-node, weak clock / hand-measured --
     "1m-planar_point_coplanar-gps_locked-hand_measured": _gap(
-        _HAND_MEASURED_WIDENING, "claims a 3-D fix (0.28 m off) the oracle allows only as heard"
+        _HAND_POSITION_NOT_WIDENED, "claims a 3-D fix (0.28 m off) the oracle allows only as heard"
+    ),
+    "1m-planar_point_coplanar-ntp_timed-gps": _gap(
+        _COMPACT_PLANAR_POINT_WEAK_CLOCK, "1.74 m off vs stated std [0.20, 0.14, 0.25] m (Mahalanobis^2 47 > 16.3)"
     ),
     "1m-four_node_spread-gps_locked-hand_measured": _gap(
-        _HAND_MEASURED_WIDENING, "0.31 m off vs stated std 0.05 m (Mahalanobis^2 39 > 16.3)"
+        _HAND_POSITION_NOT_WIDENED, "0.31 m off vs stated std 0.05 m (Mahalanobis^2 39 > 16.3)"
     ),
     "1m-four_node_spread-ntp_timed-gps": _gap(
-        _NTP_CROSS_NODE_WIDENING, "1.53 m off vs stated std 0.05 m (Mahalanobis^2 934), bearing 19.7 deg"
+        _NTP_CROSS_NODE_UNUSABLE, "no stored detection covers the event (twice); earlier 1.5 m off vs stated 0.05 m"
     ),
-    "10m-four_node_spread-gps_locked-hand_measured": _gap(
-        _HAND_MEASURED_WIDENING, "1.6 m off, bearing-only; oracle guarantees a 3-D fix"
-    ),
-    "10m-four_node_spread-ntp_timed-hand_measured": _gap(
-        MILESTONE_2_WIDENING_REASON, "stored omni (render fallback); oracle guarantees a 3-D fix"
-    ),
-    "100m-planar_point_coplanar-ntp_timed-hand_measured": _gap(
-        _HAND_MEASURED_WIDENING, "bearing 46 deg wrong vs stated angular std 5 deg (Mahalanobis^2 82 > 13.8)"
-    ),
-    # -- solver gaps P9 reports (compact planar + one point, weak clock) --
     "10m-planar_point_coplanar-ntp_timed-gps": _gap(
-        _COMPACT_PLANAR_POINT_WEAK_CLOCK_GAP, "9.3 m off vs stated std [0.06, 0.07, 0.20] m, claims a 3-D fix"
+        _COMPACT_PLANAR_POINT_WEAK_CLOCK, "9.4 m off vs stated std [0.18, 0.13, 0.24] m, claims a 3-D fix"
     ),
     "10m-planar_point_coplanar-ntp_timed-hand_measured": _gap(
-        _COMPACT_PLANAR_POINT_WEAK_CLOCK_GAP, "9.5 m off vs stated std [0.06, 0.06, 0.19] m, claims a 3-D fix"
+        _COMPACT_PLANAR_POINT_WEAK_CLOCK, "9.9 m off, bearing 68 deg wrong; earlier 9.5 m off vs stated 0.06 m"
     ),
-    "1000m-planar_point_coplanar-ntp_timed-gps": _gap(
-        _COMPACT_PLANAR_POINT_WEAK_CLOCK_GAP, "998 m off vs stated std [0.06, 0.09, 0.46] m, claims a 3-D fix"
+    "10m-four_node_spread-gps_locked-hand_measured": _gap(
+        _HAND_POSITION_NOT_WIDENED, "2.1 m off, bearing-only; oracle guarantees a 3-D fix"
     ),
-    "1000m-planar_point_coplanar-ntp_timed-hand_measured": _gap(
-        _COMPACT_PLANAR_POINT_WEAK_CLOCK_GAP, "998 m off vs stated std [0.06, 0.08, 0.45] m, claims a 3-D fix"
+    "10m-four_node_spread-ntp_timed-hand_measured": _gap(
+        _NTP_CROSS_NODE_UNUSABLE, "stored omni (render fallback); oracle guarantees a 3-D fix"
     ),
-    # -- planar far field --
+    # -- lone tetra at 100 m --
     **{
-        f"{range_m}m-single_planar-{clock}-{position}": _gap(_PLANAR_FAR_FIELD_GAP, "stored omni (low_localization_confidence)")
-        for range_m in (100, 1000)
+        f"100m-single_tetra-{clock}-{position}": _gap(_SINGLE_TETRA_100M_REGRESSION, "identical in all four cells")
         for clock in CLOCK_CLASSES
         for position in POSITION_SOURCES
     },
-    "100m-planar_point_coplanar-gps_locked-gps": _gap(_PLANAR_FAR_FIELD_GAP, "stored omni (low_localization_confidence)"),
+    # -- planar far field --
+    "100m-single_planar-gps_locked-hand_measured": _gap(
+        _PLANAR_FAR_FIELD, "bearing-projected with 28.7 deg elevation error vs stated angular std 3.9 deg"
+    ),
+    "100m-single_planar-ntp_timed-hand_measured": _gap(
+        _PLANAR_FAR_FIELD, "bearing-projected with 28.7 deg elevation error vs stated angular std 3.9 deg"
+    ),
+    **{
+        f"1000m-single_planar-{clock}-{position}": _gap(_PLANAR_FAR_FIELD, "stored omni (low_localization_confidence)")
+        for clock in CLOCK_CLASSES
+        for position in POSITION_SOURCES
+    },
+    "100m-planar_point_coplanar-gps_locked-gps": _gap(_PLANAR_FAR_FIELD, "stored omni (low_localization_confidence)"),
     "100m-planar_point_coplanar-gps_locked-hand_measured": _gap(
-        _PLANAR_FAR_FIELD_GAP + "; also " + MILESTONE_2_WIDENING_REASON,
-        "bearing 51 deg wrong vs stated angular std 8 deg (Mahalanobis^2 46 > 13.8)",
+        _PLANAR_FAR_FIELD, "bearing 51 deg wrong vs stated angular std 8 deg (Mahalanobis^2 46 > 13.8)"
+    ),
+    "100m-planar_point_coplanar-ntp_timed-gps": _gap(
+        _COMPACT_PLANAR_POINT_WEAK_CLOCK, "96 m off (at the array) vs stated std [0.39, 0.32, 0.90] m, claims a 3-D fix"
+    ),
+    "100m-planar_point_coplanar-ntp_timed-hand_measured": _gap(
+        _COMPACT_PLANAR_POINT_WEAK_CLOCK, "96 m off (at the array) vs stated std [0.83, 0.78, 1.30] m, claims a 3-D fix"
+    ),
+    "1000m-planar_point_coplanar-gps_locked-gps": _gap(
+        _PLANAR_FAR_FIELD, "range_asymptotic with bearing 84 deg wrong (passed on the milestone-1 base)"
+    ),
+    "1000m-planar_point_coplanar-gps_locked-hand_measured": _gap(
+        _PLANAR_FAR_FIELD, "bearing 75 deg wrong (passed on the milestone-1 base)"
+    ),
+    "1000m-planar_point_coplanar-ntp_timed-gps": _gap(
+        _COMPACT_PLANAR_POINT_WEAK_CLOCK, "1001 m off (at the array) vs stated std [1.46, 1.11, 2.66] m, claims a 3-D fix"
+    ),
+    "1000m-planar_point_coplanar-ntp_timed-hand_measured": _gap(
+        _COMPACT_PLANAR_POINT_WEAK_CLOCK, "1001 m off (at the array) vs stated std [2.63, 3.01, 3.14] m, claims a 3-D fix"
     ),
     # -- spread far field --
-    "100m-four_node_spread-gps_locked-gps": _gap(_SPREAD_FAR_FIELD_GAP, "no stored detection covers the event"),
-    "100m-four_node_spread-ntp_timed-gps": _gap(_SPREAD_FAR_FIELD_GAP, "no stored detection covers the event"),
-    "100m-four_node_spread-ntp_timed-hand_measured": _gap(_SPREAD_FAR_FIELD_GAP, "stored omni"),
-    "1000m-four_node_spread-gps_locked-hand_measured": _gap(_SPREAD_FAR_FIELD_GAP, "no stored detection covers the event"),
-    "1000m-four_node_spread-ntp_timed-gps": _gap(_SPREAD_FAR_FIELD_GAP, "no stored detection covers the event"),
-    "1000m-four_node_spread-ntp_timed-hand_measured": _gap(_SPREAD_FAR_FIELD_GAP, "stored omni"),
+    "100m-four_node_spread-gps_locked-gps": _gap(_SPREAD_FAR_FIELD, "no stored detection covers the event"),
+    "100m-four_node_spread-ntp_timed-gps": _gap(_SPREAD_FAR_FIELD, "stored omni"),
+    "100m-four_node_spread-ntp_timed-hand_measured": _gap(_SPREAD_FAR_FIELD, "stored omni"),
+    "1000m-four_node_spread-gps_locked-hand_measured": _gap(
+        _SPREAD_FAR_FIELD, "948 m off; elevation error 9.8 deg vs stated angular std 1.2-14 deg (Mahalanobis^2 116)"
+    ),
+    "1000m-four_node_spread-ntp_timed-gps": _gap(_SPREAD_FAR_FIELD, "stored omni"),
+    "1000m-four_node_spread-ntp_timed-hand_measured": _gap(_SPREAD_FAR_FIELD, "stored omni"),
 }
-# Cells that passed in one full-matrix run and failed in another (opt-in only):
+# Cells that both passed and failed across full-matrix runs (opt-in only):
 # non-strict, so they neither hide nor break the run.
 KNOWN_FLAKY_CELLS: dict[str, str] = {
-    "1m-planar_point_coplanar-gps_locked-gps": "flaky: range claim on the 6-sensor solve comes and goes run to run",
+    "1m-planar_point_coplanar-gps_locked-gps": "flaky: the 6-sensor solve's range claim comes and goes run to run",
     "1m-four_node_spread-ntp_timed-hand_measured": (
-        "flaky: sometimes stored omni (passes), sometimes a 1.2 m-off 3-D fix with stated std 0.05 m "
-        "(" + MILESTONE_2_WIDENING_REASON + ")"
+        "flaky: sometimes stored omni (passes), sometimes a 0.4-1.2 m-off 3-D fix with stated std 0.05-0.08 m"
     ),
-    "1000m-planar_point_coplanar-gps_locked-gps": "flaky: some runs store no detection covering the event",
+    "10m-four_node_spread-gps_locked-gps": (
+        "flaky on the milestone-2 head: usually a 0.15 m 3-D fix, once no stored detection covered the event"
+    ),
 }
 
 CELLS_BY_ID = {cell.cell_id: cell for cell in all_cells()}

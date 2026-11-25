@@ -8,9 +8,9 @@ printed and written as JSON (``MINIMAPPR_FAINT_FUNNEL_REPORT_PATH`` to keep it).
 
 Quiet-site fixture: a faint call at a site whose floor is MEMS self-noise
 stands well above the noise-floor-relative trigger's bar but below both the
-default absolute trigger and the solver's old absolute channel floor. Until
-R4 (relative trigger OR'd in, relative solver floor) it is never triggered
-and never localized; those assertions are strict milestone-2 xfails.
+default absolute trigger and the solver's old absolute channel floor. Before
+R4 (relative trigger OR'd in, relative solver floor) it was never triggered
+and was stored omni; it must now be relative-triggered and localized.
 
 Default suite: noise-only at the quiet site, the quiet-site fixture, and two
 normal-site steps. Full sweep: ``MINIMAPPR_ENABLE_FAINT_FUNNEL_FULL=1``.
@@ -63,14 +63,10 @@ RELATIVE_TRIGGER_MARGIN_DB = 1.5
 NORMAL_SITE_RELATIVE_ONLY_SNR_DB = 24.0
 NORMAL_SITE_ABOVE_ABSOLUTE_GATE_SNR_DB = 34.0
 FULL_SWEEP_SNR_STEPS_DB = (0.0, 6.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0, 38.0)
-MILESTONE_2_RELATIVE_TRIGGER_REASON = (
-    "milestone 2: needs R4 (noise-floor-relative trigger OR'd into the live trigger, solver floor relative to "
-    "the node's tracked floor)"
-)
 
 
 class FaintEventLost(AssertionError):
-    """Raised only by funnel verdicts, so a strict xfail never absorbs a harness failure."""
+    """Raised only by funnel verdicts, so a funnel loss reads apart from a harness failure."""
 
 
 def _report(rows: list[FunnelRow], tmp_path: Path, name: str) -> None:
@@ -96,7 +92,7 @@ def test_funnel_uses_the_apps_default_trigger(monkeypatch):
 
 
 def test_quiet_site_fixture_sits_between_the_relative_trigger_and_the_old_absolute_floor():
-    """Harness proof for the xfail below, from the synthesized capture alone."""
+    """Harness proof for the live fixture below, from the synthesized capture alone."""
     scene = funnel_scene()
     capture = funnel_captures(scene, QUIET_SITE, QUIET_SITE_FIXTURE_IN_BAND_SNR_DB)[NODE_ID]
     received = np.round(capture.astype(np.float64) * PCM16_FULL_SCALE) / PCM16_FULL_SCALE
@@ -116,7 +112,6 @@ def test_noise_only_false_trigger_rate_at_the_quiet_site(monkeypatch, tmp_path: 
     assert row.false_triggers_per_minute <= FALSE_TRIGGER_BUDGET_PER_MINUTE, format_funnel_table([row])
 
 
-@pytest.mark.xfail(strict=True, raises=FaintEventLost, reason=MILESTONE_2_RELATIVE_TRIGGER_REASON)
 def test_quiet_site_faint_call_is_relative_triggered_and_localized(monkeypatch, tmp_path: Path):
     row = run_funnel_step(monkeypatch, tmp_path, QUIET_SITE, QUIET_SITE_FIXTURE_IN_BAND_SNR_DB)
     _report([row], tmp_path, "quiet_site_fixture")
@@ -128,11 +123,7 @@ def test_quiet_site_faint_call_is_relative_triggered_and_localized(monkeypatch, 
 @pytest.mark.parametrize(
     "in_band_snr_db",
     [
-        pytest.param(
-            NORMAL_SITE_RELATIVE_ONLY_SNR_DB,
-            id="relative_only",
-            marks=pytest.mark.xfail(strict=True, raises=FaintEventLost, reason=MILESTONE_2_RELATIVE_TRIGGER_REASON),
-        ),
+        pytest.param(NORMAL_SITE_RELATIVE_ONLY_SNR_DB, id="relative_only"),
         pytest.param(NORMAL_SITE_ABOVE_ABSOLUTE_GATE_SNR_DB, id="above_absolute_gate"),
     ],
 )
