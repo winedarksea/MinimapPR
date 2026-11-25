@@ -3,7 +3,10 @@ use std::cmp::Ordering;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    gcc_phat::{dominant_frequency_hz, pair_max_tau_s, GccPhatCorrelation, PairTdoa},
+    gcc_phat::{
+        dominant_frequency_hz, normalize_band_hz, pair_max_tau_s, GccPhatCorrelation, PairTdoa,
+    },
+    localization_band_policy::{ChannelPairFrontEnds, LocalizationBandPolicy, PairFrontEnd},
     range_projection::{
         confidence_cap_for_mode, range_observability_cap_for_mode, RANGE_ASYMPTOTIC,
         RANGE_BEARING_PROJECTED, RANGE_BOUNDARY, RANGE_REFINED,
@@ -106,7 +109,8 @@ impl SolverReferenceChannelFloor {
 
 #[derive(Clone, Copy, Debug)]
 pub struct SrpPhatConfig {
-    pub localization_band_hz: [f32; 2],
+    /// Per-pair GCC-PHAT band and taper (intra-array vs cross-node).
+    pub band_policy: LocalizationBandPolicy,
     pub grid_resolution_m: f32,
     pub search_padding_m: f32,
     pub interp_factor: usize,
@@ -130,7 +134,7 @@ pub struct SrpPhatConfig {
 impl Default for SrpPhatConfig {
     fn default() -> Self {
         Self {
-            localization_band_hz: [50.0, 3430.0],
+            band_policy: LocalizationBandPolicy::default(),
             grid_resolution_m: 0.5,
             search_padding_m: 2.0,
             interp_factor: 4,
@@ -176,6 +180,7 @@ struct PairObservation {
     ch_a: usize,
     ch_b: usize,
     correlation: GccPhatCorrelation,
+    front_end: PairFrontEnd,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -217,6 +222,10 @@ pub struct SolveChannelConstraints<'a> {
     /// Adds the nodes' stated position errors (indexed by buffer channel) the
     /// same way: a node's rigid offset moves all of its TDOAs together.
     pub channel_node_position_std: Option<SensorNodePositionStd<'a>>,
+    /// Which rigid array (node) each buffer channel is on, so intra-array and
+    /// cross-node pairs get their own band and taper. `None` puts every
+    /// channel on one array.
+    pub array_index_by_channel: Option<&'a [usize]>,
 }
 
 /// Every pair among `active_channels` (see
@@ -283,13 +292,20 @@ pub fn estimate_tetrahedral_steering_with_solve_constraints(
     let mut ordered_channels = active_channels.to_vec();
     ordered_channels.sort_unstable();
 
+    let pair_front_ends = ChannelPairFrontEnds::resolve(
+        config.band_policy,
+        &ordered_channels,
+        mic_positions_m,
+        constraints.array_index_by_channel,
+        sound_speed_mps,
+    );
     let pair_observations = build_admitted_pair_observations(
         windows,
         &ordered_channels,
         mic_positions_m,
         sample_rate_hz,
         sound_speed_mps,
-        config.localization_band_hz,
+        &pair_front_ends,
         config.interp_factor,
         admitted_pair_filter,
     );
@@ -299,6 +315,8 @@ pub fn estimate_tetrahedral_steering_with_solve_constraints(
             ch_a: pair.ch_a,
             ch_b: pair.ch_b,
             tdoa: pair.correlation.tdoa.clone(),
+            band_hz: normalize_band_hz(Some(pair.front_end.band_hz), sample_rate_hz),
+            window_taper_fraction: pair.front_end.taper_fraction,
         })
         .collect::<Vec<_>>();
 
@@ -580,16 +598,23 @@ fn build_pair_observations(
     mic_positions_m: &[[f32; 3]],
     sample_rate_hz: u32,
     sound_speed_mps: f32,
-    localization_band_hz: [f32; 2],
+    band_policy: LocalizationBandPolicy,
     interp_factor: usize,
 ) -> Vec<PairObservation> {
+    let pair_front_ends = ChannelPairFrontEnds::resolve(
+        band_policy,
+        active_channels,
+        mic_positions_m,
+        None,
+        sound_speed_mps,
+    );
     build_admitted_pair_observations(
         windows,
         active_channels,
         mic_positions_m,
         sample_rate_hz,
         sound_speed_mps,
-        localization_band_hz,
+        &pair_front_ends,
         interp_factor,
         None,
     )
@@ -601,7 +626,7 @@ fn build_admitted_pair_observations(
     mic_positions_m: &[[f32; 3]],
     sample_rate_hz: u32,
     sound_speed_mps: f32,
-    localization_band_hz: [f32; 2],
+    pair_front_ends: &ChannelPairFrontEnds,
     interp_factor: usize,
     admitted_pair_filter: Option<AdmittedChannelPairFilter<'_>>,
 ) -> Vec<PairObservation> {
@@ -618,6 +643,7 @@ fn build_admitted_pair_observations(
                 sample_rate_hz,
                 sound_speed_mps,
             );
+            let front_end = pair_front_ends.pair_front_end(ch_a, ch_b);
             let correlation = pair_phat_correlation(
                 windows,
                 &mut full_window_spectra,
@@ -625,13 +651,14 @@ fn build_admitted_pair_observations(
                 ch_b,
                 sample_rate_hz,
                 max_tau_s,
-                Some(localization_band_hz),
+                front_end,
                 interp_factor,
             );
             pairs.push(PairObservation {
                 ch_a,
                 ch_b,
                 correlation,
+                front_end,
             });
         }
     }
@@ -1791,6 +1818,8 @@ mod tests {
         );
     }
 
+    const FAR_FIELD_ESCAPE_FIXTURE_BAND_HZ: [f32; 2] = [50.0, 3430.0];
+
     #[test]
     fn tetrahedral_solver_far_field_candidate_escapes_near_field_grid_bounds() {
         let mics = [
@@ -1812,6 +1841,12 @@ mod tests {
                 search_padding_m: 0.3,
                 far_field_default_range_m: 60.0,
                 far_field_max_range_m: 250.0,
+                // Pinned: at ~90 m the white-noise near/far choice flips with
+                // the band edge alone (probed 2026-11-25: other source
+                // positions flip at 3000, 3200 and 3400 Hz), so this fixture
+                // keeps the band it was written at instead of the tetra's
+                // derived 3266 Hz ceiling.
+                band_policy: LocalizationBandPolicy::with_intra_array_band(FAR_FIELD_ESCAPE_FIXTURE_BAND_HZ),
                 ..SrpPhatConfig::default()
             },
         );
@@ -1820,6 +1855,7 @@ mod tests {
             search_padding_m: 0.3,
             far_field_default_range_m: 60.0,
             far_field_max_range_m: 250.0,
+            band_policy: LocalizationBandPolicy::with_intra_array_band(FAR_FIELD_ESCAPE_FIXTURE_BAND_HZ),
             ..SrpPhatConfig::default()
         };
         let pair_observations = build_pair_observations(
@@ -1828,7 +1864,7 @@ mod tests {
             &mics,
             48_000,
             343.2,
-            config.localization_band_hz,
+            config.band_policy,
             config.interp_factor,
         );
         let reference_channel = [0, 1, 2, 3]
@@ -1911,7 +1947,7 @@ mod tests {
                 // near/far-field decision boundary and flips to the far-field
                 // candidate under small band changes, so it measures parity
                 // with that capture, not the quality of the shipped default.
-                localization_band_hz: [300.0, 3500.0],
+                band_policy: LocalizationBandPolicy::with_intra_array_band([300.0, 3500.0]),
                 ..SrpPhatConfig::default()
             },
         );
@@ -1920,7 +1956,7 @@ mod tests {
             search_padding_m: 0.3,
             far_field_default_range_m: 60.0,
             far_field_max_range_m: 250.0,
-            localization_band_hz: [300.0, 3500.0],
+            band_policy: LocalizationBandPolicy::with_intra_array_band([300.0, 3500.0]),
             ..SrpPhatConfig::default()
         };
         let pair_observations = build_pair_observations(
@@ -1929,7 +1965,7 @@ mod tests {
             &mics,
             48_000,
             343.2,
-            config.localization_band_hz,
+            config.band_policy,
             config.interp_factor,
         );
         let reference_channel = [0, 1, 2, 3]
@@ -2024,7 +2060,7 @@ mod tests {
             &mics,
             48_000,
             343.2,
-            config.localization_band_hz,
+            config.band_policy,
             config.interp_factor,
         );
         let reference_channel = [0, 1, 2, 3]
@@ -2765,6 +2801,16 @@ mod tests {
             far_field_default_range_m: 250.0,
             far_field_max_range_m: 2_000.0,
             max_grid_points: 200_000,
+            // Plain PHAT on cross-node pairs: this white-noise fixture's tight
+            // layout at 10 m has a second SRP maximum 2.95 m off that wins
+            // under any PHAT-beta below 1 (probed 0.9/0.8/0.7 on 2026-11-25;
+            // the other seven multinode cases are unchanged), so it pins the
+            // weighting it was written for. Beta exists for band-limited
+            // sources in the wide cross-node band, which white noise is not.
+            band_policy: LocalizationBandPolicy {
+                cross_node_phat_beta: 1.0,
+                ..LocalizationBandPolicy::default()
+            },
             ..SrpPhatConfig::default()
         }
     }
@@ -2788,13 +2834,21 @@ mod tests {
             centroid_m[2] + direction[2] * distance_m,
         ];
         let channels = synthesize_point_source_channels_n(source_position_m, &mics, 16_000, 16_384);
-        let evaluation = estimate_tetrahedral_steering(
+        // The tetra is one array; each point mic is its own node.
+        let array_index_by_channel: Vec<usize> = (0..mics.len())
+            .map(|channel| channel.saturating_sub(SIRITH_TETRA_OFFSETS_M.len() - 1))
+            .collect();
+        let evaluation = estimate_tetrahedral_steering_with_solve_constraints(
             &channels,
             &active,
             &mics,
             16_000,
             343.2,
             multinode_config(),
+            SolveChannelConstraints {
+                array_index_by_channel: Some(&array_index_by_channel),
+                ..SolveChannelConstraints::default()
+            },
         );
         (evaluation.localization, source_position_m, direction)
     }

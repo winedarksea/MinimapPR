@@ -268,15 +268,17 @@ Contract: `docs/localization_solve_contract.md`; tracking: `docs/tracking.md`; c
 
 - [x] **Clock steps and drift (owner decision)** — done on branch `loc/clock-reanchor`: a confirmed step re-anchors the node's buffer timeline and drift past half the 10 ms limit is slewed (origin shift only, no audio dropped; both ingest paths; `docs/localization_solve_contract.md` section 7, timeline discipline).
 - [ ] **Kilometre-range cross-node events need settings** — `localization_coverage_total_cap_seconds` ≥ 3 s, and a trigger cooldown longer than the cross-node lag. The default 1 s cap limits the event span to about 340 m.
-- [ ] **GCC-PHAT front end loses point-network calls** (E8):
-  - the 50–3430 Hz band discards most of a 3.4–7 kHz call;
-  - the rectangular event window makes PHAT pull every pair toward zero lag.
-  - Band plus taper took point-network recall from 0.30 to 0.45. Reconcile with the measured array bearing reversal behind the 3430 Hz ceiling before changing it (memory: localization band PHAT ceiling).
+- [x] **GCC-PHAT front end loses point-network calls** (E8) — fixed by splitting the band by pair type (branch `loc/phat-band-split`, `core/localization_band_policy.py` + `minimappr-core/src/localization_band_policy.rs`, details and numbers in `docs/point_network_bakeoff.md` "Band split by pair type"):
+  - intra-array pairs stop at the array's own c / (2·d_max) (tetra ≈ 3266 Hz from its 52.5 mm widest pair, planar ≈ 3432 Hz); `localization_band_max_hz` now defaults to 0 = derive per array, > 0 overrides; plain PHAT, no taper (a taper worsened tonal tetra/planar bearings);
+  - cross-node pairs use `localization_cross_node_band_max_hz` (11 000 Hz, 0 = Nyquist), a `localization_cross_node_window_taper_fraction` (0.2) Tukey taper and `localization_cross_node_phat_beta` (0.7) so a band-limited source's empty bins do not bias sub-sample lags;
+  - the Python window filter is the 50 Hz floor only; Rust↔Python parity test `tests/test_localization_band_split_parity.py`;
+  - E8 held-out production recall 0.302 → 0.460, p90 91.7 → 63.1 m, coverage 0.730 → 0.753; the gap to 0.491 is the 1 s lag cap (item above), which also makes the ≥ 343 m slice the one that got worse (0.32 → 0.26).
+  - Open: the Python solvers still leave intra-array pairs unmasked (masking them exposed the radial-refinement divergence on the house finch fixture), so intra-array parity with the sidecar is not reached; three knife-edge white-noise SRP fixtures are pinned to the setting they were written at; the bird gate's `baseline` rows (Python GCC path) are chaotic under any band change.
 - [ ] **3-node point networks never localize** — SRP needs 4 channels and `rust_tdoa_solve.py` 4 sensors (35 of 200 E8 held-out sites).
 - [ ] **Covariance calibration** — stated 95 % regions cover about 0.73 on E8 point networks (0.54 before the position-accuracy term). Correlation structure on coplanar and collinear layouts blocks starting the stationary filter from the fix covariance (`docs/tracking.md`; experiment archived as tag `archive/loc-m3-hold-filter-init`; its relocation-gate double-fusion fix was merged). `onset_overlap_two_species` stays at 0.44 m (was 0.33 m) until then.
 - [ ] **Re-solve radial divergence** — `radial_range_refinement.py` doubles the radius while the cost falls and can return 10⁸–10⁹ m as `range_bearing_projected`; only the handoff gate keeps it out of storage.
 - [ ] **`solve_3x3` / `invert_3x3` absolute 1e-9 pivot** (`srp_phat.rs`) — near-field normal-matrix entries are 1e-5 to 1e-10, so the base covariance often falls back or comes out non-symmetric.
-- [ ] **E5 open cells** (24 strict xfails, reasons in `tests/test_localization_range_matrix_realistic.py`):
+- [ ] **E5 open cells** (22 strict xfails, reasons in `tests/test_localization_range_matrix_realistic.py`; the GCC-PHAT band split cleared the 100 m NTP hand-measured planar-plus-point cell and made the 100 m NTP GPS one flaky):
   - a compact planar array plus one weak-clock point collapses near the array with too small a covariance;
   - NTP cross-node solves;
   - planar arrays at 100 m and beyond;

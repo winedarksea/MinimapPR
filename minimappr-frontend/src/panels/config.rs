@@ -380,7 +380,7 @@ fn LocalizationGroup(
                 {select_input("Algorithm", algo, gs, &["gcc_phat", "srp_phat", "music", "esprit"])}
                 {select_input("Strategy", strat, gs, &["fixed", "geometry_aware", "cascade"])}
                 {num_input("Band Min (Hz)", band_min, gs, 0.0, 20000.0, 10.0)}
-                {num_input("Band Max (Hz)", band_max, gs, 0.0, 20000.0, 10.0)}
+                {num_input("Array Band Max (Hz, 0 = c/2d per array)", band_max, gs, 0.0, 20000.0, 10.0)}
             </div>
             {group_footer(gs, save)}
         </div>

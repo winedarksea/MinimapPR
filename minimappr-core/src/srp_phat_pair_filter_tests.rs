@@ -143,13 +143,20 @@ fn a_channel_without_a_reference_pair_does_not_void_the_far_field_direction() {
     assert_eq!(pair_keys(&evaluation).len(), 8);
     let mics = three_node_mics();
     let windows = point_source_windows(&mics);
+    let pair_front_ends = ChannelPairFrontEnds::resolve(
+        config().band_policy,
+        &[0, 1, 2, 3, 4, 5],
+        &mics,
+        Some(&[0, 0, 0, 0, 1, 2]),
+        SOUND_SPEED_MPS,
+    );
     let observations = build_admitted_pair_observations(
         &windows,
         &[0, 1, 2, 3, 4, 5],
         &mics,
         SAMPLE_RATE_HZ,
         SOUND_SPEED_MPS,
-        config().localization_band_hz,
+        &pair_front_ends,
         config().interp_factor,
         Some(&admits_pair),
     );

@@ -299,9 +299,34 @@ struct Args {
     #[arg(
         long,
         env = "MINIMAPPR_LOCALIZATION_BAND_MAX_HZ",
-        default_value_t = 3430.0
+        default_value_t = 0.0
     )]
+    /// Intra-array GCC-PHAT ceiling override; 0 derives c / (2 d_max) per array.
     localization_band_max_hz: f32,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_CROSS_NODE_BAND_MAX_HZ",
+        default_value_t = 11_000.0
+    )]
+    /// Cross-node pair GCC-PHAT ceiling; 0 means Nyquist.
+    localization_cross_node_band_max_hz: f32,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_CROSS_NODE_WINDOW_TAPER_FRACTION",
+        default_value_t = 0.2
+    )]
+    /// Tukey taper fraction on cross-node pair windows; 0 keeps the rectangular cut.
+    localization_cross_node_window_taper_fraction: f32,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_CROSS_NODE_PHAT_BETA",
+        default_value_t = 0.7
+    )]
+    /// Cross-node PHAT-beta whitening exponent; 1 is plain PHAT.
+    localization_cross_node_phat_beta: f32,
 
     #[arg(long, env = "MINIMAPPR_GCC_PHAT_INTERP_FACTOR", default_value_t = 4)]
     gcc_phat_interp_factor: usize,
@@ -508,13 +533,36 @@ fn run_srp_oracle() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let active_channels: Vec<usize> = (0..windows.len()).collect();
-    let evaluation = srp_phat::estimate_tetrahedral_steering(
+    // Optional: which node each channel is on, and a band policy (parity
+    // tests of the intra-array / cross-node band split). Absent = one array
+    // with the shipped policy.
+    let array_index_by_channel: Option<Vec<usize>> = value
+        .get("array_index_by_channel")
+        .and_then(|indices| serde_json::from_value(indices.clone()).ok());
+    let mut band_policy = minimappr_core::localization_band_policy::LocalizationBandPolicy::default();
+    if let Some(policy) = value.get("band_policy") {
+        let field = |name: &str, default: f32| policy[name].as_f64().map_or(default, |v| v as f32);
+        band_policy.band_min_hz = field("band_min_hz", band_policy.band_min_hz);
+        band_policy.intra_array_band_max_hz = field("intra_array_band_max_hz", band_policy.intra_array_band_max_hz);
+        band_policy.cross_node_band_max_hz = field("cross_node_band_max_hz", band_policy.cross_node_band_max_hz);
+        band_policy.cross_node_window_taper_fraction =
+            field("cross_node_window_taper_fraction", band_policy.cross_node_window_taper_fraction);
+        band_policy.cross_node_phat_beta = field("cross_node_phat_beta", band_policy.cross_node_phat_beta);
+    }
+    let evaluation = srp_phat::estimate_tetrahedral_steering_with_solve_constraints(
         &windows,
         &active_channels,
         &mic_positions_m,
         sample_rate_hz,
         sound_speed_mps,
-        srp_phat::SrpPhatConfig::default(),
+        srp_phat::SrpPhatConfig {
+            band_policy,
+            ..srp_phat::SrpPhatConfig::default()
+        },
+        srp_phat::SolveChannelConstraints {
+            array_index_by_channel: array_index_by_channel.as_deref(),
+            ..srp_phat::SolveChannelConstraints::default()
+        },
     );
 
     let pair_tdoas: Vec<serde_json::Value> = evaluation
@@ -526,6 +574,8 @@ fn run_srp_oracle() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 "ch_b": pair.ch_b,
                 "lag_seconds": pair.tdoa.lag_seconds,
                 "delay_samples": pair.tdoa.delay_samples,
+                "band_hz": pair.band_hz,
+                "window_taper_fraction": pair.window_taper_fraction,
             })
         })
         .collect();
@@ -888,10 +938,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 consumed_manifest_prune_max_age_seconds: args
                     .dsp_consumed_manifest_prune_max_age_seconds,
                 stream_inactivity_evict_seconds: args.dsp_stream_inactivity_evict_seconds,
-                localization_band_hz: [
-                    args.localization_band_min_hz,
-                    args.localization_band_max_hz,
-                ],
+                localization_band_policy: minimappr_core::localization_band_policy::LocalizationBandPolicy {
+                    band_min_hz: args.localization_band_min_hz,
+                    intra_array_band_max_hz: args.localization_band_max_hz,
+                    cross_node_band_max_hz: args.localization_cross_node_band_max_hz,
+                    cross_node_window_taper_fraction: args
+                        .localization_cross_node_window_taper_fraction,
+                    cross_node_phat_beta: args.localization_cross_node_phat_beta,
+                },
                 gcc_phat_interp_factor: args.gcc_phat_interp_factor,
                 localization_srp_grid_resolution_m: args.localization_srp_grid_resolution_m,
                 localization_search_padding_m: args.localization_search_padding_m,

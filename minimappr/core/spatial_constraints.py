@@ -9,6 +9,7 @@ from typing import Callable
 
 import numpy as np
 
+from minimappr.core.localization_band_policy import SensorPairFrontEnds
 from minimappr.core.tdoa_measurements import (
     PairTdoaMeasurement,
     measure_pair_tdoas,
@@ -91,6 +92,7 @@ def build_node_spatial_constraints(
         ]
         | None
     ) = None,
+    pair_front_ends: SensorPairFrontEnds | None = None,
 ) -> tuple[list[SpatialBearingConstraint], list[AmplitudeRatioConstraint]]:
     if not sensor_node_ids:
         return [], []
@@ -155,6 +157,7 @@ def build_node_spatial_constraints(
                 sensor_timing_uncertainty_seconds=None,
                 gcc_phat_function=gcc_phat_function,
                 sensor_node_ids=sensor_node_ids,
+                pair_front_ends=pair_front_ends,
             )
         )
         try:

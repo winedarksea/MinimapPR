@@ -12,6 +12,7 @@ from minimappr.core.cartesian_tdoa import (
     solve_cartesian_tdoa,
 )
 from minimappr.core.localization import LocalizationError, gcc_phat, speed_of_sound_mps
+from minimappr.core.localization_band_policy import LocalizationBandPolicy, solve_pair_front_ends
 from minimappr.core.spatial_constraints import build_node_spatial_constraints
 from minimappr.core.subspace_bearing import (
     BearingPrior,
@@ -58,6 +59,7 @@ def _localize_cartesian(
     node_bearing_strength: float = 1.0,
     amplitude_ratio_strength: float = 0.0,
     far_field_initial_range_m: float = 50.0,
+    band_policy: LocalizationBandPolicy | None = None,
 ) -> LocalizationResult:
     sensor_ids = sorted(sensor_id for sensor_id in sensor_positions if sensor_id in sensor_windows)
     if len(sensor_ids) < 4:
@@ -67,6 +69,7 @@ def _localize_cartesian(
         humidity_fraction=humidity_fraction,
     )
     has_multiple_nodes = _uses_multiple_sensor_nodes(sensor_ids, sensor_node_ids)
+    pair_front_ends = solve_pair_front_ends(band_policy, sensor_positions, sensor_ids, sensor_node_ids, sound_speed_mps)
     active_node_bearing_estimator = node_bearing_estimator
     if bearing_prior_estimator is not None:
         def estimate_bearing(
@@ -107,6 +110,7 @@ def _localize_cartesian(
         sensor_timing_uncertainty_seconds=sensor_timing_uncertainty_seconds,
         gcc_phat_function=gcc_phat,
         sensor_node_ids=sensor_node_ids,
+        pair_front_ends=pair_front_ends,
     )
     bearing_constraints, amplitude_constraints = build_node_spatial_constraints(
         sensor_positions=sensor_positions,
@@ -122,6 +126,7 @@ def _localize_cartesian(
         pair_measurements=measurements,
         sensor_gain_offsets_db=sensor_gain_offsets_db,
         node_bearing_estimator=active_node_bearing_estimator,
+        pair_front_ends=pair_front_ends,
     )
     if (
         len(measurements) < 3
@@ -172,6 +177,8 @@ class SRPPhatLocalizer:
     far_field_elevation_step_deg: float = 8.0
     node_bearing_strength: float = 1.0
     amplitude_ratio_strength: float = 0.15
+    # Per-pair GCC-PHAT band and taper; None correlates every bin.
+    band_policy: LocalizationBandPolicy | None = None
 
     def localize(
         self,
@@ -198,6 +205,7 @@ class SRPPhatLocalizer:
             node_bearing_strength=self.node_bearing_strength,
             amplitude_ratio_strength=self.amplitude_ratio_strength,
             far_field_initial_range_m=self.far_field_default_range_m,
+            band_policy=self.band_policy,
         )
 
 
@@ -214,6 +222,8 @@ class MusicLocalizer:
     far_field_max_range_m: float = 250.0
     node_bearing_strength: float = 1.0
     amplitude_ratio_strength: float = 0.15
+    # Per-pair GCC-PHAT band and taper; None correlates every bin.
+    band_policy: LocalizationBandPolicy | None = None
 
     def localize(
         self,
@@ -261,6 +271,7 @@ class MusicLocalizer:
             node_bearing_strength=self.node_bearing_strength,
             amplitude_ratio_strength=self.amplitude_ratio_strength,
             far_field_initial_range_m=self.far_field_default_range_m,
+            band_policy=self.band_policy,
         )
 
 
@@ -274,6 +285,8 @@ class EspritLocalizer:
     far_field_max_range_m: float = 250.0
     node_bearing_strength: float = 1.0
     amplitude_ratio_strength: float = 0.15
+    # Per-pair GCC-PHAT band and taper; None correlates every bin.
+    band_policy: LocalizationBandPolicy | None = None
 
     def localize(
         self,
@@ -318,4 +331,5 @@ class EspritLocalizer:
             node_bearing_strength=self.node_bearing_strength,
             amplitude_ratio_strength=self.amplitude_ratio_strength,
             far_field_initial_range_m=self.far_field_default_range_m,
+            band_policy=self.band_policy,
         )

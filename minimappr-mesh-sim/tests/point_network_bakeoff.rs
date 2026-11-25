@@ -49,11 +49,10 @@ fn easy_scene_is_localized_by_repaired_production_and_onset_clustering() {
 }
 
 /// The production front-end finding (`docs/point_network_bakeoff.md`): the
-/// 50–3430 Hz GCC-PHAT band misses a 3.4–7 kHz sweep, and a rectangular
-/// event window that cuts through a loud call biases every cross-node pair
-/// toward zero lag. Remove the marker when the front-end is repaired.
+/// old 50–3430 Hz GCC-PHAT band missed a 3.4–7 kHz sweep, and a rectangular
+/// event window cut through a loud call biased every cross-node pair toward
+/// zero lag. The per-pair band split (wide, tapered cross-node pairs) fixed it.
 #[test]
-#[ignore = "localization overhaul milestone 4 (E8 finding): point-network GCC-PHAT front-end band ceiling and rectangular-cut zero-lag bias"]
 fn easy_scene_is_localized_by_production() {
     assert_localizes_easy_scene(BakeoffCandidate::ProductionGccPhatLsq);
 }

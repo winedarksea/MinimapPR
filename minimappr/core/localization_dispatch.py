@@ -17,6 +17,7 @@ from minimappr.core.localization import (
     dominant_frequency_hz,
     speed_of_sound_mps,
 )
+from minimappr.core.localization_band_policy import band_policy_from_config
 from minimappr.core.localization_uncertainty import (
     apply_frequency_covariance_scaling,
     covariance_to_nested_list,
@@ -671,6 +672,7 @@ def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Lo
     # same automatic policy as Settings.  With only one node represented in the
     # window, no cross-node pair is formed, so this is intrinsically a no-op.
     cross_node_enabled = bool(getattr(settings, "localization_cross_node_tdoa_enabled", True))
+    band_policy = band_policy_from_config(cfg)
     gcc = LocalizationEngine(
         max_tau_s=cfg.localization_max_tau_seconds,
         interp_factor=cfg.gcc_phat_interp_factor,
@@ -685,6 +687,7 @@ def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Lo
         bearing_observed_obs_floor=getattr(
             cfg, "localization_obs_factor_bearing_floor", 1.0
         ),
+        band_policy=band_policy,
     )
     algorithms: dict[str, Localizer] = {
         "gcc_phat": gcc,
@@ -699,6 +702,7 @@ def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Lo
             far_field_elevation_step_deg=cfg.localization_music_elevation_step_deg,
             node_bearing_strength=cfg.localization_node_bearing_strength,
             amplitude_ratio_strength=cfg.localization_amplitude_ratio_strength,
+            band_policy=band_policy,
         ),
         "music": MusicLocalizer(
             max_tau_s=cfg.localization_max_tau_seconds,
@@ -711,6 +715,7 @@ def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Lo
             far_field_max_range_m=cfg.localization_far_field_max_range_m,
             node_bearing_strength=cfg.localization_node_bearing_strength,
             amplitude_ratio_strength=cfg.localization_amplitude_ratio_strength,
+            band_policy=band_policy,
         ),
         "esprit": EspritLocalizer(
             max_tau_s=cfg.localization_max_tau_seconds,
@@ -721,6 +726,7 @@ def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Lo
             far_field_max_range_m=cfg.localization_far_field_max_range_m,
             node_bearing_strength=cfg.localization_node_bearing_strength,
             amplitude_ratio_strength=cfg.localization_amplitude_ratio_strength,
+            band_policy=band_policy,
         ),
     }
     return LocalizationDispatcher(

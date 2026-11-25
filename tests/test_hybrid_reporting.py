@@ -161,7 +161,10 @@ async def _ingest(fusion: FusionNode, *, start_time_ns: int, channels: np.ndarra
 
 
 @pytest.mark.asyncio
-async def test_localization_bandpass_applies_only_to_localization_branch(tmp_path: Path) -> None:
+async def test_localization_band_floor_applies_only_to_localization_branch(tmp_path: Path) -> None:
+    """The localization windows are high-passed at the band floor (300 Hz here);
+    classification audio keeps the low content. Band ceilings are per pair, in
+    the GCC-PHAT bin mask, so they never reach the window filter."""
     localizer = RecordingLocalizer(reference_sensor="hybrid-node:ch0")
     classifier = RecordingClassifier()
     fusion, storage = await _start_fusion(tmp_path, classifier=classifier, localizer=localizer)
@@ -169,7 +172,7 @@ async def test_localization_bandpass_applies_only_to_localization_branch(tmp_pat
     sample_rate_hz = 16000
     n = 1024
     t = np.arange(n, dtype=np.float32) / sample_rate_hz
-    signal = (0.1 * np.sin(2.0 * np.pi * 700.0 * t) + 0.4 * np.sin(2.0 * np.pi * 6000.0 * t)).astype(np.float32)
+    signal = (0.4 * np.sin(2.0 * np.pi * 150.0 * t) + 0.1 * np.sin(2.0 * np.pi * 700.0 * t)).astype(np.float32)
     channels = np.stack([signal, signal, signal, signal]).astype(np.float32)
     await _ingest(fusion, start_time_ns=1_739_810_600_000_000_000, channels=channels)
 
@@ -177,7 +180,7 @@ async def test_localization_bandpass_applies_only_to_localization_branch(tmp_pat
     assert localizer.recorded_frequency_hz is not None
     assert 500.0 <= localizer.recorded_frequency_hz <= 900.0
     assert classifier.recorded_frequencies_hz
-    assert all(freq >= 5000.0 for freq in classifier.recorded_frequencies_hz)
+    assert all(freq <= 450.0 for freq in classifier.recorded_frequencies_hz)
 
     await fusion.stop()
     await storage.close()

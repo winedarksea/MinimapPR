@@ -126,6 +126,21 @@ pub(crate) fn build_solve_provenance(
     }
 }
 
+/// The band of the reporting node's own pairs, else of the first pair.
+fn reporting_array_band_hz(layout: &SolveSensorLayout, pair_tdoas: &[PairTdoa]) -> Option<[f32; 2]> {
+    let on_reporter = |channel: usize| {
+        layout
+            .sensors
+            .get(channel)
+            .is_some_and(|sensor| sensor.node_id == layout.reporting_node_id)
+    };
+    pair_tdoas
+        .iter()
+        .find(|pair| on_reporter(pair.ch_a) && on_reporter(pair.ch_b))
+        .or(pair_tdoas.first())
+        .and_then(|pair| pair.band_hz)
+}
+
 /// The `localization` payload one compute payload publishes, with its provenance.
 pub(crate) fn localization_manifest_payload(
     payload: &ComputePayload,
@@ -134,6 +149,7 @@ pub(crate) fn localization_manifest_payload(
     received_level_dbfs: Option<f32>,
 ) -> LocalizationManifestPayload {
     let layout = &payload.sensor_layout;
+    let effective_band_hz = reporting_array_band_hz(layout, pair_tdoas);
     let pair_tdoas = pair_tdoas
         .iter()
         .map(|pair| PairTdoaDiagnostic {
@@ -148,6 +164,8 @@ pub(crate) fn localization_manifest_payload(
                     .pair_admission
                     .pair_timing_uncertainty_seconds(pair.ch_a, pair.ch_b) as f32,
             ),
+            band_hz: pair.band_hz,
+            window_taper_fraction: pair.window_taper_fraction,
         })
         .collect();
     let steering_magnitude = localization
@@ -171,7 +189,7 @@ pub(crate) fn localization_manifest_payload(
             .is_finite()
             .then_some(localization.residual_rms_seconds),
         sound_speed_mps: localization.sound_speed_mps,
-        effective_band_hz: Some(payload.config.localization_band_hz),
+        effective_band_hz,
         dominant_frequency_hz: localization.dominant_frequency_hz,
         received_level_dbfs,
         half_space_applied: layout.solve_half_space(payload.pair_admission.solve_sensor_indices())

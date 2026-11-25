@@ -347,6 +347,9 @@ def build_pipeline_graph(
             params=[
                 _param("Max τ", float(settings.localization_cross_node_max_tau_seconds), "localization_cross_node_max_tau_seconds", suffix=" s"),
                 _param("Max baseline", float(settings.localization_cross_node_max_baseline_m), "localization_cross_node_max_baseline_m", suffix=" m"),
+                _param("Band max (0 = Nyquist)", float(settings.localization_cross_node_band_max_hz), "localization_cross_node_band_max_hz", suffix=" Hz"),
+                _param("Window taper", float(settings.localization_cross_node_window_taper_fraction), "localization_cross_node_window_taper_fraction"),
+                _param("PHAT beta (1 = plain)", float(settings.localization_cross_node_phat_beta), "localization_cross_node_phat_beta"),
             ],
             status=_tdoa_status(metrics, fusion_available),
             link="/settings/config#localization",
@@ -368,6 +371,13 @@ def build_pipeline_graph(
         params=[
             _param("Algorithm", settings.localization_algorithm, "localization_algorithm"),
             _param("Strategy", settings.localization_strategy, "localization_strategy"),
+            _param("Band min", float(settings.localization_band_min_hz), "localization_band_min_hz", suffix=" Hz"),
+            _param(
+                "Array band max (0 = c/2d per array)",
+                float(settings.localization_band_max_hz),
+                "localization_band_max_hz",
+                suffix=" Hz",
+            ),
             _param("Min sensors 3D", settings.min_sensors_for_3d, "min_sensors_for_3d"),
             _param("Min sensors 2D", settings.min_sensors_for_2d, "min_sensors_for_2d"),
             _param("Wavelength gating", bool(settings.wavelength_gating_enabled), "wavelength_gating_enabled"),

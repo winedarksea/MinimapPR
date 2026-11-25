@@ -175,6 +175,12 @@ impl SolvePairAdmission {
         })
     }
 
+    /// Per layout sensor: its node's index (first-seen order). SRP gives
+    /// same-node pairs the array's band and cross-node pairs the wide one.
+    pub(crate) fn sensor_node_indices(&self) -> &[usize] {
+        &self.sensor_node_indices
+    }
+
     pub(crate) fn excluded_pairs(&self) -> &[ExcludedSensorPair] {
         &self.excluded_pairs
     }

@@ -10,6 +10,7 @@ pub mod butterworth_biquad;
 pub mod dsp_math;
 pub mod gcc_phat;
 // Localization overhaul R0: Rust <-> Python solve-provenance + geometry-push wire types.
+pub mod localization_band_policy;
 pub mod localization_sensor_entry;
 // Localization overhaul R5: per-frame clock evidence and timestamp-step detection.
 pub mod packet_frame_timing;

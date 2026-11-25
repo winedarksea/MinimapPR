@@ -251,13 +251,23 @@ def build_ingest_sidecar_environment(
         # stall-budget / total-cap meaning as sensor_span_coverage_wait.py.
         **sidecar_coverage_wait_environment(settings),
         **sidecar_localization_solve_environment(settings),
-        # Fallbacks track the Settings defaults: a 50 Hz high-pass capped at the
-        # array's spatial aliasing limit, not the retired 300-3500 Hz profile.
+        # Fallbacks track the Settings defaults (core/localization_band_policy.py):
+        # a 50 Hz floor, each array's own c / 2d ceiling (max 0), and a wide,
+        # tapered band for cross-node pairs.
         "MINIMAPPR_LOCALIZATION_BAND_MIN_HZ": str(
             getattr(settings, "localization_band_min_hz", 50.0)
         ),
         "MINIMAPPR_LOCALIZATION_BAND_MAX_HZ": str(
-            getattr(settings, "localization_band_max_hz", 3430.0)
+            getattr(settings, "localization_band_max_hz", 0.0)
+        ),
+        "MINIMAPPR_LOCALIZATION_CROSS_NODE_BAND_MAX_HZ": str(
+            getattr(settings, "localization_cross_node_band_max_hz", 11_000.0)
+        ),
+        "MINIMAPPR_LOCALIZATION_CROSS_NODE_WINDOW_TAPER_FRACTION": str(
+            getattr(settings, "localization_cross_node_window_taper_fraction", 0.2)
+        ),
+        "MINIMAPPR_LOCALIZATION_CROSS_NODE_PHAT_BETA": str(
+            getattr(settings, "localization_cross_node_phat_beta", 0.7)
         ),
         # Phase 2: propagate the localization range envelope so the sidecar's
         # far-field search matches the Python solver (default 1 km).
