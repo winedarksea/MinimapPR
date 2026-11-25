@@ -9,8 +9,26 @@ GC pressure during long recordings.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import numpy as np
+
+
+class CapturedFrameTiming(NamedTuple):
+    """Packet timing of one captured firmware frame.
+
+    Kept per frame because the stream itself is placed on one sample-index
+    timeline: a timestamp step or clock-class change inside an upload is only
+    visible here, and calibration replay needs it to reproduce the packets.
+    """
+
+    # First sample of the frame relative to the extracted range (bundle WAV sample 0).
+    sample_offset: int
+    sample_count: int
+    start_time_ns: int
+    # TimeQuality value as reported with the frame; None when the source did not say.
+    time_quality: str | None
+    sequence: int | None
 
 
 @dataclass(slots=True)
@@ -24,6 +42,10 @@ class _CapturedSensorStream:
     _write_local_end: int = field(init=False, default=0)
     _samples: np.ndarray = field(init=False, default_factory=lambda: np.zeros(0, dtype=np.float32))
     _coverage: np.ndarray = field(init=False, default_factory=lambda: np.zeros(0, dtype=np.bool_))
+    # (global start sample index, sample count, start_time_ns, time_quality, sequence)
+    # for every frame written; bounded like the samples (frames past the
+    # buffer end are not recorded, a timeline reset clears it).
+    _frame_timings: list[tuple[int, int, int, str | None, int | None]] = field(init=False, default_factory=list)
 
     def __post_init__(self) -> None:
         self._max_samples = max(1, int(round(self.max_duration_seconds * self.sample_rate_hz)))
@@ -37,6 +59,8 @@ class _CapturedSensorStream:
         *,
         start_sample_index: int | None = None,
         end_sample_index: int | None = None,
+        time_quality: str | None = None,
+        sequence: int | None = None,
     ) -> None:
         samples = np.asarray(samples, dtype=np.float32)
         if samples.ndim != 1:
@@ -68,6 +92,7 @@ class _CapturedSensorStream:
                 self._coverage[:] = False
                 self._buffer_start_sample_index = None
                 self._write_local_end = 0
+                self._frame_timings.clear()
             incoming_start_sample_index = start_sample_index
         else:
             incoming_start_sample_index = self._time_to_sample_index(start_time_ns)
@@ -89,6 +114,9 @@ class _CapturedSensorStream:
             src_end = write_end - buf_offset
             self._samples[write_start:write_end] = samples[src_start:src_end]
             self._coverage[write_start:write_end] = True
+            self._frame_timings.append(
+                (incoming_start_sample_index, int(samples.size), int(start_time_ns), time_quality, sequence)
+            )
         if write_end > self._write_local_end:
             self._write_local_end = write_end
 
@@ -135,6 +163,24 @@ class _CapturedSensorStream:
 
         return out, coverage
 
+    def frame_timings_in_range(self, start_ns: int, end_ns: int) -> list[CapturedFrameTiming]:
+        """Frames overlapping ``render_range(start_ns, end_ns)``, offsets relative to its first sample."""
+        if self._timeline_origin_ns is None:
+            return []
+        range_start_index = self._time_to_sample_index(start_ns)
+        range_end_index = self._time_to_sample_index(end_ns)
+        return [
+            CapturedFrameTiming(
+                sample_offset=frame_start_index - range_start_index,
+                sample_count=sample_count,
+                start_time_ns=start_time_ns,
+                time_quality=time_quality,
+                sequence=sequence,
+            )
+            for frame_start_index, sample_count, start_time_ns, time_quality, sequence in sorted(self._frame_timings)
+            if frame_start_index < range_end_index and frame_start_index + sample_count > range_start_index
+        ]
+
     def _time_to_sample_index(self, time_ns: int) -> int:
         if self._timeline_origin_ns is None:
             raise ValueError("CapturedSensorStream timeline origin is not initialized")
@@ -180,6 +226,8 @@ class ChunkedCaptureSessionBuffer:
         samples: np.ndarray,
         start_sample_index: int | None = None,
         end_sample_index: int | None = None,
+        time_quality: str | None = None,
+        sequence: int | None = None,
     ) -> None:
         if sensor_id not in self._sensor_id_set:
             return
@@ -200,7 +248,16 @@ class ChunkedCaptureSessionBuffer:
             samples=samples,
             start_sample_index=start_sample_index,
             end_sample_index=end_sample_index,
+            time_quality=time_quality,
+            sequence=sequence,
         )
+
+    def frame_timings_in_range(self, sensor_id: str, start_ns: int, end_ns: int) -> list[CapturedFrameTiming]:
+        """Per-frame packet timing of one sensor over the range ``extract_range`` renders."""
+        stream = self._streams.get(sensor_id)
+        if stream is None:
+            return []
+        return stream.frame_timings_in_range(start_ns, end_ns)
 
     def extract_range(
         self,

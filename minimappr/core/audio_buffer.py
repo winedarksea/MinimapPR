@@ -744,7 +744,12 @@ class MultiSensorBuffer:
         start_sample_index: int | None = None,
         end_sample_index: int | None = None,
         end_time_ns: int | None = None,
+        time_quality: str | None = None,
+        sequence: int | None = None,
     ) -> None:
+        # ``time_quality`` / ``sequence`` only reach capture sessions (per-frame
+        # timing for calibration bundles); the live buffer does not use them.
+        #
         # Per-sensor concurrency: same-sensor appends serialize, but appends
         # for *different* sensors run in parallel. This is required for the
         # plan's primary goal ("many nodes streaming concurrently") — without
@@ -825,6 +830,8 @@ class MultiSensorBuffer:
                 samples=samples,
                 start_sample_index=start_sample_index,
                 end_sample_index=end_sample_index,
+                time_quality=time_quality,
+                sequence=sequence,
             )
 
     async def get_synchronized_window(
