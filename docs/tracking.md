@@ -205,6 +205,20 @@ one per render interval is ever covered by a render. Holding them would only del
 deadline, and the gates that run again at attach still catch a covering render's contradicting
 label.
 
+**Limit on the production Rust path.** The rule protects perched tracks fully only on the
+Python-ingest path and for Rust classifier renders. An event-only Rust solve is applied at once,
+and it usually reaches the tracker before the render that covers it
+(`LocalizedRenderHandoff.observe_event_solve`). The render then repeats the solve id and only
+attaches its label. So with the Rust sidecar, an overlapping neighbour's poorly conditioned fix
+still lands on the perched filter immediately, as it did before milestone 3. Holding event solves
+while a covering render is still possible is an open TODO item.
+
+**What the rule costs.** A held fix whose classification abstains is dropped, not applied.
+Abstentions include faint long-range calls that the classifier cannot name (label `unknown` or
+confidence 0) and point-network clips judged `SPECIES_UNCERTAIN` (P7, two plausible callers).
+So near a labelled perched track, those calls never move any track, even when they really came
+from the perched bird.
+
 This keeps the reason for point 4: no capacity or dedupe drop starves the tracker, and only the
 classifier's own verdict can stop a fix reaching a perched bird. It is the same kind of
 exception as the ambiguity rule above.

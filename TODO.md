@@ -295,6 +295,7 @@ Contract: `docs/localization_solve_contract.md`; tracking: `docs/tracking.md`; c
   - an unmeasured mount still looks recorded;
   - there is no `cluster_id`;
   - the 120 s session cap.
+- [ ] **Hold event-only Rust solves while a covering render is possible** — the hold rule (`docs/tracking.md`) never holds event-only Rust solves, and they usually arrive before their covering render, so on the production Rust path an overlapping neighbour's fix still lands on a perched filter at once. Hold such a solve (bounded by the classifier render interval) when its one gating track is a labelled `stationary_hold` track and a render covering its span can still arrive.
 - [ ] **E10 blind spots** — detection count and classification metrics are info-only, so a Python render-handoff regression would not fail the gate.
 - [ ] **File size** — `fusion_node.py` is about 3,580 lines and `dsp_worker.rs` over 600.
 - [ ] **Bluefin deploy and live check** — needs approval.
