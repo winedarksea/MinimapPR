@@ -254,7 +254,7 @@ Items worth tracking but not yet assigned to a phase. May be incorporated as pri
 
 ### Localization core overhaul — open after 2026-11-25
 
-Branch `localization-core-overhaul`, not merged to main and not deployed. All five milestones are done:
+Merged to main 2026-11-25 (not deployed). All five milestones are done, plus the follow-ups decided at review: clock step/drift re-anchoring, the per-geometry GCC-PHAT band split, the geometry-derived (kilometre-range) event span, and the hold-rule review fixes. The milestones:
 - mixed-node solve to stored detection;
 - shared site geometry;
 - per-node clock evidence and pair admission;
@@ -312,6 +312,7 @@ Contract: `docs/localization_solve_contract.md`; tracking: `docs/tracking.md`; c
   - there is no `cluster_id`;
   - the 120 s session cap.
 - [ ] **Hold event-only Rust solves while a covering render is possible** — the hold rule (`docs/tracking.md`) never holds event-only Rust solves, and they usually arrive before their covering render, so on the production Rust path an overlapping neighbour's fix still lands on a perched filter at once. Hold such a solve (bounded by the classifier render interval) when its one gating track is a labelled `stationary_hold` track and a render covering its span can still arrive.
+- [ ] **Watch: E10 classification backlog drops and solve latency after the review follow-ups** — interleaved E10 on 2026-11-25 (machine load ~15) passed 6 of 6 rounds against main and the pre-review head f37c543. Detection counts match f37c543 (12 vs 12 over 3 rounds) and solve counts fall 44 → 42 (the geometry-aware same-event cooldown). But `classification_backlog_drop_count` was non-zero in 3 of 6 candidate runs (up to 6) against 0 in all baseline runs, and solve p50 sat 10–20 % above f37c543 (still below main). Suspects: the report-window cap no longer applying to point-network renders on the worker, and the wider cross-node band and taper. Re-measure on a quiet machine before the Bluefin deploy.
 - [ ] **E10 blind spots** — detection count and classification metrics are info-only, so a Python render-handoff regression would not fail the gate.
 - [ ] **File size** — `fusion_node.py` is about 3,580 lines and `dsp_worker.rs` over 600.
 - [ ] **Bluefin deploy and live check** — needs approval.
