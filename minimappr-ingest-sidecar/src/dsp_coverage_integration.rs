@@ -10,6 +10,7 @@ impl DspWorker {
         &mut self,
         buffer_key: &str,
         localization_center_time_ns: i128,
+        localization_window_seconds: f64,
         on_localization_cadence: bool,
         buffer_channel_count: usize,
     ) -> Option<LocalizationWindowSpan> {
@@ -22,7 +23,7 @@ impl DspWorker {
         let buffers = self.buffers.get(buffer_key)?;
         let span = LocalizationWindowSpan {
             center_time_ns: localization_center_time_ns,
-            window_seconds: self.config.window_seconds,
+            window_seconds: localization_window_seconds,
             min_coverage_ratio: self.config.min_coverage_ratio,
         };
         // Cluster buffers always park until the batch boundary: mid-batch a

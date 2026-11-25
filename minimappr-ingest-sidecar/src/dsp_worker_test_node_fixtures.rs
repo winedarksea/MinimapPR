@@ -225,7 +225,7 @@ impl CoherentPointSource {
             / f64::from(FIXTURE_SAMPLE_RATE_HZ)
     }
 
-    fn frame_channels(&self, node: &FixtureNode, frame_index: usize) -> Vec<Vec<f32>> {
+    pub(super) fn frame_channels(&self, node: &FixtureNode, frame_index: usize) -> Vec<Vec<f32>> {
         node.sensor_world_positions_m()
             .into_iter()
             .map(|(_, position_m)| {
@@ -293,6 +293,25 @@ pub(super) async fn fixture_silent_frame_manifest_at_rate(
         sample_rate_hz,
         vec![vec![0.0; samples_per_frame]; node.channel_count()],
         &FixtureClusterGeometry::AutomaticGps,
+    )
+    .await
+}
+
+/// `fixture_frame_manifest` with caller-built channels (one per sensor).
+pub(super) async fn fixture_frame_manifest_from_channels(
+    storage_root: &std::path::Path,
+    node: &FixtureNode,
+    frame_index: usize,
+    channels: &[Vec<f32>],
+    geometry: &FixtureClusterGeometry,
+) -> DspManifest {
+    fixture_manifest_with_channels(
+        storage_root,
+        node,
+        frame_index,
+        FIXTURE_SAMPLE_RATE_HZ,
+        channels.to_vec(),
+        geometry,
     )
     .await
 }

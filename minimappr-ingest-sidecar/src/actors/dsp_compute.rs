@@ -8,7 +8,8 @@ use crate::{
     },
     dsp_worker::{
         consume_manifest_standalone, dispatch_classification_result_standalone,
-        render_coverage_json, source_manifest_was_persisted, ComputePayload, PairTdoa,
+        render_coverage_json, solver_reference_channel_floor, source_manifest_was_persisted,
+        ComputePayload, PairTdoa,
     },
     localization_solve_provenance::{localization_manifest_payload, localization_result_manifest},
     srp_phat::{
@@ -86,6 +87,16 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
             half_space: payload
                 .sensor_layout
                 .solve_half_space(&payload.active_channels),
+            reference_channel_floor: solver_reference_channel_floor(
+                &payload.sensor_layout,
+                &payload.active_channels,
+                &payload.channel_states,
+                &payload.node_noise_floor_rms,
+                payload
+                    .config
+                    .localization_solve
+                    .localization_solver_floor_relative_db,
+            ),
             ..SrpPhatConfig::default()
         };
         let admits_pair = |ch_a: usize, ch_b: usize| payload.pair_admission.admits_pair(ch_a, ch_b);

@@ -34,6 +34,8 @@ struct RecentEventTriggerSolve {
     solve_id: String,
     attempt_kind: SolveAttemptKind,
     window_center_time_ns: i128,
+    window_seconds: f64,
+    node_noise_floor_rms: Arc<std::collections::BTreeMap<String, f32>>,
     channel_states: Vec<LocalizationChannelState>,
     active_channels: Vec<usize>,
     sensor_layout: Arc<SolveSensorLayout>,
@@ -47,6 +49,7 @@ struct RecentEventTriggerSolve {
 /// One entry per buffer key, dropped with the buffer.
 #[derive(Default)]
 pub(crate) struct RecentEventTriggerSolves {
+    /// Keyed by dispatch gate (`dsp_dispatch_gate_key`).
     by_buffer_key: HashMap<String, RecentEventTriggerSolve>,
     /// Renders covering a parked event solve, in dispatch order. Bounded by
     /// the coverage wait's total cap: the parked event is always released.
@@ -85,11 +88,18 @@ fn render_covers_window(payload: &ComputePayload, window_center_time_ns: i128) -
     covering_render_span_ns(payload).is_some_and(|span| span.contains(&window_center_time_ns))
 }
 
+/// Per dispatch gate, so each rate group of a mixed-rate cluster keeps its own event.
+fn remembered_solve_key(payload: &ComputePayload) -> String {
+    payload.sensor_layout.dispatch_gate_key(&payload.stream_key)
+}
+
 fn remembered_solve_of(payload: &ComputePayload) -> RecentEventTriggerSolve {
     RecentEventTriggerSolve {
         solve_id: payload.solve_id.clone(),
         attempt_kind: payload.attempt_kind,
         window_center_time_ns: payload.localization_window_center_time_ns,
+        window_seconds: payload.localization_window_seconds,
+        node_noise_floor_rms: payload.node_noise_floor_rms.clone(),
         channel_states: payload.channel_states.clone(),
         active_channels: payload.active_channels.clone(),
         sensor_layout: payload.sensor_layout.clone(),
@@ -111,13 +121,13 @@ impl RecentEventTriggerSolves {
     ) {
         if payload.run_srp && is_event_trigger(payload.attempt_kind) {
             self.by_buffer_key
-                .insert(payload.stream_key.clone(), remembered_solve_of(payload));
+                .insert(remembered_solve_key(payload), remembered_solve_of(payload));
             return;
         }
         let Some(render_span_ns) = covering_render_span_ns(payload) else {
             return;
         };
-        let Some(event) = self.by_buffer_key.get(&payload.stream_key) else {
+        let Some(event) = self.by_buffer_key.get(&remembered_solve_key(payload)) else {
             return;
         };
         let Some(buffers) = buffers else {
@@ -137,7 +147,7 @@ impl RecentEventTriggerSolves {
         let mut channel_states = localization_channel_states_centered(
             layout_buffers,
             event.window_center_time_ns,
-            payload.config.window_seconds,
+            event.window_seconds,
         );
         payload
             .sensor_layout
@@ -151,6 +161,8 @@ impl RecentEventTriggerSolves {
                 .all(|channel| active_channels.contains(channel));
         payload.attempt_kind = event.attempt_kind;
         payload.localization_window_center_time_ns = event.window_center_time_ns;
+        payload.localization_window_seconds = event.window_seconds;
+        payload.node_noise_floor_rms = event.node_noise_floor_rms.clone();
         payload.run_srp = true;
         if late_member_now_covers {
             // The render's own fresh solve_id and current layout stand.
@@ -164,7 +176,7 @@ impl RecentEventTriggerSolves {
                 &payload.config.localization_solve,
             );
             self.by_buffer_key
-                .insert(payload.stream_key.clone(), remembered_solve_of(payload));
+                .insert(remembered_solve_key(payload), remembered_solve_of(payload));
             return;
         }
         payload.solve_id = event.solve_id.clone();
@@ -179,7 +191,8 @@ impl RecentEventTriggerSolves {
     /// Held renders are kept: the batch boundary releases them once their
     /// parked event is gone, so a source manifest is never dropped unconsumed.
     pub(crate) fn forget(&mut self, buffer_key: &str) {
-        self.by_buffer_key.remove(buffer_key);
+        self.by_buffer_key
+            .retain(|key, _| buffer_key_of_dispatch_gate_key(key) != buffer_key);
     }
 
     fn hold_render(&mut self, payload: ComputePayload) {

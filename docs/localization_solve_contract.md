@@ -60,7 +60,7 @@ value can be JSON `null`.
 | `excluded_pairs` | array | `{sensor_index_a, sensor_index_b, reason}` for each pair left out (section 6). |
 | `node_timing` | array | Clock evidence per contributing node (section 7). |
 | `window_center_time_ns` | integer | Packet-derived centre of the solve window, ns since the Unix epoch. This is the stored observation time; never substitute receipt time. |
-| `window_seconds` | number | Solve window length. |
+| `window_seconds` | number | Solve window length, centred on `window_center_time_ns`: the node-local window, or for an event solve across nodes more than ~half a node-local window of lag apart, the cross-node event span (twice the max cross-node lag, capped by the coverage-wait cap and buffer length; milestone 2 / R4). |
 | `solve_sample_rate_hz` | integer | Rate of the solve buffer. |
 
 ### Index rule
@@ -76,8 +76,8 @@ node and never an index into Python's registry. Map through `sensors[i].sensor_i
 
 | Value | Meaning |
 |---|---|
-| `event_trigger_absolute_rms` | Event trigger: the absolute RMS gate (today's only live trigger). |
-| `event_trigger_noise_floor_relative` | Event trigger: noise-floor-relative gate (milestone 2 / R4). |
+| `event_trigger_absolute_rms` | Event trigger: the absolute RMS gate (wins when both gates fire). |
+| `event_trigger_noise_floor_relative` | Event trigger: the node's frame stood `localization_trigger_noise_floor_relative_db` over its tracked noise floor while the absolute gate did not fire (milestone 2 / R4). |
 | `scheduled_classifier_render` | Solved only because a classifier render was due on that frame. |
 | `not_attempted` | No solve (omni fallback, heartbeat, too few channels). |
 

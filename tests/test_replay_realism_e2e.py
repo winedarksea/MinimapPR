@@ -24,7 +24,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 from tests.replay_realism_bundles import (
     BUNDLE_CAPTURE_START_NS,
@@ -69,8 +68,8 @@ LOCALIZED_MODALITY = "localized"
 
 
 class TimestampStepContractViolation(AssertionError):
-    """Raised only by the timestamp-step contract check, so the strict xfail
-    cannot pass on a harness failure (rejected upload, app start-up)."""
+    """Raised only by the timestamp-step contract check, so a contract failure
+    reads apart from a harness failure (rejected upload, app start-up)."""
 
 
 # --- Scenario 1: control ---
@@ -193,11 +192,6 @@ def timestamp_step_contract_violations(result: ReplayRunResult, step: PacketTime
     return violations
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=TimestampStepContractViolation,
-    reason="localization overhaul milestone 2: needs R5/R7",
-)
 def test_timestamp_step_inside_one_upload_gates_the_stepped_nodes_cross_node_pairs(monkeypatch, tmp_path: Path) -> None:
     step = PacketTimestampStep(node_id=TETRA_NODE_ID, first_stepped_frame_index=STEPPED_FRAME_INDEX, step_ns=TIMESTAMP_STEP_NS)
     assert STEPPED_FRAME_INDEX % FRAMES_PER_UPLOAD != 0, "the step must fall inside an upload, not on its first frame"

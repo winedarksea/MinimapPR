@@ -29,7 +29,10 @@ const CLUSTER_CHANNEL_COUNT: usize = 2 * TETRA_CHANNEL_COUNT;
 const FRAME_SAMPLES: u64 = 512;
 pub(super) const FRAME_DURATION_NS: u64 = 32_000_000;
 const STREAM_START_NS: u64 = 1_000_000_000;
-const NODE_SEPARATION_M: f32 = 20.0;
+/// Inside half a node-local window of lag (~5.5 m), so the event span is the
+/// node-local window and these tests isolate the wait mechanics; the
+/// long-baseline span is `dsp_worker_localization_trigger_tests`.
+const NODE_SEPARATION_M: f32 = 5.0;
 const NODE_HEIGHT_M: f32 = 1.5;
 const EVENT_CHANNEL_CAPACITY: usize = 4096;
 /// Frames spanning two trigger cooldowns (0.8 s default) after the first.

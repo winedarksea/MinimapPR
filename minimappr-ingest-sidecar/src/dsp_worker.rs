@@ -58,8 +58,12 @@ mod dsp_compute_payload;
 mod dsp_coverage_integration;
 #[path = "dsp_covered_event_solve.rs"]
 mod dsp_covered_event_solve;
+#[path = "dsp_dispatch_gate_key.rs"]
+mod dsp_dispatch_gate_key;
 #[path = "dsp_dispatch_gates.rs"]
 mod dsp_dispatch_gates;
+#[path = "dsp_localization_trigger.rs"]
+mod dsp_localization_trigger;
 #[path = "dsp_manifest_buffering.rs"]
 mod dsp_manifest_buffering;
 #[path = "dsp_manifest_publish.rs"]
@@ -76,10 +80,17 @@ mod dsp_preprocess;
 mod dsp_solve_pair_admission;
 #[path = "dsp_solve_sensor_layout.rs"]
 mod dsp_solve_sensor_layout;
+#[path = "dsp_solver_reference_floor.rs"]
+mod dsp_solver_reference_floor;
 #[path = "dsp_window_geometry.rs"]
 mod dsp_window_geometry;
 #[path = "explicit_cluster_sensor_list.rs"]
 mod explicit_cluster_sensor_list;
+#[path = "localization_event_span.rs"]
+mod localization_event_span;
+#[cfg(test)]
+#[path = "solve_layout_test_fixture.rs"]
+mod solve_layout_test_fixture;
 
 use self::dsp_array_geometry::*;
 pub(crate) use self::dsp_automatic_cluster_placement::*;
@@ -88,6 +99,9 @@ pub(crate) use self::dsp_buffer_sensor_set::*;
 pub(crate) use self::dsp_cluster_sensor_registry::*;
 pub(crate) use self::dsp_compute_payload::*;
 use self::dsp_covered_event_solve::*;
+use self::dsp_dispatch_gate_key::*;
+use self::dsp_localization_trigger::*;
+use self::localization_event_span::*;
 use self::dsp_manifest_buffering::*;
 pub(crate) use self::dsp_manifest_publish::*;
 pub(crate) use self::dsp_node_array_geometry_gate::*;
@@ -96,6 +110,7 @@ pub(crate) use self::dsp_node_clock_quality::*;
 pub(crate) use self::dsp_preprocess::*;
 pub(crate) use self::dsp_solve_pair_admission::*;
 pub(crate) use self::dsp_solve_sensor_layout::*;
+pub(crate) use self::dsp_solver_reference_floor::*;
 pub(crate) use self::dsp_window_geometry::*;
 pub(crate) use self::explicit_cluster_sensor_list::*;
 
@@ -166,7 +181,9 @@ pub struct DspWorker {
     node_audio_state: HashMap<String, NodeAudioState>,
     last_classifier_render_ns_by_stream: HashMap<String, u128>,
     last_localization_ns_by_stream: HashMap<String, u128>,
-    last_trigger_ns_by_stream: HashMap<String, u128>,
+    /// Absolute-RMS OR noise-floor-relative trigger, node floors and the
+    /// per-buffer cooldown.
+    localization_trigger: LocalizationEventTrigger,
     /// Time-only cadence gate used for node liveness heartbeats.
     /// Unlike `last_localization_ns_by_stream`, this is never blocked by the RMS
     /// energy gate or trigger cooldown — it fires unconditionally every
@@ -212,6 +229,7 @@ impl DspWorker {
                 config.localization_coverage_total_cap_seconds,
             ));
         let sensor_registry = ClusterSensorRegistry::new(&config.localization_solve);
+        let localization_trigger = LocalizationEventTrigger::new(&config);
         let node_clock_quality = NodeClockQualityTracker::new(&config.localization_solve);
         Self {
             manifest_store,
@@ -229,7 +247,7 @@ impl DspWorker {
             node_audio_state: HashMap::new(),
             last_classifier_render_ns_by_stream: HashMap::new(),
             last_localization_ns_by_stream: HashMap::new(),
-            last_trigger_ns_by_stream: HashMap::new(),
+            localization_trigger,
             last_heartbeat_ns_by_stream: HashMap::new(),
             consumed_manifests_since_prune: Arc::new(AtomicU64::new(0)),
             last_consumed_prune_ns: system_now_ns(),
@@ -526,15 +544,30 @@ impl DspWorker {
             return;
         }
         for key in &stale {
+            self.last_classifier_render_ns_by_stream.remove(key);
+            self.last_localization_ns_by_stream.remove(key);
+            self.localization_trigger.forget_stream(key);
+            self.last_heartbeat_ns_by_stream.remove(key);
+        }
+        // Gates are per buffer and solve rate; a buffer goes only once no rate
+        // group still heartbeats on it.
+        let stale_buffer_keys: HashSet<String> = stale
+            .iter()
+            .map(|key| buffer_key_of_dispatch_gate_key(key).to_string())
+            .collect();
+        for key in &stale_buffer_keys {
+            if self
+                .last_heartbeat_ns_by_stream
+                .keys()
+                .any(|gate_key| buffer_key_of_dispatch_gate_key(gate_key) == key)
+            {
+                continue;
+            }
             self.buffers.remove(key);
             self.buffer_channel_sensor_ids.remove(key);
             self.sensor_registry.forget_buffer(key);
             self.deferred_localizations.forget(key);
             self.recent_event_trigger_solves.forget(key);
-            self.last_classifier_render_ns_by_stream.remove(key);
-            self.last_localization_ns_by_stream.remove(key);
-            self.last_trigger_ns_by_stream.remove(key);
-            self.last_heartbeat_ns_by_stream.remove(key);
             // node_audio_state is keyed by node_id (prefix before "__"), not stream_key.
             // Only remove if no remaining stream for that node still active.
             let node_id = key.split("__").next().unwrap_or(key.as_str());
@@ -637,3 +670,7 @@ mod dsp_worker_covered_render_solve_tests;
 #[cfg(test)]
 #[path = "dsp_worker_sample_rate_guard_tests.rs"]
 mod dsp_worker_sample_rate_guard_tests;
+
+#[cfg(test)]
+#[path = "dsp_worker_localization_trigger_tests.rs"]
+mod dsp_worker_localization_trigger_tests;
