@@ -404,11 +404,12 @@ def build_pipeline_graph(
                 suffix=" s",
             ),
             _param(
-                "Coverage wait cap",
+                "Coverage wait cap (0 = from geometry)",
                 float(settings.localization_coverage_total_cap_seconds),
                 "localization_coverage_total_cap_seconds",
                 suffix=" s",
             ),
+            *_settings_params(settings, _EVENT_SPAN_GEOMETRY_PARAM_SPECS),
             *_settings_params(settings, _LOCALIZATION_OVERHAUL_SOLVE_PARAM_SPECS),
         ],
         status=_solve_status(metrics, fusion_available),
@@ -678,6 +679,15 @@ def build_pipeline_graph(
         nodes=graph_nodes,
         edges=graph_edges,
     )
+
+
+# --- geometry-derived event span --- (label, settings key, display suffix)
+_EVENT_SPAN_GEOMETRY_PARAM_SPECS: tuple[tuple[str, str, str], ...] = (
+    ("Coverage delivery margin", "localization_coverage_delivery_margin_seconds", " s"),
+    ("Same-event clock margin", "localization_event_span_clock_margin_sigma", " sigma"),
+    ("Max cross-node lag", "localization_event_span_max_cross_node_lag_seconds", " s"),
+    ("Max parked solves per buffer", "localization_coverage_max_pending_per_buffer", ""),
+)
 
 
 # --- localization overhaul --- (label, settings key, display suffix)

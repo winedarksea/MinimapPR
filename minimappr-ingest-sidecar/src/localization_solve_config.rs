@@ -56,6 +56,16 @@ pub struct LocalizationSolveConfig {
     /// is not then rejected by the solver.
     pub localization_solver_floor_relative_db: f32,
     pub localization_sensor_registry_stale_seconds: f64,
+    /// Geometry-derived event span (`minimappr_core::localization_event_timing`):
+    /// the coverage wait holds for the cross-node lag plus this delivery skew.
+    pub localization_coverage_delivery_margin_seconds: f64,
+    /// The span grows by this many sigma of the worst cross-node pair's clock uncertainty.
+    pub localization_event_span_clock_margin_sigma: f64,
+    /// Memory/latency safety bound on the derived cross-node lag.
+    pub localization_event_span_max_cross_node_lag_seconds: f64,
+    /// Event solves parked at once per cluster buffer; the oldest is
+    /// dispatched (superseded) when one more arrives.
+    pub localization_coverage_max_pending_per_buffer: usize,
     /// `MINIMAPPR_SITE_GEOMETRY_JSON`: same body as `POST /api/v1/dsp/geometry`.
     pub site_geometry_at_launch: Option<SiteGeometryPush>,
 }
@@ -83,6 +93,10 @@ impl Default for LocalizationSolveConfig {
             localization_trigger_noise_floor_relative_db: 8.0,
             localization_solver_floor_relative_db: 3.0,
             localization_sensor_registry_stale_seconds: 120.0,
+            localization_coverage_delivery_margin_seconds: 1.0,
+            localization_event_span_clock_margin_sigma: 3.0,
+            localization_event_span_max_cross_node_lag_seconds: 10.0,
+            localization_coverage_max_pending_per_buffer: 8,
             site_geometry_at_launch: None,
         }
     }
@@ -213,6 +227,34 @@ pub struct LocalizationSolveArgs {
     )]
     localization_sensor_registry_stale_seconds: f64,
 
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_COVERAGE_DELIVERY_MARGIN_SECONDS",
+        default_value_t = 1.0
+    )]
+    localization_coverage_delivery_margin_seconds: f64,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_EVENT_SPAN_CLOCK_MARGIN_SIGMA",
+        default_value_t = 3.0
+    )]
+    localization_event_span_clock_margin_sigma: f64,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_EVENT_SPAN_MAX_CROSS_NODE_LAG_SECONDS",
+        default_value_t = 10.0
+    )]
+    localization_event_span_max_cross_node_lag_seconds: f64,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_COVERAGE_MAX_PENDING_PER_BUFFER",
+        default_value_t = 8
+    )]
+    localization_coverage_max_pending_per_buffer: usize,
+
     #[arg(long, env = "MINIMAPPR_SITE_GEOMETRY_JSON", value_parser = parse_site_geometry_json)]
     site_geometry_json: Option<SiteGeometryPush>,
 }
@@ -251,6 +293,15 @@ impl LocalizationSolveArgs {
             localization_solver_floor_relative_db: self.localization_solver_floor_relative_db,
             localization_sensor_registry_stale_seconds: self
                 .localization_sensor_registry_stale_seconds,
+            localization_coverage_delivery_margin_seconds: self
+                .localization_coverage_delivery_margin_seconds,
+            localization_event_span_clock_margin_sigma: self
+                .localization_event_span_clock_margin_sigma,
+            localization_event_span_max_cross_node_lag_seconds: self
+                .localization_event_span_max_cross_node_lag_seconds,
+            localization_coverage_max_pending_per_buffer: self
+                .localization_coverage_max_pending_per_buffer
+                .max(1),
             site_geometry_at_launch: self.site_geometry_json,
         }
     }

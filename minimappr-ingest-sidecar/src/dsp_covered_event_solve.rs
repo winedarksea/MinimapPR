@@ -267,8 +267,9 @@ impl DspWorker {
 
     fn parked_event_covered_by(&self, payload: &ComputePayload) -> bool {
         self.deferred_localizations
-            .pending_window_center_time_ns(&payload.stream_key)
-            .is_some_and(|center_time_ns| render_covers_window(payload, center_time_ns))
+            .pending_window_center_times_ns(&payload.stream_key)
+            .into_iter()
+            .any(|center_time_ns| render_covers_window(payload, center_time_ns))
     }
 
     fn release_held_renders_no_longer_waiting(&mut self, buffer_key: &str) -> Vec<ComputePayload> {

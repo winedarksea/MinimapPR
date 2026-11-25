@@ -183,6 +183,8 @@ def python_cartesian_estimate_from_rust_tdoas(
         interpolation_factor=host.settings.gcc_phat_interp_factor,
         far_field_default_range_m=far_field_range_m,
         far_field_prior_radial_std_m=far_field_prior_radial_std_m,
+        # The radial search stops at the envelope instead of diverging to 10^9 m.
+        far_field_max_range_m=host.settings.localization_far_field_max_range_m,
         bearing_strength=cfg.localization_node_bearing_strength,
         bearing_observed_obs_floor=getattr(cfg, "localization_obs_factor_bearing_floor", None),
         node_position_uncertainty=node_position_uncertainty,
@@ -308,6 +310,7 @@ def gate_handoff_localization(
         position_m=estimate.position_m,
         contributing_centroid_m=contributing_centroid_m,
         capability_tier=capability_tier,
+        range_projection_mode=estimate.range_projection_mode,
     )
     return HandoffGatingOutcome(
         reporting_modality=reporting_modality,

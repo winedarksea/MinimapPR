@@ -217,6 +217,8 @@ class LocalizationEngine:
     node_bearing_strength: float = 1.0
     amplitude_ratio_strength: float = 0.15
     far_field_default_range_m: float = 50.0
+    # Bounds the radial range search (radial_range_refinement.py); None = unbounded.
+    far_field_max_range_m: float | None = None
     # Phase 5: cross-node TDOA. When set, cross-node pairs correlate over the wider
     # tau ceiling. None → tier-c disabled.
     cross_node_max_tau_s: float | None = None
@@ -341,6 +343,7 @@ class LocalizationEngine:
                 bearing_constraints=bearing_constraints,
                 amplitude_constraints=amplitude_constraints,
                 far_field_initial_range_m=self.far_field_default_range_m,
+                far_field_max_range_m=self.far_field_max_range_m,
                 radial_refinement_enabled=True,
                 bearing_observed_obs_floor=self.bearing_observed_obs_floor,
                 node_position_uncertainty=_node_position_uncertainty(
@@ -438,7 +441,11 @@ class LocalizationEngine:
             )
             effective_max_tau_s = self.max_tau_s
             if is_cross_node and self.cross_node_max_tau_s is not None:
-                effective_max_tau_s = max(self.max_tau_s, float(self.cross_node_max_tau_s))
+                # Up to the pair's own baseline / c (mirrors measure_pair_tdoas).
+                pair_physical_max_tau_s = float(np.linalg.norm(np.asarray(sensor_positions[sensor_id], dtype=np.float64) - np.asarray(ref_pos, dtype=np.float64))) / speed_of_sound_mps(
+                    temperature_c, humidity_fraction
+                ) + 1.0 / sample_rate_hz
+                effective_max_tau_s = max(self.max_tau_s, float(self.cross_node_max_tau_s), pair_physical_max_tau_s)
             front_end = pair_front_ends.pair_front_end(sensor_id, reference_sensor) if pair_front_ends else None
             taper_fraction = front_end.taper_fraction if front_end is not None else None
             tau_s, peak = gcc_phat(

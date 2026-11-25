@@ -285,18 +285,19 @@ class LocalizationConfig:
     localization_cross_node_admission_enabled: bool = False
     localization_cross_node_relative_energy_floor: float = 0.25
     localization_cross_node_max_extra_sensors: int = 4
-    # The default seeds unbounded radial search; max is retained but never limits results.
+    # Seeds the radial range search (and is the unobservable-range placeholder).
     localization_far_field_default_range_m: float = 50.0
-    # Phase 2: envelope extended to 1 km for long-range cross-node localization.
-    localization_far_field_max_range_m: float = 1000.0
+    # Range envelope (core/localization_overhaul_config.py): far-field search and the
+    # radial range refinement stop here; unresolved there = range_asymptotic.
+    localization_far_field_max_range_m: float = overhaul_defaults.DEFAULT_LOCALIZATION_FAR_FIELD_MAX_RANGE_M
     # Hard sanity gate (m): localizations whose solved position lies farther than this
     # from the contributing-sensor centroid are dropped before becoming detections/
     # tracks. Guards against unphysical solver blowups (ill-conditioned geometry).
-    localization_max_range_m: float = 1200.0
+    localization_max_range_m: float = overhaul_defaults.DEFAULT_LOCALIZATION_MAX_RANGE_M
     # Absolute ceiling (m) on per-axis position standard deviation. Under the
     # range-proportional caps (Phase 1b) the effective ceiling scales with range up to
-    # this hard cap, so tracks never carry σ beyond a physical 1 km bound.
-    localization_max_position_std_m: float = 1000.0
+    # this hard cap; an unobservable range uses the envelope as its range term.
+    localization_max_position_std_m: float = overhaul_defaults.DEFAULT_LOCALIZATION_MAX_POSITION_STD_M
     # Quality gate: a solve below this confidence is not reportable as a *localized*
     # detection and is demoted to omni evidence at its node. Set to 0 to disable.
     #
@@ -381,7 +382,10 @@ class LocalizationConfig:
     # A sensor whose buffer has not advanced for this long is released.
     localization_coverage_stall_budget_seconds: float = 0.5
     # Hard cap on the whole coverage wait (dead/lagging nodes cannot stall past it).
-    localization_coverage_total_cap_seconds: float = 1.0
+    # 0 = derive it from the site's node geometry (largest cross-node lag plus
+    # localization_coverage_delivery_margin_seconds, core/localization_event_timing.py);
+    # > 0 = explicit override, which also bounds the cross-node event span.
+    localization_coverage_total_cap_seconds: float = 0.0
     # --- end coverage race fix ---
     # Range-proportional covariance caps (Phase 1b). The effective per-axis std
     # ceiling scales with distance from the contributing sensors:
@@ -1062,9 +1066,9 @@ class Settings:
     localization_srp_grid_resolution_m: float = 0.5
     localization_search_padding_m: float = 2.0
     localization_far_field_default_range_m: float = 50.0
-    localization_far_field_max_range_m: float = 1000.0
-    localization_max_range_m: float = 1200.0
-    localization_max_position_std_m: float = 1000.0
+    localization_far_field_max_range_m: float = overhaul_defaults.DEFAULT_LOCALIZATION_FAR_FIELD_MAX_RANGE_M
+    localization_max_range_m: float = overhaul_defaults.DEFAULT_LOCALIZATION_MAX_RANGE_M
+    localization_max_position_std_m: float = overhaul_defaults.DEFAULT_LOCALIZATION_MAX_POSITION_STD_M
     localization_std_range_factor: float = 1.0
     localization_position_std_floor_m: float = 30.0
     # Localization quality gate; see LocalizationConfig for the rationale behind
@@ -1142,7 +1146,8 @@ class Settings:
     # --- coverage race fix ---
     localization_coverage_wait_all_streaming_nodes_enabled: bool = True
     localization_coverage_stall_budget_seconds: float = 0.5
-    localization_coverage_total_cap_seconds: float = 1.0
+    # 0 = derived from node geometry; > 0 = explicit override (see LocalizationConfig).
+    localization_coverage_total_cap_seconds: float = 0.0
     # --- end coverage race fix ---
 
     default_temperature_c: float = 20.0
@@ -1840,6 +1845,18 @@ class Settings:
     localization_solver_floor_relative_db: float = overhaul_defaults.DEFAULT_LOCALIZATION_SOLVER_FLOOR_RELATIVE_DB
     localization_sensor_registry_stale_seconds: float = (
         overhaul_defaults.DEFAULT_LOCALIZATION_SENSOR_REGISTRY_STALE_SECONDS
+    )
+    localization_coverage_delivery_margin_seconds: float = (
+        overhaul_defaults.DEFAULT_LOCALIZATION_COVERAGE_DELIVERY_MARGIN_SECONDS
+    )
+    localization_event_span_clock_margin_sigma: float = (
+        overhaul_defaults.DEFAULT_LOCALIZATION_EVENT_SPAN_CLOCK_MARGIN_SIGMA
+    )
+    localization_event_span_max_cross_node_lag_seconds: float = (
+        overhaul_defaults.DEFAULT_LOCALIZATION_EVENT_SPAN_MAX_CROSS_NODE_LAG_SECONDS
+    )
+    localization_coverage_max_pending_per_buffer: int = (
+        overhaul_defaults.DEFAULT_LOCALIZATION_COVERAGE_MAX_PENDING_PER_BUFFER
     )
     # Python-only.
     sidecar_geometry_push_estimate_move_threshold_m: float = (
@@ -2747,12 +2764,14 @@ class Settings:
             ),
             localization_far_field_max_range_m=_env_float(
                 "MINIMAPPR_LOCALIZATION_FAR_FIELD_MAX_RANGE_M",
-                1000.0,
+                overhaul_defaults.DEFAULT_LOCALIZATION_FAR_FIELD_MAX_RANGE_M,
             ),
-            localization_max_range_m=_env_float("MINIMAPPR_LOCALIZATION_MAX_RANGE_M", 1200.0),
+            localization_max_range_m=_env_float(
+                "MINIMAPPR_LOCALIZATION_MAX_RANGE_M", overhaul_defaults.DEFAULT_LOCALIZATION_MAX_RANGE_M
+            ),
             localization_max_position_std_m=_env_float(
                 "MINIMAPPR_LOCALIZATION_MAX_POSITION_STD_M",
-                1000.0,
+                overhaul_defaults.DEFAULT_LOCALIZATION_MAX_POSITION_STD_M,
             ),
             localization_std_range_factor=_env_float(
                 "MINIMAPPR_LOCALIZATION_STD_RANGE_FACTOR",
@@ -2908,7 +2927,7 @@ class Settings:
                 "MINIMAPPR_LOCALIZATION_COVERAGE_STALL_BUDGET_SECONDS", 0.5
             ),
             localization_coverage_total_cap_seconds=_env_float(
-                "MINIMAPPR_LOCALIZATION_COVERAGE_TOTAL_CAP_SECONDS", 1.0
+                "MINIMAPPR_LOCALIZATION_COVERAGE_TOTAL_CAP_SECONDS", 0.0
             ),
             # --- end coverage race fix ---
             default_temperature_c=_env_float("MINIMAPPR_DEFAULT_TEMPERATURE_C", 20.0),
@@ -3507,6 +3526,22 @@ class Settings:
             localization_sensor_registry_stale_seconds=_env_float(
                 "MINIMAPPR_LOCALIZATION_SENSOR_REGISTRY_STALE_SECONDS",
                 overhaul_defaults.DEFAULT_LOCALIZATION_SENSOR_REGISTRY_STALE_SECONDS,
+            ),
+            localization_coverage_delivery_margin_seconds=_env_float(
+                "MINIMAPPR_LOCALIZATION_COVERAGE_DELIVERY_MARGIN_SECONDS",
+                overhaul_defaults.DEFAULT_LOCALIZATION_COVERAGE_DELIVERY_MARGIN_SECONDS,
+            ),
+            localization_event_span_clock_margin_sigma=_env_float(
+                "MINIMAPPR_LOCALIZATION_EVENT_SPAN_CLOCK_MARGIN_SIGMA",
+                overhaul_defaults.DEFAULT_LOCALIZATION_EVENT_SPAN_CLOCK_MARGIN_SIGMA,
+            ),
+            localization_event_span_max_cross_node_lag_seconds=_env_float(
+                "MINIMAPPR_LOCALIZATION_EVENT_SPAN_MAX_CROSS_NODE_LAG_SECONDS",
+                overhaul_defaults.DEFAULT_LOCALIZATION_EVENT_SPAN_MAX_CROSS_NODE_LAG_SECONDS,
+            ),
+            localization_coverage_max_pending_per_buffer=_env_int(
+                "MINIMAPPR_LOCALIZATION_COVERAGE_MAX_PENDING_PER_BUFFER",
+                overhaul_defaults.DEFAULT_LOCALIZATION_COVERAGE_MAX_PENDING_PER_BUFFER,
             ),
             sidecar_geometry_push_estimate_move_threshold_m=_env_float(
                 "MINIMAPPR_SIDECAR_GEOMETRY_PUSH_ESTIMATE_MOVE_THRESHOLD_M",

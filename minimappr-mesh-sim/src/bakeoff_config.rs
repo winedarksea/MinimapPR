@@ -173,8 +173,10 @@ impl Default for TriggerModelConfig {
 pub struct ProductionCandidateConfig {
     /// `localization_window_seconds`: the node-local event window.
     pub node_local_window_seconds: f64,
-    /// `localization_coverage_total_cap_seconds`: the event span's lag cap.
-    pub coverage_total_cap_seconds: f64,
+    /// `localization_event_span_max_cross_node_lag_seconds`: production derives
+    /// the event span from the layout's largest baseline / c, bounded by this
+    /// safety bound (`minimappr_core::localization_event_timing`).
+    pub event_span_max_cross_node_lag_seconds: f64,
     /// Shipped per-pair band and taper; every point-network pair is cross-node.
     pub localization_band_policy: LocalizationBandPolicy,
     pub grid_resolution_m: f32,
@@ -203,7 +205,7 @@ impl Default for ProductionCandidateConfig {
     fn default() -> Self {
         Self {
             node_local_window_seconds: 0.08,
-            coverage_total_cap_seconds: 1.0,
+            event_span_max_cross_node_lag_seconds: 10.0,
             localization_band_policy: LocalizationBandPolicy::default(),
             grid_resolution_m: 0.5,
             search_padding_m: 2.0,

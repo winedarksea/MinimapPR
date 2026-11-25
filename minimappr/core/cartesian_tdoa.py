@@ -235,13 +235,15 @@ def solve_cartesian_tdoa(
     far_field_initial_range_m: float = 50.0,
     far_field_prior_radial_std_m: float | None = None,
     radial_refinement_enabled: bool = True,
+    far_field_max_range_m: float | None = None,
     bearing_observed_obs_floor: float = BEARING_OBSERVED_OBS_FACTOR_FLOOR,
     node_position_uncertainty: NodePositionUncertainty | None = None,
 ) -> CartesianTdoaSolve:
     """``node_position_uncertainty`` (stated node position accuracies) widens
     the covariance by the nodes' rigid position errors propagated through this
     solve's sensitivity (``core/node_position_covariance.py``); ``None`` keeps
-    the timing-only covariance."""
+    the timing-only covariance. ``far_field_max_range_m`` bounds the radial
+    range search (``radial_range_refinement.py``); ``None`` leaves it unbounded."""
     bearing_constraints = bearing_constraints or []
     amplitude_constraints = amplitude_constraints or []
     sensor_ids = sorted(sensor_positions)
@@ -431,6 +433,7 @@ def solve_cartesian_tdoa(
                 if bearing_prior is not None
                 else DEFAULT_ASYMPTOTIC_RADIAL_STD_FRACTION
             ),
+            maximum_radius_m=far_field_max_range_m,
         )
         if radial_refinement.fit_residual_rms_seconds < residual_rms_s * (1.0 - 1.0e-4):
             best_position = radial_refinement.position_m

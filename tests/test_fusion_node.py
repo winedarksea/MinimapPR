@@ -3094,9 +3094,10 @@ def _make_fusion_node(settings: Settings, storage: Storage) -> FusionNode:
 
 @pytest.mark.asyncio
 async def test_phase2_sanity_gate_measures_range_from_centroid_not_origin(tmp_path: Path) -> None:
-    """Phase 2: a node surveyed far from the site origin must still get its full 1 km
+    """Phase 2: a node surveyed far from the site origin must still get its full
     envelope. The sanity gate measures range from the contributing-sensor centroid,
-    not the origin, with a 5 km absolute-origin backstop for runaway coordinates."""
+    not the origin (the old 5 km absolute-origin backstop is gone: the radial range
+    search is bounded by the far-field envelope, so runaway radii no longer occur)."""
     settings = Settings(
         db_path=tmp_path / "phase2_gate.db",
         snippet_dir=tmp_path / "snippets",
@@ -3140,9 +3141,20 @@ async def test_phase2_sanity_gate_measures_range_from_centroid_not_origin(tmp_pa
     assert branch is not None
     assert fusion._metrics.localization_rejected_out_of_range_count == 0
 
-    # A runaway solve 5200 m from the array is still rejected (> max_range_m).
+    # A 2 km source from that far node is kept (the km-range envelope).
     branch = fusion._build_localization_branch(
-        localization=_loc(centroid + np.array([5200.0, 0.0, 0.0])),
+        localization=_loc(centroid + np.array([2000.0, 0.0, 0.0])),
+        selected_windows=windows,
+        classification_windows=windows,
+        capability_tier="full_3d",
+        contributing_centroid_m=centroid,
+    )
+    assert branch is not None
+    assert fusion._metrics.localization_rejected_out_of_range_count == 0
+
+    # A solve past max_range_m from the array is still rejected.
+    branch = fusion._build_localization_branch(
+        localization=_loc(centroid + np.array([settings.localization_max_range_m + 200.0, 0.0, 0.0])),
         selected_windows=windows,
         classification_windows=windows,
         capability_tier="full_3d",

@@ -148,7 +148,7 @@ def test_rust_python_amplitude_prior_defaults_match() -> None:
     assert _default("MINIMAPPR_LOCALIZATION_AMPLITUDE_PRIOR_STD_FACTOR") == pytest.approx(
         settings.localization_amplitude_prior_std_factor
     )
-    # Envelope default parity: far-field max range (1 km).
+    # Envelope default parity: far-field max range.
     assert _default("MINIMAPPR_LOCALIZATION_FAR_FIELD_MAX_RANGE_M") == pytest.approx(
         settings.localization_far_field_max_range_m
     )

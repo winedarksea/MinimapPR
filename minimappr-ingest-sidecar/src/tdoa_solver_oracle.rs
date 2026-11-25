@@ -154,6 +154,7 @@ fn run_cartesian_case(input: CartesianCaseInput) -> Value {
         far_field_initial_range_m: input.far_field_initial_range_m,
         far_field_prior_radial_std_m: input.far_field_prior_radial_std_m,
         radial_refinement_enabled: input.radial_refinement_enabled,
+        far_field_max_range_m: None,
         bearing_observed_obs_floor: input.bearing_observed_obs_floor,
         canopy_height_prior: None,
         refinement_engine: CartesianRefinementEngine::ScipyTrfParity,

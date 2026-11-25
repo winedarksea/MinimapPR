@@ -84,6 +84,9 @@ pub struct CartesianTdoaSolveRequest {
     pub far_field_initial_range_m: f64,
     pub far_field_prior_radial_std_m: Option<f64>,
     pub radial_refinement_enabled: bool,
+    /// Python `far_field_max_range_m`: bounds the radial range search
+    /// (`radial_range_refinement`); `None` leaves it unbounded.
+    pub far_field_max_range_m: Option<f64>,
     pub bearing_observed_obs_floor: f64,
     /// Field Mode extension; `None` reproduces the Python solver exactly.
     pub canopy_height_prior: Option<CanopyHeightPrior>,
@@ -127,6 +130,7 @@ impl CartesianTdoaSolveRequest {
             far_field_initial_range_m: DEFAULT_FAR_FIELD_INITIAL_RANGE_M,
             far_field_prior_radial_std_m: None,
             radial_refinement_enabled: true,
+            far_field_max_range_m: None,
             bearing_observed_obs_floor: BEARING_OBSERVED_OBS_FACTOR_FLOOR,
             canopy_height_prior: None,
             refinement_engine: CartesianRefinementEngine::ScipyTrfParity,
@@ -372,6 +376,7 @@ pub fn solve_cartesian_tdoa(
             } else {
                 DEFAULT_ASYMPTOTIC_RADIAL_STD_FRACTION
             }),
+            maximum_radius_m: request.far_field_max_range_m,
         })?;
         if refinement.fit_residual_rms_seconds
             < residual_rms_s * (1.0 - RADIAL_REFINEMENT_MINIMUM_RELATIVE_IMPROVEMENT)

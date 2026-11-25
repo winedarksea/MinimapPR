@@ -66,8 +66,8 @@ def measure_pair_tdoas(
     """Measure pairwise TDOAs, optionally enabling true cross-node correlation.
 
     ``cross_node_max_tau_s`` (Phase 5) lifts the tau search cap for *cross-node*
-    pairs so wide baselines (up to ~120 m at 0.35 s) can be correlated; same-node
-    pairs keep the tight ``max_tau_s``. ``sensor_timing_uncertainty_seconds`` is
+    pairs to at least their own baseline / c, so any baseline can be correlated;
+    same-node pairs keep the tight ``max_tau_s``. ``sensor_timing_uncertainty_seconds`` is
     each sensor's node clock uncertainty (``core/pair_timing_uncertainty.py``):
     every cross-node pair is kept and inverse-variance weighted by it, never
     rejected by clock class. Node position accuracy never enters the weights
@@ -138,10 +138,12 @@ def measure_pair_tdoas(
     for _, sensor_a, sensor_b, baseline_m, same_node, timing_uncertainty_s in pair_candidates:
         physical_max_tau_s = (baseline_m / sound_speed_mps) + (1.0 / sample_rate_hz)
         # Cross-node pairs may correlate over a much wider lag than the tight
-        # same-node cap when a cross-node tau ceiling is supplied (Phase 5).
+        # same-node cap when cross-node TDOA is on (Phase 5): up to their own
+        # baseline / c, as the sidecar does (`gcc_phat::pair_max_tau_s`), so a
+        # km-spread pair is not held to the ~120 m the 0.35 s ceiling allows.
         effective_max_tau_s = max_tau_s
         if not same_node and cross_node_max_tau_s is not None:
-            effective_max_tau_s = max(max_tau_s, float(cross_node_max_tau_s))
+            effective_max_tau_s = max(max_tau_s, float(cross_node_max_tau_s), physical_max_tau_s)
         signal = sensor_windows[sensor_a]
         reference_signal = sensor_windows[sensor_b]
         front_end_kwargs: dict[str, object] = {}

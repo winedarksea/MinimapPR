@@ -23,6 +23,7 @@ from minimappr.classifiers.factory import create_classifier
 from minimappr.cleanup_service import CleanupService
 from minimappr.config import Settings
 from minimappr.core.bit_report import BITReportEvaluator
+from minimappr.core.python_ingest_event_span import event_span_sensor_buffer_seconds
 from minimappr.core.capture_session import CaptureSessionManager
 from minimappr.core.capture_session import CaptureSessionRecord, CaptureState
 from minimappr.core.diagnostics import DiagnosticsService
@@ -244,7 +245,7 @@ def _build_combined_runtime_core_services(
     registry = NodeRegistry()
     cluster_registry = ClusterRegistry()
     audio_buffer = MultiSensorBuffer(
-        max_duration_seconds=localization_cfg.max_sensor_buffer_seconds,
+        max_duration_seconds=event_span_sensor_buffer_seconds(settings),
         timeline_discipline_policy=TimelineDisciplinePolicy.from_settings(settings),
     )
     localizer = build_localizer_from_settings(localization_cfg)

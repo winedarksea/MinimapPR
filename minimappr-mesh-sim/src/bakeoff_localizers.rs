@@ -91,8 +91,8 @@ pub fn run_bakeoff_scene(seed: u64, config: &PointBakeoffConfig, onset_grid_mult
     let scene = build_bakeoff_scene(seed, &config.scene)?;
     let triggers = detect_triggers(&scene, &config.trigger);
     let floor_rms = quietest_node_floor_rms(&scene, config.trigger.frame_seconds);
-    let capped_window_covers_layout = scene.largest_layout_lag_s() <= config.production.coverage_total_cap_seconds;
-    let production_window = ProductionFrontEndVariant { lag_cap_s: Some(config.production.coverage_total_cap_seconds), band_policy: None };
+    let capped_window_covers_layout = scene.largest_layout_lag_s() <= config.production.event_span_max_cross_node_lag_seconds;
+    let production_window = ProductionFrontEndVariant { lag_cap_s: Some(config.production.event_span_max_cross_node_lag_seconds), band_policy: None };
     let uncapped_window = ProductionFrontEndVariant { lag_cap_s: None, ..production_window };
     let repaired_front_end = ProductionFrontEndVariant {
         lag_cap_s: None,

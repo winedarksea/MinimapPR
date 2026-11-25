@@ -231,12 +231,22 @@ impl DspWorker {
                 None
             }
         };
-        let deferred_localizations =
-            DeferredLocalizationScheduler::new(LocalizationCoverageWaitConfig::from_seconds(
+        // Each parked window carries its own geometry-derived cap; this one
+        // (node-local: the delivery margin, or the explicit override) is the fallback.
+        let node_local_coverage_cap_seconds = minimappr_core::localization_event_timing::derive_event_timing(
+            None,
+            f64::from(config.sound_speed_mps),
+            &event_timing_config(&config),
+        )
+        .coverage_total_cap_seconds;
+        let deferred_localizations = DeferredLocalizationScheduler::new(
+            LocalizationCoverageWaitConfig::from_seconds(
                 config.localization_coverage_wait_all_streaming_nodes_enabled,
                 config.localization_coverage_stall_budget_seconds,
-                config.localization_coverage_total_cap_seconds,
-            ));
+                node_local_coverage_cap_seconds,
+            ),
+            config.localization_solve.localization_coverage_max_pending_per_buffer,
+        );
         let sensor_registry = ClusterSensorRegistry::new(&config.localization_solve);
         let localization_trigger = LocalizationEventTrigger::new(&config);
         let node_clock_quality = NodeClockQualityTracker::new(&config.localization_solve);
@@ -700,3 +710,6 @@ mod dsp_worker_sample_rate_guard_tests;
 #[cfg(test)]
 #[path = "dsp_worker_localization_trigger_tests.rs"]
 mod dsp_worker_localization_trigger_tests;
+#[cfg(test)]
+#[path = "dsp_worker_km_span_tests.rs"]
+mod dsp_worker_km_span_tests;

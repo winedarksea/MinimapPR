@@ -70,6 +70,8 @@ pub struct DspWorkerConfig {
     /// Same keys/meaning as the Python `localization_coverage_*` settings.
     pub localization_coverage_wait_all_streaming_nodes_enabled: bool,
     pub localization_coverage_stall_budget_seconds: f64,
+    /// `<= 0` (default): derived per layout from node geometry
+    /// (`localization_event_timing`); `> 0`: explicit override.
     pub localization_coverage_total_cap_seconds: f64,
     /// Localization-overhaul keys (`localization_solve_config.rs`).
     pub localization_solve: crate::localization_solve_config::LocalizationSolveConfig,
@@ -95,7 +97,7 @@ impl Default for DspWorkerConfig {
             localization_srp_grid_resolution_m: 0.5,
             localization_search_padding_m: 2.0,
             localization_far_field_default_range_m: 50.0,
-            localization_far_field_max_range_m: 1000.0,
+            localization_far_field_max_range_m: 5000.0,
             localization_amplitude_range_prior_enabled: false,
             localization_amplitude_reference_level_db: 100.0,
             localization_amplitude_prior_min_range_m: 5.0,
@@ -124,7 +126,7 @@ impl Default for DspWorkerConfig {
             max_trusted_node_clock_skew_seconds: 300.0,
             localization_coverage_wait_all_streaming_nodes_enabled: true,
             localization_coverage_stall_budget_seconds: 0.5,
-            localization_coverage_total_cap_seconds: 1.0,
+            localization_coverage_total_cap_seconds: 0.0,
             localization_solve: Default::default(),
         }
     }

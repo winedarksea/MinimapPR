@@ -189,12 +189,23 @@ pub(super) struct CoherentPointSource {
     position_m: [f64; 3],
     sound_speed_mps: f64,
     signal: Vec<f32>,
+    /// Signal before frame 0: the largest propagation delay it can serve.
+    pre_roll_samples: usize,
 }
 
 impl CoherentPointSource {
     pub(super) fn new(position_m: [f64; 3], frame_count: usize) -> Self {
+        Self::with_pre_roll_samples(position_m, frame_count, SOURCE_PRE_ROLL_SAMPLES)
+    }
+
+    /// For sensors more than the default pre-roll (~340 m) from the source.
+    pub(super) fn with_pre_roll_samples(
+        position_m: [f64; 3],
+        frame_count: usize,
+        pre_roll_samples: usize,
+    ) -> Self {
         let mut state = SOURCE_NOISE_SEED;
-        let signal = (0..SOURCE_PRE_ROLL_SAMPLES + frame_count * FIXTURE_FRAME_SAMPLES)
+        let signal = (0..pre_roll_samples + frame_count * FIXTURE_FRAME_SAMPLES)
             .map(|_| {
                 state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                 SOURCE_PEAK_AMPLITUDE * (state as i32 as f32 / i32::MAX as f32)
@@ -204,6 +215,7 @@ impl CoherentPointSource {
             position_m,
             sound_speed_mps: f64::from(DspWorkerConfig::default().sound_speed_mps),
             signal,
+            pre_roll_samples,
         }
     }
 
@@ -229,7 +241,7 @@ impl CoherentPointSource {
         node.sensor_world_positions_m()
             .into_iter()
             .map(|(_, position_m)| {
-                let first_sample = SOURCE_PRE_ROLL_SAMPLES + frame_index * FIXTURE_FRAME_SAMPLES
+                let first_sample = self.pre_roll_samples + frame_index * FIXTURE_FRAME_SAMPLES
                     - self.delay_samples(position_m);
                 self.signal[first_sample..first_sample + FIXTURE_FRAME_SAMPLES].to_vec()
             })

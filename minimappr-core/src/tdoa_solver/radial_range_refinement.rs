@@ -1,5 +1,7 @@
 //! One-dimensional log-radius range refinement along a fixed bearing; port of
-//! `minimappr/core/radial_range_refinement.py`.
+//! `minimappr/core/radial_range_refinement.py`. `maximum_radius_m` (the
+//! far-field envelope) stops a cost that keeps falling from running the radius
+//! to float saturation: the result is then asymptotic at the envelope.
 
 use nalgebra::{DMatrix, Vector3};
 
@@ -65,6 +67,8 @@ pub struct RadialRefinementRequest<'model> {
     pub residual_model: &'model dyn PositionResidualModel,
     pub effective_time_std_s: f64,
     pub asymptotic_radial_std_fraction: Option<f64>,
+    /// `None`: unbounded search.
+    pub maximum_radius_m: Option<f64>,
 }
 
 pub fn adaptive_radial_refinement(
@@ -90,7 +94,11 @@ pub fn adaptive_radial_refinement(
     let mut center_log_radius = center_radius_m.ln();
     let mut lower_cost = squared_cost_for_log_radius(lower_log_radius);
     let mut center_cost = squared_cost_for_log_radius(center_log_radius);
-    let mut upper_radius_m = center_radius_m * RADIAL_SEARCH_EXPANSION_FACTOR;
+    // At least one expansion above the centre, so the bracket is never empty.
+    let ceiling_radius_m = request.maximum_radius_m.map_or(f64::INFINITY, |maximum| {
+        maximum.max(center_radius_m * RADIAL_SEARCH_EXPANSION_FACTOR)
+    });
+    let mut upper_radius_m = (center_radius_m * RADIAL_SEARCH_EXPANSION_FACTOR).min(ceiling_radius_m);
     let mut upper_log_radius = upper_radius_m.ln();
     let mut upper_cost = squared_cost_for_log_radius(upper_log_radius);
 
@@ -99,11 +107,15 @@ pub fn adaptive_radial_refinement(
         && upper_cost < center_cost
         && expansion_count < MAX_RADIAL_SEARCH_EXPANSIONS
     {
+        if upper_radius_m >= ceiling_radius_m {
+            // Still falling at the envelope: asymptotic there.
+            break;
+        }
         lower_log_radius = center_log_radius;
         lower_cost = center_cost;
         center_log_radius = upper_log_radius;
         center_cost = upper_cost;
-        upper_radius_m *= RADIAL_SEARCH_EXPANSION_FACTOR;
+        upper_radius_m = (upper_radius_m * RADIAL_SEARCH_EXPANSION_FACTOR).min(ceiling_radius_m);
         if !upper_radius_m.is_finite() {
             break;
         }

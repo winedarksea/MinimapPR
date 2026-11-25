@@ -143,7 +143,7 @@ def sidecar_coverage_wait_environment(settings) -> dict[str, str]:
             float(getattr(settings, "localization_coverage_stall_budget_seconds", 0.5))
         ),
         "MINIMAPPR_LOCALIZATION_COVERAGE_TOTAL_CAP_SECONDS": str(
-            float(getattr(settings, "localization_coverage_total_cap_seconds", 1.0))
+            float(getattr(settings, "localization_coverage_total_cap_seconds", 0.0))
         ),
     }
 
@@ -275,7 +275,7 @@ def build_ingest_sidecar_environment(
             getattr(settings, "localization_far_field_default_range_m", 50.0)
         ),
         "MINIMAPPR_LOCALIZATION_FAR_FIELD_MAX_RANGE_M": str(
-            getattr(settings, "localization_far_field_max_range_m", 1000.0)
+            getattr(settings, "localization_far_field_max_range_m", _settings_dataclass_default("localization_far_field_max_range_m"))
         ),
         "MINIMAPPR_DEFAULT_TEMPERATURE_C": str(getattr(settings, "default_temperature_c", 20.0)),
         "MINIMAPPR_DEFAULT_HUMIDITY": str(getattr(settings, "default_humidity", 0.5)),

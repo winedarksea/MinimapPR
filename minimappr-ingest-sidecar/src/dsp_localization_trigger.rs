@@ -11,6 +11,13 @@
 //! Deciding and committing are separate: the cooldown starts only when a
 //! solve is actually dispatched, so a trigger a later gate suppresses does
 //! not silence the next 0.8 s of audio.
+//!
+//! The cooldown is geometry-aware (`localization_event_span.rs`): a trigger on
+//! another node is the same event while it falls within the cooldown plus the
+//! sound's travel time between the two nodes, either order. So a far node's
+//! onset of a km-spread event never supersedes the parked solve that is
+//! waiting for its audio, while a second event on the same node still only
+//! waits out the plain cooldown.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -40,13 +47,19 @@ pub(crate) struct LocalizationEventTrigger {
     /// `<= 0` disables the energy check, so every frame passes the absolute gate.
     absolute_rms_gate: f32,
     noise_floor_relative_enabled: bool,
-    cooldown_ns: u128,
     node_noise_floors: NoiseFloorRelativeTrigger,
-    last_dispatched_trigger_ns_by_stream: HashMap<String, u128>,
+    last_dispatched_trigger_by_stream: HashMap<String, DispatchedTrigger>,
     /// Per node: the firmware boot session and receipt time of its last frame,
     /// so a reboot or a long silence resets the floor instead of leaving one
     /// learnt under another gain state.
     node_floor_sessions: HashMap<String, NodeFloorSession>,
+}
+
+/// The last trigger that dispatched (or parked) a solve on a buffer.
+#[derive(Clone, Debug, PartialEq)]
+struct DispatchedTrigger {
+    audio_ns: u128,
+    node_id: String,
 }
 
 #[derive(Clone, Copy)]
@@ -81,10 +94,8 @@ impl LocalizationEventTrigger {
             noise_floor_relative_enabled: config
                 .localization_solve
                 .localization_trigger_noise_floor_relative_enabled,
-            cooldown_ns: (config.trigger_cooldown_seconds * NANOSECONDS_PER_SECOND_F64).round()
-                as u128,
             node_noise_floors: NoiseFloorRelativeTrigger::new(relative_trigger_config),
-            last_dispatched_trigger_ns_by_stream: HashMap::new(),
+            last_dispatched_trigger_by_stream: HashMap::new(),
             node_floor_sessions: HashMap::new(),
         }
     }
@@ -170,13 +181,16 @@ impl LocalizationEventTrigger {
 
     /// Which gate opens a solve on this buffer now, without starting the
     /// cooldown. Absolute wins a tie so a frame that triggered before this
-    /// change keeps its `attempt_kind`.
+    /// change keeps its `attempt_kind`. `same_event_window_seconds(last_node)`
+    /// is how far from the last trigger (either order) a trigger on
+    /// `trigger_node_id` is still that event.
     pub(crate) fn evaluate(
         &self,
         stream_key: &str,
         audio_ns: u128,
         windows: &[Vec<f32>],
         node_frame_relatively_loud: bool,
+        same_event_window_seconds: impl Fn(&str) -> f64,
     ) -> Option<LocalizationTriggerSource> {
         let source = if self.absolute_gate_passes(windows) {
             LocalizationTriggerSource::AbsoluteRms
@@ -185,18 +199,33 @@ impl LocalizationEventTrigger {
         } else {
             return None;
         };
-        let cooling_down = self
-            .last_dispatched_trigger_ns_by_stream
+        let same_event_as_last = self
+            .last_dispatched_trigger_by_stream
             .get(stream_key)
-            .is_some_and(|last_ns| audio_ns.saturating_sub(*last_ns) < self.cooldown_ns);
-        (!cooling_down).then_some(source)
+            .is_some_and(|last| {
+                let window_ns = (same_event_window_seconds(&last.node_id)
+                    * NANOSECONDS_PER_SECOND_F64)
+                    .round() as u128;
+                audio_ns.abs_diff(last.audio_ns) < window_ns
+            });
+        (!same_event_as_last).then_some(source)
     }
 
     /// Starts the cooldown; call only once the triggered solve is dispatched
     /// (or parked for the coverage wait, which dispatches it on release).
-    pub(crate) fn commit_dispatched_trigger(&mut self, stream_key: &str, audio_ns: u128) {
-        self.last_dispatched_trigger_ns_by_stream
-            .insert(stream_key.to_string(), audio_ns);
+    pub(crate) fn commit_dispatched_trigger(
+        &mut self,
+        stream_key: &str,
+        audio_ns: u128,
+        trigger_node_id: &str,
+    ) {
+        self.last_dispatched_trigger_by_stream.insert(
+            stream_key.to_string(),
+            DispatchedTrigger {
+                audio_ns,
+                node_id: trigger_node_id.to_string(),
+            },
+        );
     }
 
     /// Tracked floors of the layout's nodes, snapshotted at trigger so a
@@ -217,7 +246,7 @@ impl LocalizationEventTrigger {
     }
 
     pub(crate) fn forget_stream(&mut self, stream_key: &str) {
-        self.last_dispatched_trigger_ns_by_stream.remove(stream_key);
+        self.last_dispatched_trigger_by_stream.remove(stream_key);
     }
 
     #[cfg(test)]
@@ -227,9 +256,9 @@ impl LocalizationEventTrigger {
 
     #[cfg(test)]
     pub(crate) fn last_dispatched_trigger_ns(&self, stream_key: &str) -> Option<u128> {
-        self.last_dispatched_trigger_ns_by_stream
+        self.last_dispatched_trigger_by_stream
             .get(stream_key)
-            .copied()
+            .map(|last| last.audio_ns)
     }
 
     /// Today's gate: the strongest channel of the node-local localization windows.
@@ -251,6 +280,10 @@ pub(crate) struct LocalizationTriggerEvidence<'frame> {
     pub(crate) windows: &'frame [Vec<f32>],
     /// The reporting node's new frame stood above its noise floor.
     pub(crate) node_frame_relatively_loud: bool,
+    /// The buffer's layout (its reporting node is the trigger node) and the
+    /// sound speed, for the geometry-aware same-event window.
+    pub(crate) layout: &'frame SolveSensorLayout,
+    pub(crate) sound_speed_mps: f32,
 }
 
 impl DspWorker {
@@ -267,6 +300,20 @@ impl DspWorker {
             audio_ns,
             evidence.windows,
             evidence.node_frame_relatively_loud,
+            |last_trigger_node_id| {
+                same_event_window_seconds(
+                    evidence.layout,
+                    &self.config,
+                    evidence.sound_speed_mps,
+                    last_trigger_node_id,
+                    &evidence.layout.reporting_node_id,
+                    |node_id| {
+                        self.node_clock_quality
+                            .assessment(node_id)
+                            .timing_uncertainty_seconds
+                    },
+                )
+            },
         )?;
         let cadence_ns = (self.config.localization_cadence_ms as u128) * 1_000_000;
         let cadence_closed = cadence_ns > 0
@@ -279,9 +326,14 @@ impl DspWorker {
 
     /// Starts the trigger cooldown and the localization cadence once the
     /// triggered solve is dispatched (or parked, which dispatches on release).
-    pub(crate) fn commit_localization_trigger(&mut self, stream_key: &str, audio_ns: u128) {
+    pub(crate) fn commit_localization_trigger(
+        &mut self,
+        stream_key: &str,
+        audio_ns: u128,
+        trigger_node_id: &str,
+    ) {
         self.localization_trigger
-            .commit_dispatched_trigger(stream_key, audio_ns);
+            .commit_dispatched_trigger(stream_key, audio_ns, trigger_node_id);
         self.last_localization_ns_by_stream
             .insert(stream_key.to_string(), audio_ns);
     }
