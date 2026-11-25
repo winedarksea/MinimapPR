@@ -220,7 +220,7 @@ impl SolvePairAdmission {
     }
 }
 
-/// Breadth-first walk over admitted pairs from the reporter's active
+/// Walks admitted pairs outward from the reporter's active
 /// sensors. A reporter with no covered sensor (a parked solve released after
 /// its own coverage lapsed) anchors on the largest connected group instead,
 /// so the solve still describes one array.
