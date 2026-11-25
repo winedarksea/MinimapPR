@@ -43,6 +43,7 @@ from minimappr.core.localized_render_handoff_hooks import (
     LocalizationSeamCollaborators,
 )
 from minimappr.core.localized_render_handoff_solve_features import (
+    classify_render_audio,
     replace_estimate_with_node_position,
     rust_render_features,
     validated_mono_render_audio,
@@ -53,6 +54,7 @@ from minimappr.core.localized_render_localization import (
     gate_handoff_localization,
     resolve_default_handoff_estimate,
 )
+from minimappr.core.point_network_call_requests import classify_rust_render_call, localized_call_for_rust_solve
 from minimappr.models import NodeSpec
 
 if TYPE_CHECKING:
@@ -107,9 +109,11 @@ class LocalizedRenderHandoff:
             reporting_modality=solve.reporting_modality,
             solve_origin=SOLVE_ORIGIN_RUST_CLASSIFIER_RENDER,
         )
+        self._register_localized_call(payload, solve, localized_product)
         await self._classify_and_report(
             payload,
             node=solve.node,
+            geometry=solve.geometry,
             localized_product=localized_product,
             reporting_modality=solve.reporting_modality,
             reference_sensor=solve.geometry.reference_sensor,
@@ -135,6 +139,22 @@ class LocalizedRenderHandoff:
             localized_product=localized_product,
             reporting_modality=solve.reporting_modality,
             solve_origin=SOLVE_ORIGIN_RUST_EVENT_LOCALIZATION,
+        )
+        # Usually ahead of the renders, so a point-network clip classified
+        # first still sees a later caller its event solve already placed.
+        self._register_localized_call(payload, solve, localized_product)
+
+    def _register_localized_call(
+        self, payload: LocalizedClassifierRenderRequest, solve: "_HandoffSolve", localized_product: LocalizedCandidate
+    ) -> None:
+        self._host._point_network_call_classifier.register_localized_call(
+            localized_call_for_rust_solve(
+                self._host,
+                payload=payload,
+                geometry=solve.geometry,
+                localized_product=localized_product,
+                reporting_modality=solve.reporting_modality,
+            )
         )
 
     async def _localize_solve(self, payload: LocalizedClassifierRenderRequest) -> "_HandoffSolve":
@@ -356,6 +376,7 @@ class LocalizedRenderHandoff:
         payload: LocalizedClassifierRenderRequest,
         *,
         node: NodeSpec,
+        geometry: HandoffSolveGeometry,
         localized_product: LocalizedCandidate,
         reporting_modality: str,
         reference_sensor: str,
@@ -369,20 +390,18 @@ class LocalizedRenderHandoff:
                 host._metrics.birdnet_chunk_dispatches_suppressed += 1
                 return
 
-        if payload.authoritative_classification is not None:
-            classified = await host._classification_orchestrator.adopt_authoritative_classification(
-                classification=payload.authoritative_classification,
-                event_time_ns=payload.event_time_ns,
-                classification_signal=normalized_audio,
-                sample_rate_hz=payload.sample_rate_hz,
-            )
-            classified.classification.features["rust_classification_authoritative"] = True
-        else:
-            classified = await host._classification_orchestrator.classify_omni_only(
-                reference_signal=normalized_audio,
-                sample_rate_hz=payload.sample_rate_hz,
-                event_time_ns=payload.event_time_ns,
-            )
+        # P7: a point-only solve is classified from its clearest node's aligned
+        # clip, not the render (an unaligned mix of every node).
+        classified = await classify_rust_render_call(
+            host,
+            payload=payload,
+            geometry=geometry,
+            localized_product=localized_product,
+            reporting_modality=reporting_modality,
+            default_classification=lambda: classify_render_audio(
+                host._classification_orchestrator, payload, normalized_audio
+            ),
+        )
         classified.classification.features.update(rust_extra_features)
         branch = localized_product.localization_branch
         cluster_emission_key = self._localized_cluster_emission_key(

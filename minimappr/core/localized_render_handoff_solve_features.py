@@ -81,3 +81,21 @@ def replace_estimate_with_node_position(
     estimate.residual_rms_seconds = None
     estimate.range_projection_mode = None
     estimate.method = OMNI_RENDER_LOCALIZATION_METHOD
+
+
+async def classify_render_audio(orchestrator, payload: LocalizedClassifierRenderRequest, normalized_audio: np.ndarray):
+    """The render's own classification: the sidecar's authoritative label, else the mono render."""
+    if payload.authoritative_classification is not None:
+        classified = await orchestrator.adopt_authoritative_classification(
+            classification=payload.authoritative_classification,
+            event_time_ns=payload.event_time_ns,
+            classification_signal=normalized_audio,
+            sample_rate_hz=payload.sample_rate_hz,
+        )
+        classified.classification.features["rust_classification_authoritative"] = True
+        return classified
+    return await orchestrator.classify_omni_only(
+        reference_signal=normalized_audio,
+        sample_rate_hz=payload.sample_rate_hz,
+        event_time_ns=payload.event_time_ns,
+    )
