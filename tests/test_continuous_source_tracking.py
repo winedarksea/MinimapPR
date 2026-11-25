@@ -81,21 +81,11 @@ MIN_TRACK_UPDATES_FOR_HOLD_CHECK = 2
 WILDLIFE_CATEGORY = "wildlife"
 CALLER_TRACK_MATCH_RADIUS_M = 5.0
 
-_P5_SOLVES_NEVER_REACH_TRACKER = (
-    "localization overhaul milestone 3 (P5): event-only localization_result solves are dropped by the stream "
-    "consumer (heartbeat only) and render solves reach the tracker only through reporting, which keeps one "
-    "detection per 30 s window; only each source's first covering render updates a track"
-)
-GATE_XFAIL_REASONS = {
-    "drone_fly_by": _P5_SOLVES_NEVER_REACH_TRACKER + " (measured: 1/24 solves, max gap 19.9 s)",
-    "hovering_drone": _P5_SOLVES_NEVER_REACH_TRACKER + " (measured: 1/19 solves, max gap 15.6 s)",
-    "crossing_drones": _P5_SOLVES_NEVER_REACH_TRACKER + " (measured: 1/24 + 1/23 solves, max gaps 19.3/18.9 s)",
-    "drone_with_birds_calling": _P5_SOLVES_NEVER_REACH_TRACKER + " (measured: drone 1/24 solves, max gap 19.7 s)",
-}
+GATE_SCENE_NAMES = ("drone_fly_by", "hovering_drone", "crossing_drones", "drone_with_birds_calling")
 
 
 class DroneUpdateGapGateViolation(AssertionError):
-    """Raised only by a gate verdict, so a strict xfail never absorbs a harness failure."""
+    """Raised only by a gate verdict, never by a harness failure."""
 
 
 class TrackingModeViolation(AssertionError):
@@ -122,17 +112,6 @@ def _assert_drone_update_gap_gate(scene: ContinuousSourceScene, record: SceneRun
     _raise_if(failures, DroneUpdateGapGateViolation, f"{scene.name} [{metrics.summary()}]")
 
 
-def _gate_params(reasons: dict[str, str]) -> list:
-    return [
-        pytest.param(
-            name,
-            marks=pytest.mark.xfail(strict=True, raises=DroneUpdateGapGateViolation, reason=reason),
-            id=name,
-        )
-        for name, reason in reasons.items()
-    ]
-
-
 def test_scene_cadence_sits_inside_the_gate_bound_premises() -> None:
     """Every scene's solve intervals clear B, and one skipped solve would not."""
     for name in SCENE_BUILDERS:
@@ -145,7 +124,7 @@ def test_scene_cadence_sits_inside_the_gate_bound_premises() -> None:
         assert scene.timing.render_latency_seconds > scene.timing.largest_solve_interval_seconds
 
 
-@pytest.mark.parametrize("scene_name", _gate_params(GATE_XFAIL_REASONS))
+@pytest.mark.parametrize("scene_name", GATE_SCENE_NAMES)
 async def test_drone_update_gap_gate(tmp_path: Path, scene_name: str) -> None:
     scene = _build_scene(scene_name)
     record = await run_scene(tmp_path, scene)
@@ -153,7 +132,7 @@ async def test_drone_update_gap_gate(tmp_path: Path, scene_name: str) -> None:
 
 
 @pytest.mark.skipif(os.environ.get(LONG_SCENES_ENV) != "1", reason=f"long scenes are opt-in ({LONG_SCENES_ENV}=1)")
-@pytest.mark.parametrize("scene_name", _gate_params(dict.fromkeys(SCENE_BUILDERS, _P5_SOLVES_NEVER_REACH_TRACKER)))
+@pytest.mark.parametrize("scene_name", list(SCENE_BUILDERS))
 async def test_long_scene_drone_update_gap_gate(tmp_path: Path, scene_name: str) -> None:
     scene = _build_scene(scene_name, duration_seconds=LONG_SCENE_SECONDS)
     record = await run_scene(tmp_path, scene)
@@ -165,12 +144,6 @@ def _heading_error_deg(estimated: np.ndarray, truth: np.ndarray) -> float:
     return math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=TrackingModeViolation,
-    reason="localization overhaul milestone 3 (P5, then P4): each drone track gets one update per scene today, "
-    "so it never estimates a velocity",
-)
 @pytest.mark.parametrize("scene_name", ["drone_fly_by", "crossing_drones"])
 async def test_drone_tracks_use_continuous_motion(tmp_path: Path, scene_name: str) -> None:
     scene = _build_scene(scene_name)
@@ -196,12 +169,6 @@ async def test_drone_tracks_use_continuous_motion(tmp_path: Path, scene_name: st
     _raise_if(failures, TrackingModeViolation, scene_name)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=TrackingModeViolation,
-    reason="localization overhaul milestone 3 (P5 + P4): bird calls update their track only through the first "
-    "render today, and wildlife keeps the constant-velocity filter until P4 defaults it to stationary_hold",
-)
 async def test_birds_near_a_drone_use_stationary_hold(tmp_path: Path) -> None:
     scene = _build_scene("drone_with_birds_calling")
     record = await run_scene(tmp_path, scene)
@@ -271,12 +238,6 @@ async def test_duplicate_delivery_of_one_solve_gives_exactly_one_track_update(tm
     assert track.label == DRONE_LABEL
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=DeliveryContractViolation,
-    reason="localization overhaul milestone 3 (P5): the event localization_result never reaches the tracker "
-    "today; the covering render applies the position instead",
-)
 async def test_duplicate_delivery_applies_the_position_on_arrival_and_only_the_label_from_the_render(
     tmp_path: Path,
 ) -> None:
@@ -297,12 +258,6 @@ async def test_duplicate_delivery_applies_the_position_on_arrival_and_only_the_l
     _raise_if(failures, DeliveryContractViolation, "duplicate delivery")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=DeliveryContractViolation,
-    reason="localization overhaul milestone 3 (P5): later event solves never reach the tracker today, and the "
-    "late render applies its own older position (the track sits at the covered solve) instead of only the label",
-)
 async def test_late_classification_attaches_the_label_without_rewinding_the_track(tmp_path: Path) -> None:
     scene = _fly_by_scene()
     solves = scene.solves[:5]
@@ -334,13 +289,6 @@ async def test_late_classification_attaches_the_label_without_rewinding_the_trac
     _raise_if(failures, DeliveryContractViolation, "late classification")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=DeliveryContractViolation,
-    reason="localization overhaul milestone 3 (P5): tracks update after classification today, so products shed by "
-    "the full classification queue and the second caller's reporting-window suppression never reach the tracker "
-    "(measured: 12/16 shed, one track with one update)",
-)
 async def test_two_same_label_callers_keep_updating_under_classification_queue_pressure(tmp_path: Path) -> None:
     scene = two_same_label_callers_in_one_cluster(default_scene_timing(), reporter_ids=SCENE_REPORTER_IDS)
     record = await run_callers_under_classification_queue_pressure(tmp_path, scene)

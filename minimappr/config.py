@@ -25,6 +25,7 @@ from minimappr.core.entity_reporting_config import (
 # --- end Field Mode W3-entity ---
 from minimappr.core import localization_overhaul_config as overhaul_defaults
 from minimappr.core.localization_overhaul_config import localization_overhaul_setting_errors
+from minimappr.core.position_observation_config import DEFAULT_POSITION_OBSERVATION_SOLVE_LEDGER_MAX_ENTRIES
 
 if TYPE_CHECKING:
     from minimappr.core.effectors.registry import EffectorManagerConfig
@@ -1832,6 +1833,7 @@ class Settings:
     position_observation_unclassified_track_policy: str = (
         overhaul_defaults.DEFAULT_POSITION_OBSERVATION_UNCLASSIFIED_TRACK_POLICY
     )
+    position_observation_solve_ledger_max_entries: int = DEFAULT_POSITION_OBSERVATION_SOLVE_LEDGER_MAX_ENTRIES
     point_network_clip_classification_enabled: bool = (
         overhaul_defaults.DEFAULT_POINT_NETWORK_CLIP_CLASSIFICATION_ENABLED
     )
@@ -3479,6 +3481,10 @@ class Settings:
             position_observation_unclassified_track_policy=_env_str(
                 "MINIMAPPR_POSITION_OBSERVATION_UNCLASSIFIED_TRACK_POLICY",
                 overhaul_defaults.DEFAULT_POSITION_OBSERVATION_UNCLASSIFIED_TRACK_POLICY,
+            ),
+            position_observation_solve_ledger_max_entries=_env_int(
+                "MINIMAPPR_POSITION_OBSERVATION_SOLVE_LEDGER_MAX_ENTRIES",
+                DEFAULT_POSITION_OBSERVATION_SOLVE_LEDGER_MAX_ENTRIES,
             ),
             point_network_clip_classification_enabled=_env_bool(
                 "MINIMAPPR_POINT_NETWORK_CLIP_CLASSIFICATION_ENABLED",

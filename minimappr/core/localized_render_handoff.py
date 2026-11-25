@@ -20,7 +20,7 @@ packet time (``api/stream_consumer.py``), and a receipt-timed mono copy
 from __future__ import annotations
 
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -38,11 +38,16 @@ from minimappr.core.localized_handoff_geometry import (
 )
 from minimappr.core.localized_render_handoff_hooks import (
     SOLVE_ORIGIN_RUST_CLASSIFIER_RENDER,
+    SOLVE_ORIGIN_RUST_EVENT_LOCALIZATION,
     HandoffSolveGeometry,
     LocalizationSeamCollaborators,
 )
+from minimappr.core.localized_render_handoff_solve_features import (
+    replace_estimate_with_node_position,
+    rust_render_features,
+    validated_mono_render_audio,
+)
 from minimappr.core.localized_render_localization import (
-    LOCALIZATION_REJECTED_OUT_OF_RANGE_REASON,
     HandoffGatingOutcome,
     HandoffLocalizationEstimate,
     gate_handoff_localization,
@@ -53,10 +58,22 @@ from minimappr.models import NodeSpec
 if TYPE_CHECKING:
     from minimappr.core.fusion_node import FusionNode
 
-OMNI_RENDER_LOCALIZATION_METHOD = "rust_classifier_render_fallback"
 RUST_CLASSIFIER_RENDER_AUDIO_QUALITY_SOURCE = "rust_classifier_render"
 BIRDNET_OMNI_FALLBACK_RENDER_KIND = "birdnet_omni_fallback"
 CROSS_REPORTER_DUPLICATE_MERGED_REASON = "cross_reporter_duplicate_merged"
+
+
+@dataclass(slots=True)
+class _HandoffSolve:
+    """A render's (or event's) solve placed and gated, before any audio work."""
+
+    node: NodeSpec
+    registered_node: NodeSpec
+    geometry: HandoffSolveGeometry
+    estimate: HandoffLocalizationEstimate
+    gating: HandoffGatingOutcome
+    reporting_modality: str
+    rust_extra_features: dict[str, Any]
 
 
 class LocalizedRenderHandoff:
@@ -70,8 +87,59 @@ class LocalizedRenderHandoff:
         if host._stopping:
             raise ValueError("Fusion node is stopping")
 
+        normalized_audio = validated_mono_render_audio(payload)
+        solve = await self._localize_solve(payload)
+        if payload.fallback_reason == SOLVE_CONTRACT_VIOLATION_FALLBACK_REASON:
+            # The loader already degraded the broken solve; count the lost localization.
+            host._record_silent_drop(
+                stage="localization", reason=SOLVE_CONTRACT_VIOLATION_FALLBACK_REASON, source_node_id=solve.node.id
+            )
+        if solve.reporting_modality == "omni":
+            replace_estimate_with_node_position(host, solve.estimate, solve.registered_node)
+        localized_product = await self._localized_product_for_solve(payload, solve, normalized_audio)
+        host._record_degraded_audio_quality_metrics(
+            candidate=localized_product.candidate,
+            source_window_type=localized_product.classification_audio_quality_source,
+            audio_quality=localized_product.classification_audio_quality,
+        )
+        await self.collaborators.position_observation_sink.observe_localized_solve(
+            localized_product=localized_product,
+            reporting_modality=solve.reporting_modality,
+            solve_origin=SOLVE_ORIGIN_RUST_CLASSIFIER_RENDER,
+        )
+        await self._classify_and_report(
+            payload,
+            node=solve.node,
+            localized_product=localized_product,
+            reporting_modality=solve.reporting_modality,
+            reference_sensor=solve.geometry.reference_sensor,
+            capability_tier=solve.gating.capability_tier,
+            normalized_audio=normalized_audio,
+            rust_extra_features=solve.rust_extra_features,
+        )
+
+    async def observe_event_solve(self, payload: LocalizedClassifierRenderRequest) -> None:
+        """An event-only solve (no render): position only, never classified or reported.
+
+        Same geometry, solution and gates as a render, so the tracker sees the
+        position the solve's later render would report. A solve the gates turn
+        omni is not observed: its position would be the node's.
+        """
+        if self._host._stopping:
+            return
+        solve = await self._localize_solve(payload)
+        if solve.reporting_modality != "localized":
+            return
+        localized_product = await self._localized_product_for_solve(payload, solve, payload.decoded_audio)
+        await self.collaborators.position_observation_sink.observe_localized_solve(
+            localized_product=localized_product,
+            reporting_modality=solve.reporting_modality,
+            solve_origin=SOLVE_ORIGIN_RUST_EVENT_LOCALIZATION,
+        )
+
+    async def _localize_solve(self, payload: LocalizedClassifierRenderRequest) -> "_HandoffSolve":
+        host = self._host
         server_received_ns = time.time_ns()
-        normalized_audio = _validated_mono_render_audio(payload)
         node = self._node_with_local_position(payload)
 
         # A render may retain the DSP localization payload for diagnostics even
@@ -83,11 +151,6 @@ class LocalizedRenderHandoff:
             reporting_modality = "omni"
         if reporting_modality == "omni" and node.position_m is None:
             raise ValueError("Omni classifier render requires node.position_m")
-        if payload.fallback_reason == SOLVE_CONTRACT_VIOLATION_FALLBACK_REASON:
-            # The loader already degraded the broken solve; count the lost localization.
-            host._record_silent_drop(
-                stage="localization", reason=SOLVE_CONTRACT_VIOLATION_FALLBACK_REASON, source_node_id=node.id
-            )
 
         registered_node, geometry = await self._register_node_and_resolve_geometry(
             payload,
@@ -112,54 +175,43 @@ class LocalizedRenderHandoff:
             reporting_modality=reporting_modality,
             source_node_id=node.id,
         )
-        reporting_modality = gating.reporting_modality
-
-        rust_extra_features = _rust_render_features(payload, gating, geometry)
-        if reporting_modality == "omni":
-            _replace_estimate_with_node_position(host, estimate, registered_node)
-        localization_branch = await self._localization_branch_with_bearing_fusion(
-            payload,
+        return _HandoffSolve(
             node=node,
+            registered_node=registered_node,
             geometry=geometry,
             estimate=estimate,
             gating=gating,
-            reporting_modality=reporting_modality,
-            normalized_audio=normalized_audio,
+            reporting_modality=gating.reporting_modality,
+            rust_extra_features=rust_render_features(payload, gating, geometry),
+        )
+
+    async def _localized_product_for_solve(
+        self, payload: LocalizedClassifierRenderRequest, solve: "_HandoffSolve", audio: np.ndarray
+    ) -> LocalizedCandidate:
+        localization_branch = await self._localization_branch_with_bearing_fusion(
+            payload,
+            node=solve.node,
+            geometry=solve.geometry,
+            estimate=solve.estimate,
+            gating=solve.gating,
+            reporting_modality=solve.reporting_modality,
+            normalized_audio=audio,
         )
         localized_product = self._build_localized_product(
             payload,
-            node=node,
-            geometry=geometry,
+            node=solve.node,
+            geometry=solve.geometry,
             localization_branch=localization_branch,
-            normalized_audio=normalized_audio,
-            rust_extra_features=rust_extra_features,
-        )
-        host._record_degraded_audio_quality_metrics(
-            candidate=localized_product.candidate,
-            source_window_type=localized_product.classification_audio_quality_source,
-            audio_quality=localized_product.classification_audio_quality,
+            normalized_audio=audio,
+            rust_extra_features=solve.rust_extra_features,
         )
         self.collaborators.provenance_recorder.record_handoff_provenance(
             payload=payload,
-            geometry=geometry,
+            geometry=solve.geometry,
             localized_product=localized_product,
-            reporting_modality=reporting_modality,
+            reporting_modality=solve.reporting_modality,
         )
-        await self.collaborators.position_observation_sink.observe_localized_solve(
-            localized_product=localized_product,
-            reporting_modality=reporting_modality,
-            solve_origin=SOLVE_ORIGIN_RUST_CLASSIFIER_RENDER,
-        )
-        await self._classify_and_report(
-            payload,
-            node=node,
-            localized_product=localized_product,
-            reporting_modality=reporting_modality,
-            reference_sensor=geometry.reference_sensor,
-            capability_tier=gating.capability_tier,
-            normalized_audio=normalized_audio,
-            rust_extra_features=rust_extra_features,
-        )
+        return localized_product
 
     def _node_with_local_position(self, payload: LocalizedClassifierRenderRequest) -> NodeSpec:
         metadata = dict(payload.node.metadata)
@@ -421,60 +473,3 @@ class LocalizedRenderHandoff:
             merged_into_solve_id=merge_target.solve_id,
         )
         return True
-
-
-def _validated_mono_render_audio(payload: LocalizedClassifierRenderRequest) -> np.ndarray:
-    normalized_audio = np.asarray(payload.decoded_audio, dtype=np.float32)
-    if normalized_audio.ndim != 1 or normalized_audio.size == 0:
-        raise ValueError("Localized render audio must be a non-empty mono signal")
-    if payload.sample_rate_hz <= 0:
-        raise ValueError("Localized render sample_rate_hz must be positive")
-    return normalized_audio
-
-
-def _rust_render_features(
-    payload: LocalizedClassifierRenderRequest,
-    gating: HandoffGatingOutcome,
-    geometry: HandoffSolveGeometry,
-) -> dict[str, Any]:
-    rust_extra_features: dict[str, Any] = {"rust_manifest_id": payload.manifest_id}
-    if payload.render_kind is not None:
-        rust_extra_features["rust_render_kind"] = payload.render_kind
-    if payload.render_start_ns is not None:
-        rust_extra_features["rust_render_start_ns"] = int(payload.render_start_ns)
-    if payload.render_end_ns is not None:
-        rust_extra_features["rust_render_end_ns"] = int(payload.render_end_ns)
-    if payload.fallback_reason is not None:
-        rust_extra_features["rust_fallback_reason"] = payload.fallback_reason
-    if geometry.rejected_reason is not None:
-        rust_extra_features["localization_rejected_reason"] = geometry.rejected_reason
-    elif gating.rejected_out_of_range:
-        rust_extra_features["localization_rejected_reason"] = LOCALIZATION_REJECTED_OUT_OF_RANGE_REASON
-    elif gating.rejected_low_quality_reason is not None:
-        rust_extra_features["localization_rejected_reason"] = gating.rejected_low_quality_reason
-    return rust_extra_features
-
-
-def _replace_estimate_with_node_position(
-    host: "FusionNode",
-    estimate: HandoffLocalizationEstimate,
-    node: NodeSpec,
-) -> None:
-    """Position an omni detection at its source node; it cannot create a track.
-
-    ``node`` is the registry spec, so an operator position override wins over
-    the packet's reported position. A render that arrived "localized" can be
-    degraded to omni by the gates, so it needs the same node-position guard as
-    a render that arrived omni. The raw sidecar localization survives only as
-    provenance in the features.
-    """
-    if node.position_m is None:
-        raise ValueError("Omni classifier render requires node.position_m")
-    estimate.position_m = tuple(float(value) for value in node.position_m)
-    estimate.confidence = host.fusion_config.fallback_localization_confidence
-    estimate.gdop = float("inf")
-    estimate.position_covariance_m2 = None
-    estimate.range_observability = None
-    estimate.residual_rms_seconds = None
-    estimate.range_projection_mode = None
-    estimate.method = OMNI_RENDER_LOCALIZATION_METHOD

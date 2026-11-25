@@ -439,6 +439,10 @@ class IngestTransport(Protocol):
     async def deliver_localized_render(self, payload: "LocalizedClassifierRenderRequest") -> None:
         ...
 
+    async def deliver_event_localization(self, payload: "LocalizedClassifierRenderRequest") -> None:
+        """An event-only solve (no render, no audio): feeds the tracker only."""
+        ...
+
     async def deliver_node_heartbeat(
         self,
         node: NodeSpec,

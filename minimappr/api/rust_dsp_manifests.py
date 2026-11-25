@@ -172,7 +172,7 @@ def load_localized_render_manifest_bundle(
         # None of the broken solve's numbers are trusted; omni at the node.
         localization_payload = None
         fallback_reason = solve_contract_violation
-    node, event_time_ns, source_type, time_quality, environment = _load_source_context_from_channel_manifest(
+    node, event_time_ns, source_type, time_quality, environment = load_source_context_from_channel_manifest(
         node_context_payload,
         solve_window_center_time_ns=(
             localization_solve.provenance.window_center_time_ns if localization_solve is not None else None
@@ -193,38 +193,7 @@ def load_localized_render_manifest_bundle(
     audio_quality = _load_audio_coverage_stats(coverage_payload)
 
     if isinstance(localization_payload, dict) and isinstance(localization_payload.get("position_m"), list):
-        localization_position_m = tuple(float(value) for value in localization_payload["position_m"])
-        localization_confidence = float(localization_payload.get("confidence") or 0.0)
-        localization_position_covariance_m2 = coerce_covariance_matrix(
-            localization_payload.get("position_covariance_m2")
-        )
-        localization_range_observability = optional_bounded_float(
-            localization_payload.get("range_observability")
-        )
-        localization_residual_rms_seconds = optional_nonnegative_float(
-            localization_payload.get("residual_rms_seconds")
-        )
-        localization_range_projection_mode = optional_nonempty_string(
-            localization_payload.get("range_projection_mode")
-        )
-        localization_method = str(
-            localization_payload.get("resolved_algorithm")
-            or localization_payload.get("attempted_algorithm")
-            or "rust_dsp_worker"
-        )
-        localization_pair_tdoas = coerce_pair_tdoas(localization_payload.get("pair_tdoas"))
-        localization_steering_direction = coerce_vec3(
-            localization_payload.get("steering_direction")
-        )
-        localization_sound_speed_mps = optional_nonnegative_float(
-            localization_payload.get("sound_speed_mps")
-        )
-        localization_dominant_frequency_hz = optional_nonnegative_float(
-            localization_payload.get("dominant_frequency_hz")
-        )
-        localization_received_level_dbfs = optional_finite_float(
-            localization_payload.get("received_level_dbfs")
-        )
+        localization_fields = sidecar_localization_request_fields(localization_payload)
         # The classifier render's fallback contract overrides the retained solver
         # diagnostics. An omni PCM render must be reported at its node, not at a
         # speculative localization vector carried alongside it.
@@ -236,18 +205,11 @@ def load_localized_render_manifest_bundle(
     else:
         if node.position_m is None:
             raise ValueError("Standalone classifier render manifest requires node.position_m")
-        localization_position_m = tuple(float(value) for value in node.position_m)
-        localization_confidence = 0.0
-        localization_position_covariance_m2 = None
-        localization_range_observability = None
-        localization_residual_rms_seconds = None
-        localization_range_projection_mode = None
-        localization_pair_tdoas = None
-        localization_steering_direction = None
-        localization_sound_speed_mps = None
-        localization_dominant_frequency_hz = None
-        localization_received_level_dbfs = None
-        localization_method = "rust_classifier_render_fallback"
+        localization_fields = {
+            "localization_position_m": tuple(float(value) for value in node.position_m),
+            "localization_confidence": 0.0,
+            "localization_method": "rust_classifier_render_fallback",
+        }
         reporting_modality = "omni"
 
     cursor_updates = _resolve_cursor_updates(source_handles_payload, journal_streams_dir)
@@ -258,18 +220,7 @@ def load_localized_render_manifest_bundle(
             event_time_ns=event_time_ns,
             sample_rate_hz=int(classifier_render_payload.get("sample_rate_hz") or 0),
             decoded_audio=decoded_audio,
-            localization_position_m=localization_position_m,
-            localization_confidence=localization_confidence,
-            localization_position_covariance_m2=localization_position_covariance_m2,
-            localization_range_observability=localization_range_observability,
-            localization_residual_rms_seconds=localization_residual_rms_seconds,
-            localization_range_projection_mode=localization_range_projection_mode,
-            localization_pair_tdoas=localization_pair_tdoas,
-            localization_steering_direction=localization_steering_direction,
-            localization_sound_speed_mps=localization_sound_speed_mps,
-            localization_dominant_frequency_hz=localization_dominant_frequency_hz,
-            localization_received_level_dbfs=localization_received_level_dbfs,
-            localization_method=localization_method,
+            **localization_fields,
             source_type=source_type,
             reporting_modality=reporting_modality,
             time_quality=time_quality,
@@ -286,6 +237,37 @@ def load_localized_render_manifest_bundle(
         ),
         cursor_updates=cursor_updates,
     )
+
+
+def sidecar_localization_request_fields(localization_payload: dict[str, Any]) -> dict[str, Any]:
+    """``LocalizedClassifierRenderRequest`` localization keywords from a manifest's
+    ``localization`` block (which must carry ``position_m``)."""
+    return {
+        "localization_position_m": tuple(float(value) for value in localization_payload["position_m"]),
+        "localization_confidence": float(localization_payload.get("confidence") or 0.0),
+        "localization_position_covariance_m2": coerce_covariance_matrix(
+            localization_payload.get("position_covariance_m2")
+        ),
+        "localization_range_observability": optional_bounded_float(localization_payload.get("range_observability")),
+        "localization_residual_rms_seconds": optional_nonnegative_float(
+            localization_payload.get("residual_rms_seconds")
+        ),
+        "localization_range_projection_mode": optional_nonempty_string(
+            localization_payload.get("range_projection_mode")
+        ),
+        "localization_method": str(
+            localization_payload.get("resolved_algorithm")
+            or localization_payload.get("attempted_algorithm")
+            or "rust_dsp_worker"
+        ),
+        "localization_pair_tdoas": coerce_pair_tdoas(localization_payload.get("pair_tdoas")),
+        "localization_steering_direction": coerce_vec3(localization_payload.get("steering_direction")),
+        "localization_sound_speed_mps": optional_nonnegative_float(localization_payload.get("sound_speed_mps")),
+        "localization_dominant_frequency_hz": optional_nonnegative_float(
+            localization_payload.get("dominant_frequency_hz")
+        ),
+        "localization_received_level_dbfs": optional_finite_float(localization_payload.get("received_level_dbfs")),
+    }
 
 
 def _load_audio_coverage_stats(payload: Any) -> AudioCoverageStats | None:
@@ -369,7 +351,7 @@ def _load_authoritative_classification(
     )
 
 
-def _load_source_context_from_channel_manifest(
+def load_source_context_from_channel_manifest(
     node_context: dict[str, Any],
     *,
     solve_window_center_time_ns: int | None,

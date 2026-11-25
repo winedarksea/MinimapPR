@@ -12,6 +12,10 @@ from __future__ import annotations
 import json
 import math
 
+from minimappr.core.position_observation_config import (
+    POSITION_OBSERVATION_P5_SETTING_KEYS,
+    position_observation_setting_errors,
+)
 from minimappr.core.tracking_mode_config import (  # noqa: F401  (re-exported vocabulary)
     TRACKING_MODE_DEFAULT_CATEGORY_KEY,
     default_tracking_mode_by_category,
@@ -105,6 +109,7 @@ PYTHON_ONLY_LOCALIZATION_OVERHAUL_SETTING_KEYS: tuple[str, ...] = (
     "tracking_mode_by_category",
     "position_observation_queue_max_items",
     "position_observation_unclassified_track_policy",
+    *POSITION_OBSERVATION_P5_SETTING_KEYS,
     "point_network_clip_classification_enabled",
 )
 LOCALIZATION_OVERHAUL_SETTING_KEYS: tuple[str, ...] = (
@@ -180,6 +185,7 @@ def localization_overhaul_setting_errors(settings) -> list[str]:
             "position_observation_unclassified_track_policy must be one of "
             f"{sorted(POSITION_OBSERVATION_UNCLASSIFIED_TRACK_POLICIES)}"
         )
+    errors.extend(position_observation_setting_errors(settings))
     return errors
 
 
