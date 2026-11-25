@@ -386,7 +386,7 @@ class PositionObservationPipeline:
         entry = self._ledger.get(solve_id) if solve_id is not None else None
         if not isinstance(tracker, TrackManagerPositionObservationMethods):
             return await tracker.update(**classified_update_kwargs)
-        abstention = classification_is_abstention(classified_update_kwargs.get("label_category"))
+        abstention = classification_is_abstention(classified_update_kwargs)
         if entry is None:
             if solve_id is not None and solve_id in self._evicted_solve_tracks:
                 return await self._classify_evicted_solve(tracker, solve_id, classified_update_kwargs, abstention)

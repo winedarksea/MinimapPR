@@ -269,6 +269,17 @@ async def test_abstention_on_a_joined_hidden_track_keeps_it_hidden() -> None:
     assert await tracker.snapshot() == []
 
 
+async def test_species_label_without_a_taxonomy_category_is_not_an_abstention() -> None:
+    """onset_srp scenes: "Wood Thrush" files under category 'unknown' but still names a source."""
+    tracker, metrics = TrackManager(Settings()), FusionMetrics()
+    pipeline = _pipeline(tracker, metrics)
+    await _observe_python(pipeline, "c-thrush", (8.0, 10.0, 3.0))
+    kwargs = _classified_kwargs((8.0, 10.0, 3.0), label="Wood Thrush", label_category="unknown")
+    track = await pipeline.track_for_classified_solve(solve_id="c-thrush", classified_update_kwargs=kwargs)
+    assert [visible.id for visible in await tracker.snapshot()] == [track.id]
+    assert track.label == "Wood Thrush"
+
+
 async def test_abstention_never_overwrites_a_real_label() -> None:
     tracker, metrics = TrackManager(Settings()), FusionMetrics()
     pipeline = _pipeline(tracker, metrics)

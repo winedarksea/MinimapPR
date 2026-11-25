@@ -106,8 +106,10 @@ zone or reporting-policy suppression. Both ingest paths hand every solve to
   has tracking mode `none` ends an unclassified provisional track but never a labelled one. This
   matters only with `association_category_gate_enabled` off, where it used to delete an
   established track.
-- **Abstentions say nothing.** A classification without an informative category (a classifier
-  abstention, an `unsettled` onset attribution) never labels, reveals or re-labels a track. It
+- **Abstentions say nothing.** A classification with an `unknown` label or zero confidence (a
+  classifier abstention, an `unsettled` onset attribution) never labels, reveals or re-labels a
+  track. It is judged on the label, not the category: a real species label that the taxonomy
+  files under `unknown` still names a source. It
   retracts a hidden track that only its own fix started; otherwise it refreshes recency only.
 - **Classifications that reporting drops still reach the tracker.** A `suppress` decision, a
   non-entity `enrich_existing`, or a cross-reporter duplicate merge still labels the solve's

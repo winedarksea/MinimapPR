@@ -22,7 +22,7 @@ because a solve reaches the tracker in two steps:
    the track is gone, does the label-aware ``update`` run instead, so the fix
    still reaches a track of the right source.
 
-An abstention (a classification with no informative category) never labels,
+An abstention (an ``unknown`` label or zero confidence) never labels,
 reveals or re-labels a track: the pipeline retracts a hidden track only this
 solve's fix started, otherwise ``refresh_observed_track_recency`` refreshes
 recency only.
@@ -75,10 +75,13 @@ def _informative_label_category(value: str | None) -> str | None:
     return None if not normalised or normalised == UNCLASSIFIED_TRACK_CATEGORY else normalised
 
 
-def classification_is_abstention(label_category: str | None) -> bool:
-    """No informative category (classifier abstention, unsettled onset attribution):
-    the classification says nothing about which source the fix is."""
-    return _informative_label_category(label_category) is None
+def classification_is_abstention(classified_update_kwargs: dict[str, Any]) -> bool:
+    """The classifier named nothing (an ``unknown`` label or zero confidence: a
+    classifier abstention, an unsettled onset attribution), so the classification
+    says nothing about which source the fix is. Judged on the label, not the
+    category: a real species label the taxonomy cannot file still names a source."""
+    label = str(classified_update_kwargs.get("label") or "").strip().lower()
+    return label in ("", UNCLASSIFIED_TRACK_LABEL) or float(classified_update_kwargs.get("confidence", 0.0)) <= 0.0
 
 
 class TrackManagerPositionObservationMethods:
