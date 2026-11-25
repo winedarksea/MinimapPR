@@ -69,6 +69,8 @@ class _SolveLedgerEntry:
     observation: PositionObservation
     state: SolveLedgerState = SolveLedgerState.QUEUED
     track_id: str | None = None
+    # This solve's fix started ``track_id`` (a provisional, hidden track).
+    started_track: bool = False
     # Serialises the drain and this solve's classifications (event + covering render).
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -179,6 +181,7 @@ class PositionObservationPipeline:
             return
         entry.state = SolveLedgerState.APPLIED
         entry.track_id = outcome.track_id
+        entry.started_track = outcome.started_track
         metrics.position_observations_applied += 1
 
     def _may_start_track(self, observation: PositionObservation) -> bool:
@@ -193,6 +196,25 @@ class PositionObservationPipeline:
         """Whether this solve's position is (or is about to be) on a track."""
         entry = self._ledger.get(solve_id) if solve_id is not None else None
         return entry is not None and entry.state in _POSITION_REACHED_TRACKER_STATES
+
+    async def retract_provisional_track_started_by(self, solve_id: str | None) -> None:
+        """The solve's classification found nothing trackable (no label, a
+        sub-display result no belief can lift, a zone-suppressed label): end
+        the hidden track its fix started, if no other fix has joined it since."""
+        entry = self._ledger.get(solve_id) if solve_id is not None else None
+        tracker = self._tracker_provider()
+        if entry is None or not isinstance(tracker, TrackManagerPositionObservationMethods):
+            return
+        async with entry.lock:
+            if entry.state is SolveLedgerState.QUEUED:
+                if entry in self._queue:
+                    self._queue.remove(entry)
+                await self._apply_queued_entry(entry)
+            if entry.state is not SolveLedgerState.APPLIED or not entry.started_track:
+                return
+            if await tracker.retract_untouched_provisional_track(entry.track_id):
+                self._metrics_provider().position_observation_provisional_tracks_retracted += 1
+            entry.started_track = False
 
     async def track_for_classified_solve(
         self,
@@ -227,6 +249,7 @@ class PositionObservationPipeline:
             else:
                 track = await tracker.update_with_classification(**classified_update_kwargs)
                 metrics.position_observation_classified_updates += 1
+            entry.started_track = False
             if track is not None:
                 # Any later classification of this solve (a covering render) attaches only its label.
                 entry.state = SolveLedgerState.APPLIED

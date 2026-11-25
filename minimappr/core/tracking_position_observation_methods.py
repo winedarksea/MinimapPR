@@ -19,6 +19,11 @@ because a solve reaches the tracker in two steps:
    misassociation), or the track is gone, does the label-aware ``update`` run
    instead, so the fix still reaches a track of the right category.
 
+A classification that finds nothing trackable (no label, a sub-display result
+no belief can lift, a zone-suppressed label) retracts a hidden track that only its own
+fix started (``retract_untouched_provisional_track``), so an unconfirmed fix
+cannot linger and capture a later source.
+
 Hidden-unclassified tracks are left out of ``snapshot`` and reported by
 ``is_track_hidden``, so they never reach storage, the live feed, federation or
 rules until a classification reveals them.
@@ -239,6 +244,19 @@ class TrackManagerPositionObservationMethods:
             if attachable:
                 return self._apply_classification_to_track(track, classified_update_kwargs)
         return await self.update_with_classification(**classified_update_kwargs)
+
+    async def retract_untouched_provisional_track(self, track_id: str | None) -> bool:
+        """End a hidden-unclassified track that holds a single fix; False if none."""
+        async with self._lock:
+            track = self._tracks.get(track_id) if track_id is not None else None
+            if track is None or not self._is_unclassified_hidden(track_id) or track.update_count != 1:
+                return False
+            self._tracks.pop(track_id, None)
+            self._filter.remove_track(track_id)
+            self._fingerprints.pop(track_id, None)
+            self._field_mode.forget(track_id)
+            self._unclassified_track_ids.discard(track_id)
+            return True
 
     async def update_with_classification(self, **classified_update_kwargs: Any) -> TrackState | None:
         """The label-aware ``update``; whichever track it lands on is classified now."""

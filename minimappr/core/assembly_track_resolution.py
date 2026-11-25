@@ -89,11 +89,14 @@ async def resolve_detection_track(
     field_mode = getattr(tracker, "field_mode", None)
     below_display = detection_is_below_display_threshold(classification_features)
     resolution = TrackResolution(track=None, below_display_threshold=below_display)
-    if suppressed_by_zone:
-        return resolution
     belief_applies = field_mode is not None and field_mode.belief_applies(label_category)
-    if below_display and not belief_applies:
-        # Nothing could ever lift this track over the display threshold.
+    # Nothing could ever lift a track over the display threshold without a belief.
+    if suppressed_by_zone or (below_display and not belief_applies):
+        if position_observations is not None:
+            # The classification found nothing to track here, so a provisional
+            # track that only this solve's fix started must not linger and
+            # capture a later source.
+            await position_observations.retract_provisional_track_started_by(solve_id)
         return resolution
 
     species_evidence = None

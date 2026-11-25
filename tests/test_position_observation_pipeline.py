@@ -296,6 +296,26 @@ async def test_classification_reveals_the_provisional_track_in_place_without_mov
     assert await tracker.snapshot() == [classified]
 
 
+async def test_classification_that_finds_nothing_retracts_only_a_lone_provisional_track() -> None:
+    tracker, metrics = TrackManager(Settings()), FusionMetrics()
+    pipeline = _pipeline(tracker, metrics)
+    await _observe(pipeline, _localized_product(candidate_id="evt-noise", position_m=(5.0, 5.0, 1.0)), SOLVE_ORIGIN_PYTHON_INGEST)
+    await _observe(pipeline, _localized_product(candidate_id="evt-a", position_m=(60.0, 0.0, 1.0)), SOLVE_ORIGIN_PYTHON_INGEST)
+    await _observe(
+        pipeline,
+        _localized_product(candidate_id="evt-a2", position_m=(60.5, 0.0, 1.0), event_time_ns=T0_NS + 500_000_000),
+        SOLVE_ORIGIN_PYTHON_INGEST,
+    )
+    await pipeline.drain()
+
+    await pipeline.retract_provisional_track_started_by("evt-noise")
+    await pipeline.retract_provisional_track_started_by("evt-a")  # another fix joined it: kept
+
+    [kept] = await tracker.snapshot(include_hidden=True)
+    assert kept.update_count == 2
+    assert metrics.position_observation_provisional_tracks_retracted == 1
+
+
 async def test_non_event_triggered_solve_cannot_start_a_track() -> None:
     tracker, metrics = TrackManager(Settings()), FusionMetrics()
     pipeline = _pipeline(tracker, metrics)

@@ -268,6 +268,7 @@ class FusionMetrics:
     position_observations_apply_failed: int = 0
     position_observation_labels_attached: int = 0
     position_observation_classified_updates: int = 0
+    position_observation_provisional_tracks_retracted: int = 0
     # --- Field Mode W2-onset-srp ---
     onset_clustering_window_count: int = 0
     onset_clustering_accepted_cluster_count: int = 0
@@ -1280,6 +1281,11 @@ class FusionNode:
                         event_time_ns=product.candidate.event_time_ns,
                         source_node_id=product.candidate.source_node_id,
                     )
+                    if (position_observations := self._position_observations()) is not None:
+                        # P5: the classifier found nothing, so the solve's lone provisional track goes.
+                        await position_observations.retract_provisional_track_started_by(
+                            position_observation_solve_id(product)
+                        )
                 else:
                     for detection_product in detection_products:
                         if await self._enqueue_stage(self._rules_queue, detection_product):
