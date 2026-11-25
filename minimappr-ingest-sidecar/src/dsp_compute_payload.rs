@@ -40,6 +40,12 @@ pub(crate) struct ComputePayload {
     pub(crate) classifier_render_end_ns: Option<u128>,
     /// Packet-derived centre of the solve window: the stored observation time.
     pub(crate) localization_window_center_time_ns: i128,
+    /// Length of the solve window (the event span: node-local window, or wider
+    /// so a cross-node layout holds the whole TDOA range).
+    pub(crate) localization_window_seconds: f64,
+    /// Tracked noise-floor RMS of each layout node at trigger; the solver's
+    /// reference floor is stated relative to it (`dsp_solver_reference_floor`).
+    pub(crate) node_noise_floor_rms: Arc<std::collections::BTreeMap<String, f32>>,
     /// Ordered sensors + positions snapshot taken at ingest; index = buffer channel.
     pub(crate) sensor_layout: Arc<SolveSensorLayout>,
     /// `solve_provenance.solve_id`. Fresh per payload, except a render that

@@ -129,7 +129,7 @@ pub(crate) fn localization_manifest_payload(
                 attempt_kind: payload.attempt_kind,
                 active_sensor_indices: &payload.active_channels,
                 window_center_time_ns: payload.localization_window_center_time_ns,
-                window_seconds: payload.config.window_seconds,
+                window_seconds: payload.localization_window_seconds,
             },
         )),
     }

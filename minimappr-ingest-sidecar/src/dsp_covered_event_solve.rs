@@ -25,6 +25,8 @@ struct RecentEventTriggerSolve {
     solve_id: String,
     attempt_kind: SolveAttemptKind,
     window_center_time_ns: i128,
+    window_seconds: f64,
+    node_noise_floor_rms: Arc<std::collections::BTreeMap<String, f32>>,
     channel_states: Vec<LocalizationChannelState>,
     active_channels: Vec<usize>,
     sensor_layout: Arc<SolveSensorLayout>,
@@ -57,6 +59,8 @@ fn remembered_solve_of(payload: &ComputePayload) -> RecentEventTriggerSolve {
         solve_id: payload.solve_id.clone(),
         attempt_kind: payload.attempt_kind,
         window_center_time_ns: payload.localization_window_center_time_ns,
+        window_seconds: payload.localization_window_seconds,
+        node_noise_floor_rms: payload.node_noise_floor_rms.clone(),
         channel_states: payload.channel_states.clone(),
         active_channels: payload.active_channels.clone(),
         sensor_layout: payload.sensor_layout.clone(),
@@ -107,7 +111,7 @@ impl RecentEventTriggerSolves {
         let mut channel_states = localization_channel_states_centered(
             layout_buffers,
             event.window_center_time_ns,
-            payload.config.window_seconds,
+            event.window_seconds,
         );
         payload
             .sensor_layout
@@ -121,6 +125,8 @@ impl RecentEventTriggerSolves {
                 .all(|channel| active_channels.contains(channel));
         payload.attempt_kind = event.attempt_kind;
         payload.localization_window_center_time_ns = event.window_center_time_ns;
+        payload.localization_window_seconds = event.window_seconds;
+        payload.node_noise_floor_rms = event.node_noise_floor_rms.clone();
         payload.run_srp = true;
         if late_member_now_covers {
             // The render's own fresh solve_id and current layout stand.

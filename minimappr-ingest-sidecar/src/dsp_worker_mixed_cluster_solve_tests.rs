@@ -20,6 +20,10 @@ const ARRIVAL_ORDER_LAG_TOLERANCE_SECONDS: f64 = 0.25 / FIXTURE_SAMPLE_RATE_HZ a
 const AUTOMATIC_CLUSTER_BUFFER_KEY: &str = "cluster::auto-gps::audio_main";
 const EXPLICIT_CLUSTER_ID: &str = "e1-three-node";
 const EXPLICIT_CLUSTER_BUFFER_KEY: &str = "cluster::e1-three-node::audio_main";
+/// Node b's offset in the parked-geometry tests (also after the 1 m move):
+/// inside half a node-local window of lag, so the event span stays the
+/// node-local window and one late packet still releases the parked solve.
+const PARKED_GEOMETRY_TEST_BASELINE_M: f64 = 4.0;
 
 /// Runs one planar + point session in the given arrival order and returns the
 /// lags of the last six-sensor solve.
@@ -319,11 +323,17 @@ async fn deliver_late_frame(
 async fn geometry_push_while_a_solve_is_parked_applies_only_to_later_solves() {
     const SITE_FRAME_ID: &str = "e1-site-frame";
     const GEOMETRY_PUSH_REVISION: u64 = 7;
-    const OVERRIDE_SHIFT_EAST_M: f64 = 5.0;
+    const OVERRIDE_SHIFT_EAST_M: f64 = 1.0;
     let tetra_a = FixtureNode::tetra("tetra-a", [0.0, 0.0, 0.0]);
-    let tetra_b = FixtureNode::tetra("tetra-b", [20.0, 0.0, 0.0]);
-    let tetra_b_overridden =
-        FixtureNode::tetra("tetra-b", [20.0 + OVERRIDE_SHIFT_EAST_M, 0.0, 0.0]);
+    let tetra_b = FixtureNode::tetra("tetra-b", [PARKED_GEOMETRY_TEST_BASELINE_M, 0.0, 0.0]);
+    let tetra_b_overridden = FixtureNode::tetra(
+        "tetra-b",
+        [
+            PARKED_GEOMETRY_TEST_BASELINE_M + OVERRIDE_SHIFT_EAST_M,
+            0.0,
+            0.0,
+        ],
+    );
     let source = CoherentPointSource::new([10.0, 8.0, 2.0], FRAMES_PER_RUN);
     let mut harness = RaceHarness::new(race_config(true)).await;
 
@@ -398,10 +408,13 @@ async fn geometry_push_while_a_solve_is_parked_applies_only_to_later_solves() {
 
 #[tokio::test]
 async fn gps_move_while_a_solve_is_parked_applies_only_to_later_solves() {
-    const MOVE_EAST_M: f64 = 5.0;
+    const MOVE_EAST_M: f64 = 1.0;
     let tetra_a = FixtureNode::tetra("tetra-a", [0.0, 0.0, 0.0]);
-    let tetra_b = FixtureNode::tetra("tetra-b", [20.0, 0.0, 0.0]);
-    let tetra_b_moved = FixtureNode::tetra("tetra-b", [20.0 + MOVE_EAST_M, 0.0, 0.0]);
+    let tetra_b = FixtureNode::tetra("tetra-b", [PARKED_GEOMETRY_TEST_BASELINE_M, 0.0, 0.0]);
+    let tetra_b_moved = FixtureNode::tetra(
+        "tetra-b",
+        [PARKED_GEOMETRY_TEST_BASELINE_M + MOVE_EAST_M, 0.0, 0.0],
+    );
     let source = CoherentPointSource::new([10.0, 8.0, 2.0], FRAMES_PER_RUN);
     let mut harness = RaceHarness::new(race_config(true)).await;
 

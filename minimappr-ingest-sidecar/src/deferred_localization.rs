@@ -361,6 +361,8 @@ pub(crate) fn localization_only_template(
         classifier_render_start_ns: None,
         classifier_render_end_ns: None,
         localization_window_center_time_ns: payload.localization_window_center_time_ns,
+        localization_window_seconds: payload.localization_window_seconds,
+        node_noise_floor_rms: payload.node_noise_floor_rms.clone(),
         sensor_layout: payload.sensor_layout.clone(),
         solve_id: new_solve_id(),
         attempt_kind: trigger_attempt_kind,

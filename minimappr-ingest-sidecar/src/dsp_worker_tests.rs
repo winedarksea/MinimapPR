@@ -2264,11 +2264,11 @@ async fn purge_stale_streams_removes_idle_stream_entries() {
         .last_localization_ns_by_stream
         .insert(live_key.clone(), now_ns);
     worker
-        .last_trigger_ns_by_stream
-        .insert(old_key.clone(), two_hours_ago);
+        .localization_trigger
+        .commit_dispatched_trigger(&old_key, two_hours_ago);
     worker
-        .last_trigger_ns_by_stream
-        .insert(live_key.clone(), now_ns);
+        .localization_trigger
+        .commit_dispatched_trigger(&live_key, now_ns);
     worker
         .last_classifier_render_ns_by_stream
         .insert(old_key.clone(), two_hours_ago);
@@ -2291,6 +2291,14 @@ async fn purge_stale_streams_removes_idle_stream_entries() {
     assert!(worker
         .last_localization_ns_by_stream
         .contains_key(&live_key));
+    assert_eq!(
+        worker.localization_trigger.last_dispatched_trigger_ns(&old_key),
+        None
+    );
+    assert!(worker
+        .localization_trigger
+        .last_dispatched_trigger_ns(&live_key)
+        .is_some());
 
     let st = worker.state.read().await;
     assert_eq!(

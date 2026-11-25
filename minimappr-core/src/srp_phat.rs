@@ -40,6 +40,62 @@ impl HalfSpace {
     }
 }
 
+/// Reference-channel RMS that always counts as energy to localize; dead or
+/// muted channels fall below it.
+pub const DEFAULT_ABSOLUTE_REFERENCE_CHANNEL_RMS: f32 = 1.0e-4;
+const DECIBELS_PER_AMPLITUDE_DECADE: f32 = 20.0;
+
+/// `relative_db` above a tracked noise floor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NoiseFloorRelativeReference {
+    pub noise_floor_rms: f32,
+    pub relative_db: f32,
+}
+
+/// The solver's "is there any energy to localize" floor: the loudest active
+/// channel must clear the absolute level OR stand `relative_db` over the
+/// solving nodes' noise floor, whichever is lower.
+///
+/// Why both: the fixed level alone rejected faint far events the
+/// noise-floor-relative trigger admits on a quiet site (1e-4 sits above a
+/// quiet node's whole floor). The relative level alone would reject a loud
+/// sustained source (a hovering drone) once the floor tracker had risen to
+/// it, so the absolute level keeps every window it accepted before.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SolverReferenceChannelFloor {
+    pub absolute_rms: f32,
+    /// `None` for callers with no noise-floor tracker (offline tools, tests).
+    pub noise_floor_relative: Option<NoiseFloorRelativeReference>,
+}
+
+impl Default for SolverReferenceChannelFloor {
+    fn default() -> Self {
+        Self {
+            absolute_rms: DEFAULT_ABSOLUTE_REFERENCE_CHANNEL_RMS,
+            noise_floor_relative: None,
+        }
+    }
+}
+
+impl SolverReferenceChannelFloor {
+    pub fn minimum_reference_rms(self) -> f32 {
+        match self.noise_floor_relative {
+            None => self.absolute_rms,
+            Some(relative) => {
+                let relative_rms = relative.noise_floor_rms
+                    * 10f32.powf(relative.relative_db / DECIBELS_PER_AMPLITUDE_DECADE);
+                relative_rms.min(self.absolute_rms)
+            }
+        }
+    }
+
+    /// Written as "not above" so a NaN level, or digital silence against a
+    /// zero floor, is rejected rather than slipping through a `<` comparison.
+    pub fn rejects(self, reference_rms: f32) -> bool {
+        !(reference_rms > self.minimum_reference_rms())
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct SrpPhatConfig {
     pub localization_band_hz: [f32; 2],
@@ -47,7 +103,8 @@ pub struct SrpPhatConfig {
     pub search_padding_m: f32,
     pub interp_factor: usize,
     pub max_grid_points: usize,
-    pub min_channel_rms: f32,
+    /// Level the loudest active channel must reach before the solve runs.
+    pub reference_channel_floor: SolverReferenceChannelFloor,
     pub far_field_default_range_m: f32,
     pub far_field_max_range_m: f32,
     /// Amplitude/SNR-informed range prior (Phase 1c). When `Some`, overrides
@@ -70,7 +127,7 @@ impl Default for SrpPhatConfig {
             search_padding_m: 2.0,
             interp_factor: 4,
             max_grid_points: 60_000,
-            min_channel_rms: 1.0e-4,
+            reference_channel_floor: SolverReferenceChannelFloor::default(),
             far_field_default_range_m: 50.0,
             far_field_max_range_m: 250.0,
             range_prior_m: None,
@@ -181,7 +238,7 @@ pub fn estimate_tetrahedral_steering(
         })
         .unwrap_or(ordered_channels[0]);
     let reference_rms = window_rms(&windows[reference_channel]);
-    if reference_rms < config.min_channel_rms {
+    if config.reference_channel_floor.rejects(reference_rms) {
         return SrpPhatEvaluation {
             localization: degraded_localization("srp_phat_degraded_low_energy", sound_speed_mps),
             pair_tdoas,
@@ -1477,6 +1534,10 @@ fn normalize_or_zero(v: [f32; 3]) -> [f32; 3] {
 fn euclidean_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
     magnitude(sub(a, b))
 }
+
+#[cfg(test)]
+#[path = "srp_phat_reference_floor_tests.rs"]
+mod srp_phat_reference_floor_tests;
 
 #[cfg(test)]
 mod tests {

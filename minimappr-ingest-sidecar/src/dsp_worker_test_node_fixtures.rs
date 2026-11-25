@@ -225,7 +225,7 @@ impl CoherentPointSource {
             / f64::from(FIXTURE_SAMPLE_RATE_HZ)
     }
 
-    fn frame_channels(&self, node: &FixtureNode, frame_index: usize) -> Vec<Vec<f32>> {
+    pub(super) fn frame_channels(&self, node: &FixtureNode, frame_index: usize) -> Vec<Vec<f32>> {
         node.sensor_world_positions_m()
             .into_iter()
             .map(|(_, position_m)| {
@@ -265,6 +265,18 @@ pub(super) async fn fixture_frame_manifest(
     source: &CoherentPointSource,
     geometry: &FixtureClusterGeometry,
 ) -> DspManifest {
+    let channels = source.frame_channels(node, frame_index);
+    fixture_frame_manifest_from_channels(storage_root, node, frame_index, &channels, geometry).await
+}
+
+/// `fixture_frame_manifest` with caller-built channels (one per sensor).
+pub(super) async fn fixture_frame_manifest_from_channels(
+    storage_root: &std::path::Path,
+    node: &FixtureNode,
+    frame_index: usize,
+    channels: &[Vec<f32>],
+    geometry: &FixtureClusterGeometry,
+) -> DspManifest {
     let frame_index_u64 = frame_index as u64;
     let start_time_ns = FIXTURE_STREAM_START_NS + frame_index_u64 * FIXTURE_FRAME_DURATION_NS;
     let start_sample_index = frame_index_u64 * FIXTURE_FRAME_SAMPLES as u64;
@@ -282,7 +294,7 @@ pub(super) async fn fixture_frame_manifest(
                 "channels": node.channel_count(),
                 "encoding": "pcm16le",
                 "samples_per_channel": FIXTURE_FRAME_SAMPLES,
-                "samples_b64": encode_pcm16le_b64(&source.frame_channels(node, frame_index)),
+                "samples_b64": encode_pcm16le_b64(channels),
                 "sequence": frame_index_u64 + 1,
                 "time_quality": "gps_locked"
             }
