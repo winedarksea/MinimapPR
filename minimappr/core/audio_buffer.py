@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Optional
 
 import numpy as np
 
 from minimappr.core.capture_audio_buffer import ChunkedCaptureSessionBuffer
 from minimappr.core.synchronized_window_skips import SampleRateMismatch
+from minimappr.core.timeline_discipline import BufferTimelineDiscipline, TimelineDisciplinePolicy
 
 logger = logging.getLogger(__name__)
 
@@ -132,9 +133,21 @@ def _empty_buffer_state() -> _BufferState:
 
 
 class SensorStreamBuffer:
-    __slots__ = ("sample_rate_hz", "max_duration_seconds", "max_samples", "reanchor_count", "_state")
+    __slots__ = (
+        "sample_rate_hz",
+        "max_duration_seconds",
+        "max_samples",
+        "reanchor_count",
+        "_timeline_discipline",
+        "_state",
+    )
 
-    def __init__(self, sample_rate_hz: int, max_duration_seconds: float) -> None:
+    def __init__(
+        self,
+        sample_rate_hz: int,
+        max_duration_seconds: float,
+        timeline_discipline_policy: TimelineDisciplinePolicy | None = None,
+    ) -> None:
         self.sample_rate_hz = sample_rate_hz
         self.max_duration_seconds = max_duration_seconds
         self.max_samples = max(1, int(round(max_duration_seconds * sample_rate_hz)))
@@ -145,7 +158,23 @@ class SensorStreamBuffer:
         # 2026-05 silent-window-drop incident — see the corresponding counter on
         # MultiSensorBuffer for wipes, which survive buffer replacement.
         self.reanchor_count = 0
+        # Step re-anchor / drift slew (core/timeline_discipline.py): origin
+        # shifts that keep every buffered sample, unlike ``reanchor_count``.
+        # ``None`` policy = no discipline (timeline only moves on a full reset).
+        self._timeline_discipline = (
+            BufferTimelineDiscipline(timeline_discipline_policy, int(sample_rate_hz))
+            if timeline_discipline_policy is not None
+            else None
+        )
         self._state = _empty_buffer_state()
+
+    @property
+    def timeline_step_reanchor_count(self) -> int:
+        return 0 if self._timeline_discipline is None else self._timeline_discipline.step_reanchor_count
+
+    @property
+    def timeline_drift_slew_count(self) -> int:
+        return 0 if self._timeline_discipline is None else self._timeline_discipline.drift_slew_count
 
     @property
     def samples(self) -> np.ndarray:
@@ -180,7 +209,11 @@ class SensorStreamBuffer:
         end_sample_index: int | None = None,
         end_time_ns: int | None = None,
         _protected_from_ns: Optional[int] = None,
+        timeline_on_packet_time: bool = True,
     ) -> None:
+        """``timeline_on_packet_time=False`` (receipt-time placement): the
+        frame's residual is network jitter, not clock evidence, so the timeline
+        discipline is reset and skipped, as the sidecar does off packet time."""
         samples = np.asarray(samples, dtype=np.float32)
         if samples.ndim != 1:
             raise ValueError("SensorStreamBuffer expects mono samples")
@@ -195,6 +228,7 @@ class SensorStreamBuffer:
 
         state = self._state
         if state.start_time_ns is None:
+            self._restart_timeline_discipline(start_sample_index, start_time_ns, timeline_on_packet_time)
             self._state = self._pruned(
                 self._anchored_state(start_time_ns, samples, start_sample_index),
                 _protected_from_ns,
@@ -209,9 +243,11 @@ class SensorStreamBuffer:
         incoming_start_sample_index = (
             start_sample_index if explicit_sample_coverage else self._time_to_sample_index(state, start_time_ns)
         )
+        frame_timeline_residual_ns: int | None = None
         if explicit_sample_coverage:
             expected_start_time_ns = self._sample_index_to_time_ns(state, incoming_start_sample_index)
-            timestamp_correction_ns = abs(start_time_ns - expected_start_time_ns)
+            frame_timeline_residual_ns = start_time_ns - expected_start_time_ns
+            timestamp_correction_ns = abs(frame_timeline_residual_ns)
             reset_threshold_ns = int(round(self.max_duration_seconds * 1_000_000_000))
             if timestamp_correction_ns > reset_threshold_ns:
                 # NTP/GPS lock can correct wall time while sample indices stay contiguous.
@@ -227,6 +263,7 @@ class SensorStreamBuffer:
                         "reanchor_count": self.reanchor_count,
                     },
                 )
+                self._restart_timeline_discipline(start_sample_index, start_time_ns, timeline_on_packet_time)
                 self._state = self._pruned(
                     self._anchored_state(start_time_ns, samples, start_sample_index),
                     _protected_from_ns,
@@ -253,6 +290,7 @@ class SensorStreamBuffer:
                     "reanchor_count": self.reanchor_count,
                 },
             )
+            self._restart_timeline_discipline(start_sample_index, start_time_ns, timeline_on_packet_time)
             self._state = self._pruned(
                 self._anchored_state(start_time_ns, samples, start_sample_index),
                 _protected_from_ns,
@@ -291,16 +329,50 @@ class SensorStreamBuffer:
         merged[incoming_offset : incoming_offset + samples.size] = samples
         merged_coverage[incoming_offset : incoming_offset + samples.size] = True
 
+        timeline_origin_ns = state.timeline_origin_ns
+        if self._timeline_discipline is not None and not timeline_on_packet_time:
+            self._timeline_discipline.reset()
+        elif (
+            self._timeline_discipline is not None
+            and frame_timeline_residual_ns is not None
+            and timeline_origin_ns is not None
+        ):
+            timeline_origin_ns += self._timeline_discipline.origin_shift_ns(
+                start_sample_index=incoming_start_sample_index,
+                packet_timestamp_ns=start_time_ns,
+                frame_residual_ns=frame_timeline_residual_ns,
+            )
+        merged_state = _BufferState(
+            samples=merged,
+            coverage=merged_coverage,
+            buffer_start_sample_index=merged_start_sample_index,
+            timeline_origin_ns=timeline_origin_ns,
+            timeline_origin_sample_index=state.timeline_origin_sample_index,
+            start_time_ns=None,
+        )
         self._state = self._pruned(
-            _BufferState(
-                samples=merged,
-                coverage=merged_coverage,
-                buffer_start_sample_index=merged_start_sample_index,
-                timeline_origin_ns=state.timeline_origin_ns,
-                timeline_origin_sample_index=state.timeline_origin_sample_index,
-                start_time_ns=self._sample_index_to_time_ns(state, merged_start_sample_index),
-            ),
+            replace(merged_state, start_time_ns=self._sample_index_to_time_ns(merged_state, merged_start_sample_index)),
             _protected_from_ns,
+        )
+
+    def _restart_timeline_discipline(
+        self, anchor_sample_index: int | None, anchor_time_ns: int, timeline_on_packet_time: bool
+    ) -> None:
+        if self._timeline_discipline is not None:
+            self._timeline_discipline.restart(
+                anchor_sample_index=anchor_sample_index if timeline_on_packet_time else None,
+                anchor_time_ns=anchor_time_ns,
+            )
+
+    def shift_timeline_origin(self, shift_ns: int) -> None:
+        """Retime every buffered sample by ``shift_ns`` without touching the
+        audio (mirror of the Rust ``shift_timeline_origin``). No-op when empty."""
+        state = self._state
+        if state.timeline_origin_ns is None:
+            return
+        shifted = replace(state, timeline_origin_ns=state.timeline_origin_ns + int(shift_ns), start_time_ns=None)
+        self._state = replace(
+            shifted, start_time_ns=self._sample_index_to_time_ns(shifted, shifted.buffer_start_sample_index)
         )
 
     def _anchored_state(
@@ -519,8 +591,13 @@ class MultiSensorBuffer:
     # Maximum duration a pin can protect (mirrors Rust sidecar's hard cap).
     _PIN_MAX_DURATION_NS: int = 300_000_000_000  # 5 minutes
 
-    def __init__(self, max_duration_seconds: float) -> None:
+    def __init__(
+        self,
+        max_duration_seconds: float,
+        timeline_discipline_policy: TimelineDisciplinePolicy | None = None,
+    ) -> None:
         self.max_duration_seconds = max_duration_seconds
+        self.timeline_discipline_policy = timeline_discipline_policy
         self._buffers: dict[str, SensorStreamBuffer] = {}
         self._lock = asyncio.Lock()
         self._pins: dict[str, int] = {}  # session_id → start_ns
@@ -793,6 +870,7 @@ class MultiSensorBuffer:
         end_time_ns: int | None = None,
         time_quality: str | None = None,
         sequence: int | None = None,
+        timeline_on_packet_time: bool = True,
     ) -> None:
         # ``time_quality`` / ``sequence`` only reach capture sessions (per-frame
         # timing for calibration bundles); the live buffer does not use them.
@@ -838,6 +916,7 @@ class MultiSensorBuffer:
                     buffer = SensorStreamBuffer(
                         sample_rate_hz=sample_rate_hz,
                         max_duration_seconds=self.max_duration_seconds,
+                        timeline_discipline_policy=self.timeline_discipline_policy,
                     )
                     self._buffers[sensor_id] = buffer
                 # Pin horizon is captured once. Any pin acquired *during* the
@@ -867,6 +946,7 @@ class MultiSensorBuffer:
                 end_sample_index=end_sample_index,
                 end_time_ns=end_time_ns,
                 _protected_from_ns=protected_from_ns,
+                timeline_on_packet_time=timeline_on_packet_time,
             )
 
         for capture_buffer in capture_buffers:
@@ -930,6 +1010,8 @@ class MultiSensorBuffer:
                         "start_time_ns": buffer_state.start_time_ns,
                         "end_time_ns": end_time_ns,
                         "reanchor_count": int(buffer.reanchor_count),
+                        "timeline_step_reanchor_count": int(buffer.timeline_step_reanchor_count),
+                        "timeline_drift_slew_count": int(buffer.timeline_drift_slew_count),
                         "rate_mismatch_wipes": int(self._rate_mismatch_wipes.get(sensor_id, 0)),
                         "pin_protected_from_ns": pin_ns,
                     }

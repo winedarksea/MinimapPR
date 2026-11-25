@@ -162,8 +162,9 @@ def _clock_findings(
             Finding(
                 Code.TIMELINE_RESIDUAL_OVER_LIMIT,
                 f"packet time strays {max_abs_residual_seconds * 1e3:.1f} ms from the nominal timeline "
-                f"(limit {config.cross_node_max_timeline_residual_seconds * 1e3:.1f} ms): the sidecar drops this "
-                "node's cross-node pairs while it is over the limit",
+                f"(limit {config.cross_node_max_timeline_residual_seconds * 1e3:.1f} ms): the live timeline "
+                "discipline re-anchors steps and slews drift before that limit; with it off the sidecar drops "
+                "this node's cross-node pairs while it is over the limit",
                 node_id=node_id,
                 details={"max_abs_timeline_residual_seconds": max_abs_residual_seconds},
             )

@@ -21,6 +21,7 @@ from minimappr.calibration.bundle import CalibrationBundle
 from minimappr.classifiers.factory import create_classifier
 from minimappr.config import Settings
 from minimappr.core.audio_buffer import MultiSensorBuffer
+from minimappr.core.timeline_discipline import TimelineDisciplinePolicy
 from minimappr.core.fusion_node import FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.localization_dispatch import build_localizer_from_settings
@@ -102,7 +103,10 @@ async def build_fusion_for_bundle(
     fusion = FusionNode(
         settings=settings,
         registry=NodeRegistry(),
-        buffer=MultiSensorBuffer(max_duration_seconds=settings.max_sensor_buffer_seconds),
+        buffer=MultiSensorBuffer(
+            max_duration_seconds=settings.max_sensor_buffer_seconds,
+            timeline_discipline_policy=TimelineDisciplinePolicy.from_settings(settings),
+        ),
         localizer=build_localizer_from_settings(settings),
         classifier=classifier if classifier is not None else create_classifier(settings),
         tracker=TrackManager(settings),

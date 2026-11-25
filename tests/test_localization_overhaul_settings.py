@@ -30,6 +30,9 @@ def test_defaults_match_the_shared_contract() -> None:
     assert settings.localization_clock_unknown_uncertainty_seconds == pytest.approx(0.005)
     assert settings.localization_timestamp_step_threshold_seconds == pytest.approx(0.002)
     assert settings.localization_timestamp_step_recovery_holdoff_seconds == pytest.approx(30.0)
+    assert settings.localization_timeline_step_reanchor_enabled is True
+    assert settings.localization_timestamp_step_confirm_frames == 3
+    assert settings.localization_timeline_drift_slew_fraction == pytest.approx(0.5)
     assert settings.localization_trigger_noise_floor_relative_enabled is True
     # The sidecar trigger defaults to the Python-ingest relative trigger's bar.
     assert settings.localization_trigger_noise_floor_relative_db == settings.trigger_noise_floor_relative_snr_db
@@ -89,6 +92,9 @@ def test_from_env_parses_json_dict_and_scalars(monkeypatch) -> None:
         ({"localization_clock_class_uncertainty_seconds": {"gps_locked": -1.0}}, "gps_locked"),
         ({"localization_timestamp_step_recovery_holdoff_seconds": -1.0}, "holdoff"),
         ({"localization_timeline_residual_window_frames": 0}, "residual_window_frames"),
+        ({"localization_timestamp_step_confirm_frames": 0}, "step_confirm_frames"),
+        ({"localization_timeline_drift_slew_fraction": -0.1}, "drift_slew_fraction"),
+        ({"localization_timeline_drift_slew_fraction": 1.5}, "drift_slew_fraction"),
         ({"localization_timeline_residual_percentile": 101.0}, "residual_percentile"),
         ({"localization_timeline_residual_over_limit_clear_ratio": 0.0}, "clear_ratio"),
         ({"localization_timeline_residual_over_limit_clear_ratio": 1.5}, "clear_ratio"),
@@ -127,3 +133,32 @@ def test_rust_forwarded_keys_reach_the_sidecar_env() -> None:
 def test_partial_settings_double_falls_back_to_dataclass_defaults() -> None:
     environment = sidecar_localization_solve_environment(SimpleNamespace())
     assert environment["MINIMAPPR_LOCALIZATION_MIN_PAIR_BASELINE_M"] == str(Settings().localization_min_pair_baseline_m)
+
+
+TIMELINE_DISCIPLINE_SETTING_KEYS = (
+    "localization_timeline_step_reanchor_enabled",
+    "localization_timestamp_step_confirm_frames",
+    "localization_timeline_drift_slew_fraction",
+)
+
+
+@pytest.mark.parametrize("setting_key", TIMELINE_DISCIPLINE_SETTING_KEYS)
+def test_timeline_discipline_defaults_match_the_sidecar_clap_literals(setting_key: str) -> None:
+    import re
+    from pathlib import Path
+
+    rust_config = (
+        Path(__file__).resolve().parents[1] / "minimappr-ingest-sidecar" / "src" / "localization_solve_config.rs"
+    ).read_text()
+    match = re.search(
+        rf'env = "{sidecar_environment_variable_name(setting_key)}",\s*default_value_t = ([A-Za-z0-9.eE+-]+)',
+        rust_config,
+    )
+    assert match is not None, setting_key
+    python_default = getattr(Settings(), setting_key)
+    rust_literal = match.group(1)
+    if isinstance(python_default, bool):
+        assert rust_literal == str(python_default).lower()
+    else:
+        assert float(rust_literal) == pytest.approx(float(python_default))
+    assert setting_key in RUST_FORWARDED_LOCALIZATION_SETTING_KEYS

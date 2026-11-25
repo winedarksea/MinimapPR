@@ -73,6 +73,11 @@ def test_contract_doc_example_parses_field_for_field() -> None:
     assert point_timing.timeline_residual_ns == 15_000_000
     assert point_timing.last_timestamp_step_ns == -21_000_000
     assert point_timing.timestamp_step_count == 1
+    assert point_timing.timeline_drift_slew_count == 2
+    assert point_timing.timeline_step_reanchor_count == 0
+    # A manifest written before the timeline discipline reads as no corrections.
+    assert provenance.node_timing[0].timeline_step_reanchor_count == 0
+    assert provenance.node_timing[0].timeline_drift_slew_count == 0
     assert provenance.node_timing[0].last_timestamp_step_ns is None
     assert provenance.window_center_time_ns == 1764000000016000000
     assert provenance.window_seconds == 0.032

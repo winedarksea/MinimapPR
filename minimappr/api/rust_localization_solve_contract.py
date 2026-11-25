@@ -141,6 +141,10 @@ class NodeTimingEvidence:
     timeline_residual_ns: int | None
     last_timestamp_step_ns: int | None
     timestamp_step_count: int
+    # Buffer timeline corrections (minimappr-core timeline_discipline.rs);
+    # absent from manifests written before them, read as 0.
+    timeline_step_reanchor_count: int = 0
+    timeline_drift_slew_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,6 +368,9 @@ def _parse_node_timing(payload: Any, context: str) -> NodeTimingEvidence:
         timeline_residual_ns=_optional_int(mapping, "timeline_residual_ns", context, require_key=True),
         last_timestamp_step_ns=_optional_int(mapping, "last_timestamp_step_ns", context, require_key=True),
         timestamp_step_count=_require_int(mapping, "timestamp_step_count", context),
+        timeline_step_reanchor_count=_optional_int(mapping, "timeline_step_reanchor_count", context, require_key=False)
+        or 0,
+        timeline_drift_slew_count=_optional_int(mapping, "timeline_drift_slew_count", context, require_key=False) or 0,
     )
 
 
