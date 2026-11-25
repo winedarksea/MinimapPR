@@ -143,7 +143,9 @@ def test_kilometre_point_network_solves_with_every_cross_node_pair(point_network
     reason=(
         "open after loc/km-range: the 1.5 km point network's cross-node pairs are exact and the fix is right "
         "horizontally (<1 m), but the near-coplanar layout (25 m of relief over 1.5 km) solves 74 m low in z "
-        "with a stated z std of 0.4 m (Mahalanobis^2 ~3e4), same as the TODO 'Covariance calibration' coplanar gap; "
+        "with a stated z std of 0.4 m (Mahalanobis^2 ~3e4). Its pair lags are 0.25 % off against the sidecar's "
+        "fixed 343.2 m/s (the scene's 20 C air is 344.04 m/s; TODO 'Far-source limiters'), which the near-coplanar "
+        "geometry absorbs in z; "
         "in 1 of 2 runs on the debug-build sidecar no stored render covered the event at all (the ~9 s solves' "
         "4x-interpolated GCC-PHAT saturate the compute pool)"
     ),

@@ -76,14 +76,6 @@ pub struct DspWorkerConfig {
     pub localization_solve: crate::localization_solve_config::LocalizationSolveConfig,
 }
 
-impl DspWorkerConfig {
-    /// Sound speed of air at this temperature and humidity (the same formula
-    /// as Python's `speed_of_sound_mps`).
-    pub fn sound_speed_for_air_mps(temperature_c: f32, humidity_fraction: f32) -> f32 {
-        super::dsp_window_geometry::speed_of_sound_mps(temperature_c, humidity_fraction)
-    }
-}
-
 impl Default for DspWorkerConfig {
     fn default() -> Self {
         let default_temperature_c = 20.0;
@@ -124,14 +116,7 @@ impl Default for DspWorkerConfig {
             stream_inactivity_evict_seconds: 3600,
             default_temperature_c,
             default_humidity_fraction,
-            // The no-environment fallback: the configured default air, as the
-            // Python environment provider uses. A fixed 343.2 m/s against
-            // 20 C / 50 % (344.04 m/s) is a 0.25 % scale error: metres of
-            // range at a kilometre.
-            sound_speed_mps: Self::sound_speed_for_air_mps(
-                default_temperature_c,
-                default_humidity_fraction,
-            ),
+            sound_speed_mps: 343.2,
             classifier_command_json: None,
             localization_cadence_ms: 250,
             localization_rms_gate: 0.015,

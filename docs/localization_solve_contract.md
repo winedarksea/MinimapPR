@@ -545,9 +545,3 @@ fixed cap, sets three things. Both paths use the same rules
 A span reaches a full lag before the trigger, so right after start-up (less
 than a lag of history buffered) a km network's first events solve without the
 far nodes, which are excluded with `coverage_below_threshold`.
-
-Sound speed: with no reported temperature or humidity the sidecar now uses the
-configured default air (`MINIMAPPR_DEFAULT_TEMPERATURE_C` and
-`MINIMAPPR_DEFAULT_HUMIDITY`; 344.04 m/s at 20 °C and 50 %), as the Python
-environment provider does. It used to use a fixed 343.2 m/s, a 0.25 % range
-scale error, which is metres at a kilometre.

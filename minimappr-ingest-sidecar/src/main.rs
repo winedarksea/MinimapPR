@@ -932,11 +932,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 band_split_highpass_hz: args.birdnet_pre_blend_highpass_hz,
                 band_split_max_clamp_hz: args.birdnet_spatial_blend_max_hz,
                 default_temperature_c: args.default_temperature_c,
-                // No reported environment: the configured default air (Python parity).
-                sound_speed_mps: DspWorkerConfig::sound_speed_for_air_mps(
-                    args.default_temperature_c,
-                    args.default_humidity_fraction,
-                ),
                 default_humidity_fraction: args.default_humidity_fraction,
                 classifier_command_json: args.classifier_command_json.clone(),
                 localization_cadence_ms: args.dsp_localization_cadence_ms,
