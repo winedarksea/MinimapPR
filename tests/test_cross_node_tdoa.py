@@ -362,3 +362,42 @@ def test_localize_2d_keeps_free_running_cross_node_sensors_with_wider_covariance
     assert np.trace(np.asarray(free_running.position_covariance_m2)) > np.trace(
         np.asarray(locked.position_covariance_m2)
     )
+
+
+def test_localize_2d_weak_clock_cross_node_solve_reports_lower_confidence() -> None:
+    """Down-weighting a weak-clock pair shrinks its residual row; confidence must
+    still fall with clock uncertainty (same geometry, same audio)."""
+    positions, windows, node_ids = synthesize_multinode_windows(
+        _broadband(23),
+        SAMPLE_RATE_HZ,
+        # Off the nodes' bisector, so the cross-node lag (~30 ms) sets the lag scale.
+        source_position_m=(30.0, 10.0, 0.0),
+        node_origins_m={"node-a": (0.0, 0.0, 0.0), "node-b": (12.0, 0.0, 0.0)},
+        tetra_node_ids=("node-a", "node-b"),
+        sound_speed_mps=SOUND_SPEED_MPS,
+    )
+    engine = LocalizationEngine(max_tau_s=0.02, interp_factor=8, cross_node_max_tau_s=0.35)
+
+    def _solve(sensor_timing_uncertainty_seconds: dict[str, float] | None):
+        return engine.localize_2d(
+            positions,
+            windows,
+            SAMPLE_RATE_HZ,
+            20.0,
+            0.5,
+            sensor_timing_uncertainty_seconds=sensor_timing_uncertainty_seconds,
+            sensor_node_ids=node_ids,
+        )
+
+    def _node_b_clock(node_b_uncertainty_s: float) -> dict[str, float]:
+        return {sid: (node_b_uncertainty_s if node_ids[sid] == "node-b" else 1.0e-6) for sid in positions}
+
+    no_clock_evidence = _solve(None)
+    gps_locked = _solve(_node_b_clock(1.0e-6))
+    ntp_disciplined = _solve(_node_b_clock(2.0e-3))
+    free_running = _solve(_node_b_clock(5.0e-2))
+
+    assert gps_locked.cross_node_pairs_measured == ntp_disciplined.cross_node_pairs_measured > 0
+    # A GPS-locked clock's microsecond error is invisible next to the lag scale.
+    assert gps_locked.confidence == pytest.approx(no_clock_evidence.confidence, abs=1.0e-3)
+    assert gps_locked.confidence > ntp_disciplined.confidence > free_running.confidence

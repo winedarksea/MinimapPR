@@ -350,6 +350,7 @@ class LocalizationEngine:
         pair_stats = PairMeasurementStats()
         tdoa_s: dict[str, float] = {}
         pair_weights: dict[str, float] = {}
+        pair_timing_uncertainty_s: dict[str, float] = {}
         peaks: list[float] = []
         meas_ids: list[str] = []
 
@@ -381,6 +382,7 @@ class LocalizationEngine:
             if is_cross_node:
                 pair_stats.cross_node_pairs_measured += 1
             tdoa_s[sensor_id] = tau_s
+            pair_timing_uncertainty_s[sensor_id] = timing_uncertainty_s
             # Residual rows are scaled by sqrt(inverse-variance weight), so the
             # covariance below widens with the pair's clock uncertainty.
             pair_weights[sensor_id] = math.sqrt(
@@ -401,15 +403,20 @@ class LocalizationEngine:
         z_m = float(fixed_z_m if fixed_z_m is not None else np.mean(points[:, 2]))
         xy0 = np.mean(points[:, :2], axis=0)
 
-        def residuals_xy(xy: np.ndarray) -> np.ndarray:
+        pair_weight_vector = np.asarray([pair_weights[sid] for sid in meas_ids], dtype=np.float64)
+
+        def unweighted_residuals_xy(xy: np.ndarray) -> np.ndarray:
             pos = np.asarray([xy[0], xy[1], z_m], dtype=np.float64)
             dist_ref = np.linalg.norm(pos - ref_pos) + 1e-9
             rows = []
             for sid in meas_ids:
                 dist_i = np.linalg.norm(pos - sensor_positions[sid]) + 1e-9
                 predicted = (dist_i - dist_ref) / sound_speed
-                rows.append(pair_weights.get(sid, 1.0) * (predicted - tdoa_s[sid]))
+                rows.append(predicted - tdoa_s[sid])
             return np.asarray(rows, dtype=np.float64)
+
+        def residuals_xy(xy: np.ndarray) -> np.ndarray:
+            return pair_weight_vector * unweighted_residuals_xy(xy)
 
         residual_scale = optimizer_residual_scale(multiplier**2 for multiplier in pair_weights.values())
         solved = least_squares(
@@ -426,8 +433,18 @@ class LocalizationEngine:
         if not np.all(np.isfinite(residual)):
             raise LocalizationError("2D localization residual contains non-finite values")
         rmse_s = float(np.sqrt(np.mean(np.square(residual))))
+        # Confidence scores each pair's expected timing error (its unweighted
+        # fit residual combined with its clock 1-sigma), not the weighted
+        # residual: down-weighting a weak-clock pair shrinks its residual row,
+        # which would otherwise raise confidence as clocks get worse. With no
+        # clock uncertainty every weight is 1, so this equals rmse_s.
+        expected_pair_timing_error_s = np.hypot(
+            unweighted_residuals_xy(xy),
+            np.asarray([pair_timing_uncertainty_s[sid] for sid in meas_ids], dtype=np.float64),
+        )
+        confidence_rmse_s = float(np.sqrt(np.mean(np.square(expected_pair_timing_error_s))))
         tau_scale = max(max(abs(v) for v in tdoa_s.values()), 1e-5)
-        confidence = max(0.0, min(1.0, 1.0 - (rmse_s / tau_scale)))
+        confidence = max(0.0, min(1.0, 1.0 - (confidence_rmse_s / tau_scale)))
         if peaks:
             confidence *= float(np.clip(np.mean(peaks), 0.0, 1.0))
 
