@@ -11,6 +11,7 @@ from typing import Any, Optional
 import numpy as np
 
 from minimappr.core.capture_audio_buffer import ChunkedCaptureSessionBuffer
+from minimappr.core.synchronized_window_skips import SampleRateMismatch, SynchronizedWindowSkipLedger
 
 logger = logging.getLogger(__name__)
 
@@ -515,6 +516,44 @@ class MultiSensorBuffer:
         # silently discards prior audio. Survives the buffer replacement
         # because it's on the wrapper, unlike SensorStreamBuffer.reanchor_count.
         self._rate_mismatch_wipes: dict[str, int] = {}
+        # P8: sensors a synchronized read left out (e.g. buffered at another rate).
+        self._synchronized_window_skips = SynchronizedWindowSkipLedger()
+
+    def _buffer_for_synchronized_read(self, sensor_id: str, sample_rate_hz: int) -> SensorStreamBuffer | None:
+        """The sensor's buffer when it holds ``sample_rate_hz`` audio; a
+        mismatched rate is excluded (no resampling yet) and counted. Call with
+        ``_lock`` held."""
+        buffer = self._buffers.get(sensor_id)
+        if buffer is None:
+            return None
+        if buffer.sample_rate_hz != sample_rate_hz:
+            self._synchronized_window_skips.record_sample_rate_mismatch(
+                sensor_id,
+                SampleRateMismatch(
+                    buffered_sample_rate_hz=int(buffer.sample_rate_hz), requested_sample_rate_hz=int(sample_rate_hz)
+                ),
+            )
+            return None
+        return buffer
+
+    async def synchronized_window_skip_counts(self) -> dict[str, dict[str, int]]:
+        """``{sensor_id: {reason: count}}`` of sensors left out of synchronized reads."""
+        async with self._lock:
+            return self._synchronized_window_skips.counts_by_sensor()
+
+    async def sample_rate_mismatched_sensors(
+        self, sensor_ids: list[str], sample_rate_hz: int
+    ) -> dict[str, SampleRateMismatch]:
+        """Which of ``sensor_ids`` a read at ``sample_rate_hz`` would exclude for
+        their rate (a query: nothing is counted)."""
+        async with self._lock:
+            return {
+                sensor_id: SampleRateMismatch(
+                    buffered_sample_rate_hz=int(buffer.sample_rate_hz), requested_sample_rate_hz=int(sample_rate_hz)
+                )
+                for sensor_id in sensor_ids
+                if (buffer := self._buffers.get(sensor_id)) is not None and buffer.sample_rate_hz != sample_rate_hz
+            }
 
     async def start_capture(
         self,
@@ -844,8 +883,8 @@ class MultiSensorBuffer:
         async with self._lock:
             result: dict[str, np.ndarray] = {}
             for sensor_id in sensor_ids:
-                buffer = self._buffers.get(sensor_id)
-                if buffer is None or buffer.sample_rate_hz != sample_rate_hz:
+                buffer = self._buffer_for_synchronized_read(sensor_id, sample_rate_hz)
+                if buffer is None:
                     continue
                 window = buffer.get_window(center_time_ns=center_time_ns, window_seconds=window_seconds)
                 if window is not None:
@@ -884,6 +923,7 @@ class MultiSensorBuffer:
                         "end_time_ns": end_time_ns,
                         "reanchor_count": int(buffer.reanchor_count),
                         "rate_mismatch_wipes": int(self._rate_mismatch_wipes.get(sensor_id, 0)),
+                        "synchronized_window_skips": self._synchronized_window_skips.counts_for_sensor(sensor_id),
                         "pin_protected_from_ns": pin_ns,
                     }
                 )
@@ -899,8 +939,8 @@ class MultiSensorBuffer:
         async with self._lock:
             result: dict[str, AudioCoverageStats] = {}
             for sensor_id in sensor_ids:
-                buffer = self._buffers.get(sensor_id)
-                if buffer is None or buffer.sample_rate_hz != sample_rate_hz:
+                buffer = self._buffer_for_synchronized_read(sensor_id, sample_rate_hz)
+                if buffer is None:
                     continue
                 stats = buffer.get_window_coverage_stats(
                     center_time_ns=center_time_ns,
@@ -920,8 +960,8 @@ class MultiSensorBuffer:
         async with self._lock:
             result: dict[str, np.ndarray] = {}
             for sensor_id in sensor_ids:
-                buffer = self._buffers.get(sensor_id)
-                if buffer is None or buffer.sample_rate_hz != sample_rate_hz:
+                buffer = self._buffer_for_synchronized_read(sensor_id, sample_rate_hz)
+                if buffer is None:
                     continue
                 window = buffer.get_window_ending_at(end_time_ns=end_time_ns, window_seconds=window_seconds)
                 if window is not None:
@@ -938,8 +978,8 @@ class MultiSensorBuffer:
         async with self._lock:
             result: dict[str, AudioCoverageStats] = {}
             for sensor_id in sensor_ids:
-                buffer = self._buffers.get(sensor_id)
-                if buffer is None or buffer.sample_rate_hz != sample_rate_hz:
+                buffer = self._buffer_for_synchronized_read(sensor_id, sample_rate_hz)
+                if buffer is None:
                     continue
                 stats = buffer.get_window_ending_at_coverage_stats(
                     end_time_ns=end_time_ns,
@@ -981,7 +1021,7 @@ class MultiSensorBuffer:
             latest_end_ns = 0
             recent: dict[str, np.ndarray] = {}
             for sensor_id, buffer, buffer_state in available:
-                if buffer.sample_rate_hz != dominant_sample_rate_hz:
+                if self._buffer_for_synchronized_read(sensor_id, dominant_sample_rate_hz) is None:
                     continue
                 tail = buffer_state.samples[-window_samples:].copy()
                 if tail.size == 0:

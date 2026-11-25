@@ -75,6 +75,9 @@ from minimappr.core.localized_render_handoff_hooks import (
     build_localization_seam_collaborators,
 )
 from minimappr.core.position_observation import position_observation_solve_id
+from minimappr.core.point_network_call_classification import PointNetworkCallClassifier
+from minimappr.core.point_network_call_requests import classify_python_ingest_call, register_python_ingest_call
+from minimappr.core.python_ingest_solve_exclusions import python_ingest_excluded_sensor_features
 from minimappr.core.position_observation_pipeline import classified_solve_resolver
 from minimappr.core.localization import LocalizationError
 from minimappr.core.localization_uncertainty import (
@@ -269,6 +272,13 @@ class FusionMetrics:
     position_observation_labels_attached: int = 0
     position_observation_classified_updates: int = 0
     position_observation_provisional_tracks_retracted: int = 0
+    # --- P7 point-network clip classification (core/point_network_call_classification.py) ---
+    point_network_clip_classified_count: int = 0
+    point_network_clip_unavailable_count: int = 0
+    point_network_clip_species_uncertain_count: int = 0
+    # --- P8 synchronized-window skips (core/synchronized_window_skips.py), synced in status() ---
+    buffer_synchronized_window_skips_by_reason: dict[str, int] = field(default_factory=dict)
+    buffer_synchronized_window_skips_by_sensor: dict[str, dict[str, int]] = field(default_factory=dict)
     # --- Field Mode W2-onset-srp ---
     onset_clustering_window_count: int = 0
     onset_clustering_accepted_cluster_count: int = 0
@@ -622,6 +632,7 @@ class FusionNode:
         # Localization-overhaul seams (no-ops until later milestones plug in);
         # built by a factory so those milestones never edit this module.
         self._localization_seam_collaborators = build_localization_seam_collaborators(self)
+        self._point_network_call_classifier = PointNetworkCallClassifier(self)
         self._localized_render_handoff = LocalizedRenderHandoff(self, self._localization_seam_collaborators)
 
     # ------------------------------------------------------------------
@@ -1019,6 +1030,7 @@ class FusionNode:
         now_ns = time.time_ns()
         realtime = self._realtime_tracker.snapshot(now_ns=now_ns)
         buffer_state = await self.buffer.snapshot_state()
+        self._sync_synchronized_window_skip_metrics(buffer_state)
         health = self._compute_health_snapshot(now_ns=now_ns)
         # Phase 3: cross-node track fusion telemetry (counter + live gauge).
         if hasattr(self.tracker, "multi_node_association_count"):
@@ -1061,6 +1073,19 @@ class FusionNode:
             "health": health,
             "omni_scanner": self._omni_scanner.stats() if self._omni_scanner is not None else {"enabled": bool(self.settings.omni_scan_enabled), "running": False},
         }
+
+    def _sync_synchronized_window_skip_metrics(self, buffer_state: list[dict[str, Any]]) -> None:
+        skips_by_sensor = {
+            state["sensor_id"]: dict(state["synchronized_window_skips"])
+            for state in buffer_state
+            if state.get("synchronized_window_skips")
+        }
+        skips_by_reason: dict[str, int] = {}
+        for reasons in skips_by_sensor.values():
+            for reason, count in reasons.items():
+                skips_by_reason[reason] = skips_by_reason.get(reason, 0) + count
+        self._metrics.buffer_synchronized_window_skips_by_sensor = skips_by_sensor
+        self._metrics.buffer_synchronized_window_skips_by_reason = skips_by_reason
 
     def observe_firmware_runner_stats(
         self,
@@ -1181,6 +1206,8 @@ class FusionNode:
                         reporting_modality="localized" if product.localization_branch is not None else "omni",
                         solve_origin=SOLVE_ORIGIN_PYTHON_INGEST,
                     )
+                    # P7: remembered before classification so an earlier point-network clip can see it.
+                    await register_python_ingest_call(self, product)
                     if self._classification_priority_enabled:
                         product.classification_significance = (
                             await self._score_classification_significance(product)
@@ -1546,6 +1573,10 @@ class FusionNode:
             selected_ids=selected_ids,
             energies=energies,
         )
+        # P8: a sensor buffered at another rate is excluded, not resampled; say so per solve.
+        excluded_sensor_features = await python_ingest_excluded_sensor_features(
+            buffer=self.buffer, registry=self.registry, sensor_ids=sensor_ids, solve_sample_rate_hz=candidate.sample_rate_hz
+        )
 
         tier = self.degradation_model.tier_for_sensor_count(len(selected_ids))
         selected_windows = {sensor_id: windows[sensor_id] for sensor_id in selected_ids}
@@ -1725,6 +1756,7 @@ class FusionNode:
             classification_audio_quality=classification_audio_quality,
             classification_audio_quality_source=classification_audio_quality_source,
             environment=environment_summary,
+            extra_classification_features=excluded_sensor_features,
         )
 
     # ------------------------------------------------------------------
@@ -1771,7 +1803,22 @@ class FusionNode:
         return detection_products
 
     async def _classify_and_attribute_localized(self, product: LocalizedCandidate) -> ClassifiedResult | None:
-        """Beamformed classification of one localized product, then onset attribution."""
+        """Beamformed classification of one localized product (a point network's
+        aligned clearest-node clip instead, P7), then onset attribution."""
+        localized = await classify_python_ingest_call(
+            self, product, default_classification=lambda: self._classify_beamformed_render(product)
+        )
+        if localized is None:
+            return None
+        if self._onset_attributor is not None and product.onset_attribution_context is not None:
+            localized = await self._onset_attributor.attribute(  # Field Mode W3-attribution
+                localized, product.onset_attribution_context, event_time_ns=product.candidate.event_time_ns
+            )
+        if product.extra_classification_features:
+            localized.classification.features.update(product.extra_classification_features)
+        return localized
+
+    async def _classify_beamformed_render(self, product: LocalizedCandidate) -> ClassifiedResult | None:
         branch = product.localization_branch
         localized = await self._classification_orchestrator.classify_beamformed_only(
             sample_rate_hz=product.candidate.sample_rate_hz,
@@ -1783,15 +1830,8 @@ class FusionNode:
             event_time_ns=product.candidate.event_time_ns,
             alias_cutoff_hz=branch.alias_cutoff_hz,
         )
-        if localized is None:
-            return None
-        self._metrics.beamform_renders += 1
-        if self._onset_attributor is not None and product.onset_attribution_context is not None:
-            localized = await self._onset_attributor.attribute(  # Field Mode W3-attribution
-                localized, product.onset_attribution_context, event_time_ns=product.candidate.event_time_ns
-            )
-        if product.extra_classification_features:
-            localized.classification.features.update(product.extra_classification_features)
+        if localized is not None:
+            self._metrics.beamform_renders += 1
         return localized
 
     async def _assemble_localized_classification(

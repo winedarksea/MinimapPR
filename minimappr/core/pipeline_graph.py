@@ -1251,18 +1251,23 @@ def _solve_status(metrics: dict, fusion_available: bool) -> PipelineStageStatus:
     out = int(metrics.get("localization_stage_out") or 0)
     fails = int(metrics.get("localization_failures") or 0)
     fallback = int(metrics.get("localization_fallback_count") or 0)
-    health = "ok" if out > 0 else ("warn" if fails > 0 else "ok")
+    # P8: sensors a synchronized window left out, e.g. buffered at another rate.
+    skips_by_reason = metrics.get("buffer_synchronized_window_skips_by_reason") or {}
+    rate_mismatch_skips = int(skips_by_reason.get("sample_rate_mismatch") or 0)
+    health = "ok" if out > 0 else ("warn" if fails > 0 or rate_mismatch_skips > 0 else "ok")
+    summary = f"last: {metrics.get('last_localization_algorithm', '?')}" if out else "configured; no solves yet"
+    if rate_mismatch_skips:
+        skipped_sensors = len(metrics.get("buffer_synchronized_window_skips_by_sensor") or {})
+        summary = f"{summary}; {skipped_sensors} sensor(s) excluded: sample-rate mismatch"
     return PipelineStageStatus(
         health=health,
-        summary=(
-            f"last: {metrics.get('last_localization_algorithm', '?')}"
-            if out else "configured; no solves yet"
-        ),
+        summary=summary,
         metrics=[
             _param("Solved", out),
             _param("Failures", fails),
             _param("Fallbacks", fallback),
             _param("Attempted", str(metrics.get("last_attempted_algorithm", "?"))),
+            _param("Rate-mismatch skips", rate_mismatch_skips),
         ],
     )
 

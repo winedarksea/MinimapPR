@@ -5529,6 +5529,13 @@ async def get_system_diagnostics(request: Request) -> dict:
                 "rules_drops_by_reason": (
                     fusion_status["metrics"].get("rules_drops_by_reason", {})
                 ),
+                # P8: sensors left out of synchronized windows (e.g. sample_rate_mismatch).
+                "buffer_synchronized_window_skips_by_reason": (
+                    fusion_status["metrics"].get("buffer_synchronized_window_skips_by_reason", {})
+                ),
+                "buffer_synchronized_window_skips_by_sensor": (
+                    fusion_status["metrics"].get("buffer_synchronized_window_skips_by_sensor", {})
+                ),
             },
         }
     else:
