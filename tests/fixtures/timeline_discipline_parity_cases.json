@@ -1,0 +1,101 @@
+{
+  "description": "Step re-anchor / drift slew decisions (minimappr-core timeline_discipline.rs and minimappr/core/timeline_discipline.py must agree). Each op is a frame (residual against the current timeline, step detector verdict) or a drift-slew check on a windowed residual; expect is the correction or null.",
+  "default_policy": {
+    "step_reanchor_enabled": true,
+    "step_threshold_ns": 2000000,
+    "step_confirm_frames": 3,
+    "drift_slew_threshold_ns": 5000000,
+    "hard_limit_ns": 10000000
+  },
+  "cases": [
+    {
+      "name": "a step confirmed by three frames re-anchors by their lower median",
+      "ops": [
+        {"frame": {"residual_ns": 0, "detected_step_ns": null}, "expect": null},
+        {"frame": {"residual_ns": 100000, "detected_step_ns": null}, "expect": null},
+        {"frame": {"residual_ns": 21000000, "detected_step_ns": 20900000}, "expect": null},
+        {"frame": {"residual_ns": 21100000, "detected_step_ns": null}, "expect": null},
+        {"frame": {"residual_ns": 20900000, "detected_step_ns": null}, "expect": {"kind": "step_reanchor", "origin_shift_ns": 21000000}}
+      ]
+    },
+    {
+      "name": "one late frame back on the old timeline is jitter, not a step",
+      "ops": [
+        {"frame": {"residual_ns": 0, "detected_step_ns": null}, "expect": null},
+        {"frame": {"residual_ns": 3000000, "detected_step_ns": 3000000}, "expect": null},
+        {"frame": {"residual_ns": 0, "detected_step_ns": -3000000}, "expect": null},
+        {"frame": {"residual_ns": 0, "detected_step_ns": null}, "expect": null},
+        {"frame": {"residual_ns": 0, "detected_step_ns": null}, "expect": null},
+        {"slew": {"windowed_residual_ns": 0}, "expect": null}
+      ]
+    },
+    {
+      "name": "a second step before confirmation restarts the count on the newest clock",
+      "ops": [
+        {"frame": {"residual_ns": 21000000, "detected_step_ns": 21000000}, "expect": null},
+        {"frame": {"residual_ns": 40000000, "detected_step_ns": 19000000}, "expect": null},
+        {"frame": {"residual_ns": 40500000, "detected_step_ns": null}, "expect": null},
+        {"frame": {"residual_ns": 40200000, "detected_step_ns": null}, "expect": {"kind": "step_reanchor", "origin_shift_ns": 40200000}}
+      ]
+    },
+    {
+      "name": "drift slews only between the slew threshold and the hard limit",
+      "ops": [
+        {"slew": {"windowed_residual_ns": 4000000}, "expect": null},
+        {"slew": {"windowed_residual_ns": 5000000}, "expect": null},
+        {"slew": {"windowed_residual_ns": 6000000}, "expect": {"kind": "drift_slew", "origin_shift_ns": 6000000}},
+        {"slew": {"windowed_residual_ns": -7000000}, "expect": {"kind": "drift_slew", "origin_shift_ns": -7000000}},
+        {"slew": {"windowed_residual_ns": 10000000}, "expect": {"kind": "drift_slew", "origin_shift_ns": 10000000}},
+        {"slew": {"windowed_residual_ns": 12000000}, "expect": null},
+        {"slew": {"windowed_residual_ns": null}, "expect": null}
+      ]
+    },
+    {
+      "name": "no drift slew while a step is pending",
+      "ops": [
+        {"frame": {"residual_ns": 21000000, "detected_step_ns": 21000000}, "expect": null},
+        {"slew": {"windowed_residual_ns": 6000000}, "expect": null},
+        {"frame": {"residual_ns": 0, "detected_step_ns": -21000000}, "expect": null},
+        {"slew": {"windowed_residual_ns": 6000000}, "expect": {"kind": "drift_slew", "origin_shift_ns": 6000000}}
+      ]
+    },
+    {
+      "name": "disabled re-anchor and a zero slew fraction never correct",
+      "policy": {
+        "step_reanchor_enabled": false,
+        "step_threshold_ns": 2000000,
+        "step_confirm_frames": 3,
+        "drift_slew_threshold_ns": 0,
+        "hard_limit_ns": 10000000
+      },
+      "ops": [
+        {"frame": {"residual_ns": 21000000, "detected_step_ns": 21000000}, "expect": null},
+        {"frame": {"residual_ns": 21000000, "detected_step_ns": null}, "expect": null},
+        {"frame": {"residual_ns": 21000000, "detected_step_ns": null}, "expect": null},
+        {"slew": {"windowed_residual_ns": 6000000}, "expect": null}
+      ]
+    },
+    {
+      "name": "one confirming frame re-anchors on the flagged frame",
+      "policy": {
+        "step_reanchor_enabled": true,
+        "step_threshold_ns": 2000000,
+        "step_confirm_frames": 1,
+        "drift_slew_threshold_ns": 5000000,
+        "hard_limit_ns": 10000000
+      },
+      "ops": [
+        {"frame": {"residual_ns": -15000000, "detected_step_ns": -15000000}, "expect": {"kind": "step_reanchor", "origin_shift_ns": -15000000}}
+      ]
+    },
+    {
+      "name": "a confirmed step onto the current timeline needs no shift",
+      "ops": [
+        {"frame": {"residual_ns": 0, "detected_step_ns": 21000000}, "expect": null},
+        {"frame": {"residual_ns": 0, "detected_step_ns": null}, "expect": null},
+        {"frame": {"residual_ns": 0, "detected_step_ns": null}, "expect": null},
+        {"slew": {"windowed_residual_ns": 6000000}, "expect": {"kind": "drift_slew", "origin_shift_ns": 6000000}}
+      ]
+    }
+  ]
+}

@@ -5,10 +5,11 @@
 //! divided by the rate. A larger disagreement is a clock *step* (NTP/GPS
 //! correction, firmware re-sync), detectable even between two frames of one
 //! upload. The *timeline residual* compares each packet timestamp with the
-//! nominal-rate timeline the solve buffer actually placed the audio on
-//! (anchored at that buffer's first packet), so it shows how far the buffered
-//! audio sits from where its packets say it belongs: after a step that the
-//! buffer did not re-anchor on, or once crystal drift has accumulated.
+//! nominal-rate timeline the solve buffer actually placed the audio on (its
+//! current anchor extrapolated by sample count), so it shows how far the
+//! buffered audio sits from where its packets say it belongs: after a step
+//! not yet re-anchored, or as crystal drift accumulates between slews
+//! (`timeline_discipline.rs`).
 
 const NANOSECONDS_PER_SECOND: i128 = 1_000_000_000;
 

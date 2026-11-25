@@ -13,8 +13,17 @@
 //! The reported residual is a percentile over the last few frames, and the
 //! hard-limit flag has hysteresis: a single late-stamped frame (network or
 //! firmware jitter) must not drop a node's cross-node pairs for whichever
-//! solve happens to snapshot at that moment. Measure and gate only: buffer
-//! timelines are never re-anchored or offset here.
+//! solve happens to snapshot at that moment.
+//!
+//! The tracker also disciplines the node's buffer timeline
+//! (`minimappr_core::timeline_discipline`): a confirmed timestamp step
+//! re-anchors it, and a windowed residual past the slew fraction of the hard
+//! limit slews it. `observe` returns the summed origin shift; the worker
+//! applies it to every buffer channel of the node, and the tracker shifts its
+//! own copy of the timeline (later frames of the same segment) and its
+//! recorded residuals to match. The step penalty is independent of the
+//! re-anchor: a re-anchored node's pairs come back with the step's widened
+//! uncertainty until the holdoff clears it.
 //!
 //! A node whose latest segment is not on packet time (no node timestamp, so
 //! its audio sits on server or receipt time) is assessed as an unknown clock:
@@ -28,12 +37,15 @@ use std::{
 use minimappr_core::{
     localization_sensor_entry::NodeTimeQuality,
     packet_frame_timing::PacketFrameTiming,
+    timeline_discipline::{TimelineDiscipline, TimelineDisciplinePolicy},
     timestamp_step_detector::{
         FrameTimelinePoint, NominalSampleTimeline, TimestampStepDetector, TimingDiscontinuity,
     },
 };
 
-use super::{NodeClockAssessment, NodeClockAssessments, SolveSensorLayout};
+use super::{
+    NodeClockAssessment, NodeClockAssessments, NodeTimelineCorrections, SolveSensorLayout,
+};
 use crate::{dsp::SensorStreamBuffer, localization_solve_config::LocalizationSolveConfig};
 
 const NANOSECONDS_PER_SECOND_F64: f64 = 1.0e9;
@@ -49,6 +61,7 @@ struct NodeClockPolicy {
     residual_percentile: f64,
     residual_over_limit_clear_ratio: f64,
     stale_after_ns: u128,
+    timeline_discipline: TimelineDisciplinePolicy,
 }
 
 impl NodeClockPolicy {
@@ -73,6 +86,13 @@ impl NodeClockPolicy {
                 .clamp(0.0, 1.0),
             stale_after_ns: (config.localization_sensor_registry_stale_seconds.max(0.0)
                 * NANOSECONDS_PER_SECOND_F64) as u128,
+            timeline_discipline: TimelineDisciplinePolicy::from_seconds(
+                config.localization_timeline_step_reanchor_enabled,
+                config.localization_timestamp_step_threshold_seconds,
+                config.localization_timestamp_step_confirm_frames,
+                config.localization_timeline_drift_slew_fraction,
+                config.localization_cross_node_max_timeline_residual_seconds,
+            ),
         }
     }
 
@@ -115,6 +135,9 @@ struct NodeClockState {
     last_timestamp_step_ns: Option<i64>,
     timestamp_step_count: u32,
     step_penalty: Option<StepPenalty>,
+    timeline_discipline: TimelineDiscipline,
+    timeline_step_reanchor_count: u32,
+    timeline_drift_slew_count: u32,
     latest_segment_on_packet_time: bool,
     last_heard_ns: u128,
 }
@@ -131,6 +154,9 @@ impl NodeClockState {
             last_timestamp_step_ns: None,
             timestamp_step_count: 0,
             step_penalty: None,
+            timeline_discipline: TimelineDiscipline::new(policy.timeline_discipline),
+            timeline_step_reanchor_count: 0,
+            timeline_drift_slew_count: 0,
             latest_segment_on_packet_time: true,
             last_heard_ns: 0,
         }
@@ -152,6 +178,19 @@ impl NodeClockState {
             self.recent_residuals_seconds.pop_front();
         }
         self.recent_residuals_seconds.push_back(residual_seconds);
+        self.reevaluate_residual(policy);
+    }
+
+    /// A slew moved the timeline: every recorded residual drops by the shift.
+    fn shift_recorded_residuals(&mut self, origin_shift_ns: i128, policy: &NodeClockPolicy) {
+        let shift_seconds = origin_shift_ns as f64 / NANOSECONDS_PER_SECOND_F64;
+        for residual_seconds in &mut self.recent_residuals_seconds {
+            *residual_seconds -= shift_seconds;
+        }
+        self.reevaluate_residual(policy);
+    }
+
+    fn reevaluate_residual(&mut self, policy: &NodeClockPolicy) {
         let aggregate_seconds =
             residual_at_percentile(&self.recent_residuals_seconds, policy.residual_percentile);
         self.timeline_residual_seconds = aggregate_seconds;
@@ -207,7 +246,9 @@ impl NodeClockState {
         frame: &PacketFrameTiming,
         point: Option<FrameTimelinePoint>,
         observation: &NodeFrameTimingObservation<'_>,
+        timeline: &mut Option<NominalSampleTimeline>,
         policy: &NodeClockPolicy,
+        corrections: &mut NodeTimelineCorrections,
     ) {
         self.time_quality = frame.time_quality;
         self.reported_holdover_error_seconds = frame
@@ -216,31 +257,56 @@ impl NodeClockState {
         let Some(point) = point else {
             return;
         };
+        let mut detected_step_ns = None;
         match self.detector.observe(point, observation.sample_rate_hz) {
             Some(TimingDiscontinuity::TimestampStep { step_ns }) => {
                 self.timestamp_step_count = self.timestamp_step_count.saturating_add(1);
                 self.last_timestamp_step_ns =
                     Some(step_ns.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64);
                 self.raise_step_penalty(step_ns.unsigned_abs() as f64 / NANOSECONDS_PER_SECOND_F64);
+                detected_step_ns = Some(step_ns);
             }
             Some(TimingDiscontinuity::BootSessionChange) => {
                 // The old session's residual says nothing about the new clock,
                 // and a reboot has no step size: hold the unknown default.
                 self.clear_residual();
+                self.timeline_discipline.cancel_pending_step();
                 self.raise_step_penalty(policy.unknown_uncertainty_seconds);
             }
             None => {}
         }
-        if let Some(timeline) = observation.buffer_timeline {
-            let residual_seconds = timeline.residual_ns(&point) as f64 / NANOSECONDS_PER_SECOND_F64;
-            self.record_residual(residual_seconds, policy);
-            self.advance_step_recovery(
-                residual_seconds,
-                point.start_sample_index,
-                observation.sample_rate_hz,
-                policy,
-            );
+        let Some(timeline) = timeline.as_mut() else {
+            return;
+        };
+        if let Some(correction) = self
+            .timeline_discipline
+            .observe_frame(timeline.residual_ns(&point), detected_step_ns)
+        {
+            // The residuals recorded before the step were on the old clock.
+            timeline.origin_time_ns += correction.origin_shift_ns;
+            self.clear_residual();
+            self.timeline_step_reanchor_count = self.timeline_step_reanchor_count.saturating_add(1);
+            corrections.add(correction);
         }
+        self.record_residual(
+            timeline.residual_ns(&point) as f64 / NANOSECONDS_PER_SECOND_F64,
+            policy,
+        );
+        let windowed_residual_ns = self
+            .timeline_residual_seconds
+            .map(|seconds| (seconds * NANOSECONDS_PER_SECOND_F64).round() as i128);
+        if let Some(correction) = self.timeline_discipline.drift_slew(windowed_residual_ns) {
+            timeline.origin_time_ns += correction.origin_shift_ns;
+            self.shift_recorded_residuals(correction.origin_shift_ns, policy);
+            self.timeline_drift_slew_count = self.timeline_drift_slew_count.saturating_add(1);
+            corrections.add(correction);
+        }
+        self.advance_step_recovery(
+            timeline.residual_ns(&point) as f64 / NANOSECONDS_PER_SECOND_F64,
+            point.start_sample_index,
+            observation.sample_rate_hz,
+            policy,
+        );
     }
 
     fn assessment(&self, node_id: &str, policy: &NodeClockPolicy) -> NodeClockAssessment {
@@ -253,6 +319,8 @@ impl NodeClockState {
                 last_timestamp_step_ns: self.last_timestamp_step_ns,
                 timestamp_step_count: self.timestamp_step_count,
                 residual_over_hard_limit: false,
+                timeline_step_reanchor_count: self.timeline_step_reanchor_count,
+                timeline_drift_slew_count: self.timeline_drift_slew_count,
             };
         }
         let measured_residual_seconds = self.timeline_residual_seconds.map(f64::abs);
@@ -273,6 +341,8 @@ impl NodeClockState {
             last_timestamp_step_ns: self.last_timestamp_step_ns,
             timestamp_step_count: self.timestamp_step_count,
             residual_over_hard_limit: self.residual_over_hard_limit,
+            timeline_step_reanchor_count: self.timeline_step_reanchor_count,
+            timeline_drift_slew_count: self.timeline_drift_slew_count,
         }
     }
 }
@@ -300,8 +370,9 @@ pub(crate) struct NodeFrameTimingObservation<'a> {
     /// was not (no node timestamp: server or receipt time), the node is
     /// assessed as an unknown clock until a segment is on packet time again.
     pub(crate) segment_on_packet_time: bool,
-    /// The node's buffer timeline after this segment was appended; `None`
-    /// when that buffer is not on packet time (receipt-time alignment).
+    /// The node's buffer timeline after this segment was appended (before
+    /// this segment's own corrections, which `observe` returns); `None` when
+    /// that buffer is not on packet time (receipt-time alignment).
     pub(crate) buffer_timeline: Option<NominalSampleTimeline>,
     pub(crate) now_ns: u128,
 }
@@ -338,7 +409,12 @@ impl NodeClockQualityTracker {
         }
     }
 
-    pub(crate) fn observe(&mut self, observation: NodeFrameTimingObservation<'_>) {
+    /// Returns the timeline corrections the worker must apply to every buffer
+    /// channel of `observation.node_id`.
+    pub(crate) fn observe(
+        &mut self,
+        observation: NodeFrameTimingObservation<'_>,
+    ) -> NodeTimelineCorrections {
         let policy = &self.policy;
         let state = self
             .nodes
@@ -347,8 +423,11 @@ impl NodeClockQualityTracker {
         state.last_heard_ns = observation.now_ns;
         if !observation.segment_on_packet_time {
             state.clear_residual();
+            state.timeline_discipline.cancel_pending_step();
         }
         state.latest_segment_on_packet_time = observation.segment_on_packet_time;
+        let mut timeline = observation.buffer_timeline;
+        let mut corrections = NodeTimelineCorrections::default();
         for frame in observation.frame_timing {
             let point = observation
                 .segment_start_sample_index
@@ -360,8 +439,16 @@ impl NodeClockQualityTracker {
                         boot_session: frame.boot_session,
                     },
                 );
-            state.observe_frame(frame, point, &observation, policy);
+            state.observe_frame(
+                frame,
+                point,
+                &observation,
+                &mut timeline,
+                policy,
+                &mut corrections,
+            );
         }
+        corrections
     }
 
     /// A node never heard (a declared member that has not streamed) gets the
@@ -402,3 +489,7 @@ impl NodeClockQualityTracker {
 #[cfg(test)]
 #[path = "dsp_node_clock_quality_tests.rs"]
 mod dsp_node_clock_quality_tests;
+
+#[cfg(test)]
+#[path = "dsp_node_timeline_discipline_tests.rs"]
+mod dsp_node_timeline_discipline_tests;

@@ -373,7 +373,7 @@ impl DspWorker {
         }
         let segment_on_packet_time =
             owned.node_timestamp_is_available && !owned.buffer_uses_receipt_time;
-        self.node_clock_quality.observe(NodeFrameTimingObservation {
+        let timeline_corrections = self.node_clock_quality.observe(NodeFrameTimingObservation {
             node_id: &owned.sensor_layout.reporting_node_id,
             frame_timing: &owned.decoded.frame_timing,
             segment_start_sample_index: owned.start_sample_index,
@@ -388,6 +388,16 @@ impl DspWorker {
             }),
             now_ns: owned.now_ns,
         });
+        // Step re-anchor / drift slew: every channel of this node moves with
+        // the reference channel the tracker measured, before the window below
+        // is resolved against it.
+        if timeline_corrections.origin_shift_ns != 0 {
+            for &buffer_channel_index in &owned.buffer_channel_indices {
+                if let Some(buffer) = buffers.get_mut(buffer_channel_index) {
+                    buffer.shift_timeline_origin(timeline_corrections.origin_shift_ns);
+                }
+            }
+        }
 
         let end_ns = resolve_buffer_end_time_ns(
             buffers,
@@ -425,6 +435,8 @@ impl DspWorker {
         if reanchor_delta > 0 {
             self.note_buffer_reanchors(reanchor_delta).await;
         }
+        self.note_buffer_timeline_corrections(timeline_corrections)
+            .await;
         Some(BufferedManifestAudio {
             audio_end_ns: end_ns.max(0) as u128,
             end_ns,

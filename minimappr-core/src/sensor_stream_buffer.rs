@@ -431,6 +431,18 @@ impl SensorStreamBuffer {
     pub fn time_for_sample_index(&self, sample_index: i64) -> Option<i128> {
         self.sample_index_to_time_ns(sample_index).ok()
     }
+
+    /// Moves the timeline origin by `shift_ns` (a step re-anchor or drift
+    /// slew, `timeline_discipline.rs`). Samples and coverage stay where they
+    /// are in sample-index space, so nothing is dropped or zero-filled; every
+    /// buffered sample is retimed by the same amount. Mirrors Python
+    /// `SensorStreamBuffer.shift_timeline_origin`. A no-op before the first
+    /// append. Not a `reanchor_count` event: that counter means audio was cleared.
+    pub fn shift_timeline_origin(&mut self, shift_ns: i128) {
+        if let Some(origin_ns) = self.timeline_origin_ns.as_mut() {
+            *origin_ns += shift_ns;
+        }
+    }
 }
 
 pub fn coverage_stats(coverage: &[bool], sample_rate_hz: u32) -> AudioCoverageStats {
@@ -769,6 +781,59 @@ mod tests {
             )
             .unwrap();
         assert_eq!(buffer.reanchor_count(), 2);
+    }
+
+    /// A step re-anchor or drift slew retimes the buffer without touching
+    /// its audio: same samples, same coverage, no reset counted.
+    #[test]
+    fn shifting_the_timeline_origin_retimes_without_dropping_audio() {
+        let sr = 16_000;
+        let frame_samples = 512;
+        let shift_ns = 21_000_000_i128;
+        let t0 = 1_000_000_000_000_000_000_i128;
+        let mut buffer = SensorStreamBuffer::new(sr, 5.0);
+        buffer.shift_timeline_origin(shift_ns);
+        assert_eq!(
+            buffer.start_time_ns(),
+            None,
+            "no-op before the first append"
+        );
+        for frame in 0..4_i64 {
+            let start = frame * frame_samples;
+            buffer
+                .append(
+                    t0 + i128::from(frame) * 32_000_000,
+                    &vec![frame as f32; frame_samples as usize],
+                    Some(start),
+                    Some(start + frame_samples),
+                )
+                .unwrap();
+        }
+        let samples_before: Vec<f32> = buffer.samples.iter().copied().collect();
+        buffer.shift_timeline_origin(shift_ns);
+        assert_eq!(
+            buffer.samples.iter().copied().collect::<Vec<_>>(),
+            samples_before
+        );
+        assert!(buffer.coverage.iter().all(|covered| *covered));
+        assert_eq!(buffer.start_time_ns(), Some(t0 + shift_ns));
+        assert_eq!(
+            buffer.time_for_sample_index(frame_samples),
+            Some(t0 + 32_000_000 + shift_ns)
+        );
+        assert_eq!(buffer.reanchor_count(), 0);
+        // The next frame on the corrected clock lands contiguously.
+        let next = 4 * frame_samples;
+        buffer
+            .append(
+                t0 + 4 * 32_000_000 + shift_ns,
+                &vec![9.0; frame_samples as usize],
+                Some(next),
+                Some(next + frame_samples),
+            )
+            .unwrap();
+        assert_eq!(buffer.sample_count(), 5 * frame_samples as usize);
+        assert!(buffer.coverage.iter().all(|covered| *covered));
     }
 
     #[test]

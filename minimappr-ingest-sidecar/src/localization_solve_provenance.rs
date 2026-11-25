@@ -75,6 +75,8 @@ fn node_timing_evidence(
                 .map(|residual| (residual * NANOSECONDS_PER_SECOND_F64).round() as i64),
             last_timestamp_step_ns: assessment.last_timestamp_step_ns,
             timestamp_step_count: u64::from(assessment.timestamp_step_count),
+            timeline_step_reanchor_count: u64::from(assessment.timeline_step_reanchor_count),
+            timeline_drift_slew_count: u64::from(assessment.timeline_drift_slew_count),
         });
     }
     node_timing
