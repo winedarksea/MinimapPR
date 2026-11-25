@@ -9,8 +9,8 @@
 //! `dsp_covered_event_solve`).
 
 use minimappr_core::localization_sensor_entry::{
-    ExcludedSensor, NodeTimingEvidence, SolveExclusionReason, SolveProvenance, SolveSensorEntry,
-    SOLVE_PROVENANCE_SCHEMA_VERSION,
+    ExcludedSensor, ExcludedSensorPair, NodeTimingEvidence, SolveExclusionReason, SolveProvenance,
+    SolveSensorEntry, SOLVE_PROVENANCE_SCHEMA_VERSION,
 };
 use uuid::Uuid;
 
@@ -29,6 +29,8 @@ pub(crate) struct SolveProvenanceInputs<'a> {
     pub(crate) solve_id: &'a str,
     pub(crate) attempt_kind: minimappr_core::localization_sensor_entry::SolveAttemptKind,
     pub(crate) active_sensor_indices: &'a [usize],
+    /// The solve's pair admission exclusions (`SolvePairAdmission`).
+    pub(crate) excluded_pairs: &'a [ExcludedSensorPair],
     pub(crate) window_center_time_ns: i128,
     pub(crate) window_seconds: f64,
     /// The trigger-time clock snapshot the payload carries.
@@ -114,8 +116,7 @@ pub(crate) fn build_solve_provenance(
         sensors: sensors_with_clock_evidence(layout, inputs.node_clock_assessments),
         active_sensor_indices: inputs.active_sensor_indices.to_vec(),
         excluded_sensors,
-        // Pair admission lands with milestone 2 (R7).
-        excluded_pairs: Vec::new(),
+        excluded_pairs: inputs.excluded_pairs.to_vec(),
         node_timing: node_timing_evidence(layout, inputs.node_clock_assessments),
         window_center_time_ns: i64::try_from(inputs.window_center_time_ns).unwrap_or(i64::MAX),
         window_seconds: inputs.window_seconds,
@@ -140,7 +141,11 @@ pub(crate) fn localization_manifest_payload(
             lag_seconds: pair.tdoa.lag_seconds,
             confidence: pair.tdoa.confidence,
             is_cross_node: Some(layout.is_cross_node_pair(pair.ch_a, pair.ch_b)),
-            timing_uncertainty_seconds: None,
+            timing_uncertainty_seconds: Some(
+                payload
+                    .pair_admission
+                    .pair_timing_uncertainty_seconds(pair.ch_a, pair.ch_b) as f32,
+            ),
         })
         .collect();
     let steering_magnitude = localization
@@ -175,6 +180,7 @@ pub(crate) fn localization_manifest_payload(
                 solve_id: &payload.solve_id,
                 attempt_kind: payload.attempt_kind,
                 active_sensor_indices: &payload.active_channels,
+                excluded_pairs: payload.pair_admission.excluded_pairs(),
                 window_center_time_ns: payload.localization_window_center_time_ns,
                 window_seconds: payload.config.window_seconds,
                 node_clock_assessments: &payload.node_clock_assessments,

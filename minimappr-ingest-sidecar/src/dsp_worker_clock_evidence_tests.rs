@@ -6,7 +6,7 @@ use super::dsp_worker_coverage_race_tests::{
     race_config, RaceHarness, CLUSTER_BUFFER_KEY, NODE_A, NODE_B,
 };
 use super::dsp_worker_solve_manifest_inspection::{
-    attempted_localization_results, solve_provenance,
+    attempted_localization_results, cross_node_pair_count, solve_provenance,
 };
 use super::dsp_worker_test_node_fixtures::{
     fixture_frame_manifest, CoherentPointSource, FixtureClusterGeometry, FixtureNode,
@@ -14,7 +14,7 @@ use super::dsp_worker_test_node_fixtures::{
 };
 use super::dsp_worker_tests::drain_published_manifests;
 use super::*;
-use minimappr_core::localization_sensor_entry::NodeTimeQuality;
+use minimappr_core::localization_sensor_entry::{NodeTimeQuality, SolveExclusionReason};
 
 const IN_UPLOAD_STEP_NS: u64 = 21_000_000;
 const UPLOAD_FRAME_COUNT: usize = 30;
@@ -212,4 +212,84 @@ async fn a_parked_solve_publishes_the_clock_snapshot_it_triggered_with() {
         "trigger-time snapshot"
     );
     assert_eq!(node_b_timing.last_timestamp_step_ns, None);
+}
+
+#[tokio::test]
+async fn a_residual_over_the_hard_limit_drops_only_that_nodes_cross_node_pairs() {
+    const STEP_FRAME: usize = 10;
+    const FRAME_COUNT: usize = 40;
+    let mut harness = RaceHarness::new(race_config(true)).await;
+    // Coverage wait on, so each solve waits for node b's same frame.
+    // Node b's clock steps 21 ms at frame 10; its buffer stays anchored at its
+    // first packet, so the residual (21 ms) stays over the 10 ms hard limit.
+    for frame_index in 0..FRAME_COUNT {
+        harness.advance_clock_ms(FIXTURE_FRAME_DURATION_NS / 1_000_000);
+        harness.deliver(NODE_A, frame_index).await;
+        let mut manifest = harness.cluster_frame_manifest(NODE_B, frame_index).await;
+        if frame_index >= STEP_FRAME {
+            shift_packet_time(&mut manifest, IN_UPLOAD_STEP_NS);
+        }
+        harness.deliver_manifest(manifest).await;
+    }
+    assert!(
+        harness
+            .node_clock_assessment(NODE_B)
+            .residual_over_hard_limit
+    );
+    assert!(
+        !harness
+            .node_clock_assessment(NODE_A)
+            .residual_over_hard_limit
+    );
+
+    let published = drain_published_manifests(&mut harness.events);
+    let after_step: Vec<&DspManifest> = attempted_localization_results(&published)
+        .into_iter()
+        .filter(|manifest| {
+            solve_provenance(manifest)
+                .node_timing
+                .iter()
+                .any(|row| row.node_id == NODE_B && row.timestamp_step_count > 0)
+        })
+        .collect();
+    assert!(!after_step.is_empty(), "a solve triggers after the step");
+    let mut solves_with_both_nodes_active = 0;
+    for manifest in after_step {
+        let provenance = solve_provenance(manifest);
+        let node_of = |sensor_index: usize| provenance.sensors[sensor_index].node_id.as_str();
+        // Never a timeline exclusion inside one node; any other exclusion
+        // here is a sensor whose audio had not arrived yet (coverage).
+        for pair in &provenance.excluded_pairs {
+            if pair.reason == SolveExclusionReason::TimelineResidualOverLimit {
+                assert_ne!(node_of(pair.sensor_index_a), node_of(pair.sensor_index_b));
+            }
+        }
+        assert_eq!(cross_node_pair_count(manifest), 0);
+        let active = &provenance.active_sensor_indices;
+        let active_on = |node_id: &str| active.iter().any(|index| node_of(*index) == node_id);
+        if !(active_on(NODE_A) && active_on(NODE_B)) {
+            continue;
+        }
+        solves_with_both_nodes_active += 1;
+        for &a in active.iter().filter(|index| node_of(**index) == NODE_A) {
+            for &b in active.iter().filter(|index| node_of(**index) == NODE_B) {
+                assert!(
+                    provenance.excluded_pairs.iter().any(|pair| {
+                        pair.reason == SolveExclusionReason::TimelineResidualOverLimit
+                            && [pair.sensor_index_a, pair.sensor_index_b].contains(&a)
+                            && [pair.sensor_index_a, pair.sensor_index_b].contains(&b)
+                    }),
+                    "cross-node pair ({a}, {b}) must be excluded for the residual"
+                );
+            }
+        }
+        let pair_tdoas = &manifest.localization.as_ref().unwrap().pair_tdoas;
+        assert!(
+            pair_tdoas
+                .iter()
+                .any(|pair| node_of(pair.ch_a) == NODE_B && node_of(pair.ch_b) == NODE_B),
+            "node b's own channels still solve"
+        );
+    }
+    assert!(solves_with_both_nodes_active > 0);
 }

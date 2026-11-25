@@ -41,7 +41,15 @@ impl DspWorker {
         }
 
         let omni_channels = owned.decoded.channels.clone();
-        let node_clock_assessments = self.node_clock_quality.snapshot_for_layout(&owned.sensor_layout);
+        let node_clock_assessments = self
+            .node_clock_quality
+            .snapshot_for_layout(&owned.sensor_layout);
+        let pair_admission = SolvePairAdmission::compute(
+            &owned.sensor_layout,
+            &[],
+            &node_clock_assessments,
+            &self.config.localization_solve,
+        );
         Some(ComputePayload {
             manifest: owned.manifest,
             stream_key: owned.buffer_key,
@@ -67,7 +75,7 @@ impl DspWorker {
             node_clock_assessments,
             solve_id: new_solve_id(),
             attempt_kind: SolveAttemptKind::NotAttempted,
-            pair_admission: SolvePairAdmission::admit_all(),
+            pair_admission,
             source_ids: owned.source_ids,
             sr: owned.sr,
             now_ns: owned.now_ns,
@@ -189,15 +197,24 @@ impl DspWorker {
                         &fallback_render_channels,
                         owned.sr,
                     );
-                let node_clock_assessments = self.node_clock_quality.snapshot_for_layout(&owned.sensor_layout);
+                let node_clock_assessments = self
+                    .node_clock_quality
+                    .snapshot_for_layout(&owned.sensor_layout);
+                let active_channels = eligible_coverage_channels(
+                    &fallback_render_coverage,
+                    self.config.min_coverage_ratio,
+                );
+                let pair_admission = SolvePairAdmission::compute(
+                    &owned.sensor_layout,
+                    &active_channels,
+                    &node_clock_assessments,
+                    &self.config.localization_solve,
+                );
                 return Some(ComputePayload {
                     manifest: owned.manifest,
                     stream_key: owned.buffer_key,
                     channel_states: buffered.channel_states,
-                    active_channels: eligible_coverage_channels(
-                        &fallback_render_coverage,
-                        self.config.min_coverage_ratio,
-                    ),
+                    active_channels,
                     classification_windows: (0..owned.buffer_channel_count)
                         .map(|_| Vec::new())
                         .collect(),
@@ -212,7 +229,7 @@ impl DspWorker {
                     node_clock_assessments,
                     solve_id: new_solve_id(),
                     attempt_kind: SolveAttemptKind::NotAttempted,
-                    pair_admission: SolvePairAdmission::admit_all(),
+                    pair_admission,
                     source_ids: owned.source_ids,
                     sr: owned.sr,
                     now_ns: owned.now_ns,
@@ -347,7 +364,15 @@ impl DspWorker {
             };
 
         // Snapshot at trigger: a deferred copy of this payload keeps it.
-        let node_clock_assessments = self.node_clock_quality.snapshot_for_layout(&owned.sensor_layout);
+        let node_clock_assessments = self
+            .node_clock_quality
+            .snapshot_for_layout(&owned.sensor_layout);
+        let pair_admission = SolvePairAdmission::compute(
+            &owned.sensor_layout,
+            &active_channels,
+            &node_clock_assessments,
+            &self.config.localization_solve,
+        );
         let payload = ComputePayload {
             manifest: owned.manifest,
             stream_key: owned.buffer_key,
@@ -367,7 +392,7 @@ impl DspWorker {
             } else {
                 SolveAttemptKind::NotAttempted
             },
-            pair_admission: SolvePairAdmission::admit_all(),
+            pair_admission,
             source_ids: owned.source_ids,
             sr: owned.sr,
             now_ns: owned.now_ns,

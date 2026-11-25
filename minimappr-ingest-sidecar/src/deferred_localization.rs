@@ -14,7 +14,7 @@ use crate::{
         channel_coverage_ending_at, channel_windows_ending_at,
         channel_windows_ending_at_with_gap_concealment, classifier_render_bounds_from_windows,
         eligible_localization_channels, localization_channel_states_centered, new_solve_id,
-        ComputePayload,
+        ComputePayload, SolvePairAdmission,
     },
     localization_coverage_wait::{
         evaluate_window_coverage, ChannelStreamActivityTracker, CoverageWaitClock,
@@ -280,7 +280,8 @@ impl DeferredLocalizationScheduler {
 /// Only the channels the parked geometry describes are re-read: while a solve
 /// is parked a cluster buffer only grows (a reorder releases it first), and a
 /// channel index past the parked `sensor_layout` would panic SRP on the rayon
-/// pool (process abort). The parked layout's exclusions (rate, cap) still apply.
+/// pool (process abort). The parked layout's exclusions (rate, cap) and the
+/// pair admission (recomputed for the released coverage) still apply.
 fn finalize_pending_payload(
     pending: PendingLocalization,
     buffers: &[SensorStreamBuffer],
@@ -304,6 +305,14 @@ fn finalize_pending_payload(
     payload.localization_window_center_time_ns = span.center_time_ns;
     payload.active_channels =
         eligible_localization_channels(&payload.channel_states, span.min_coverage_ratio);
+    // Coverage changed while parked, so admission is recomputed for the
+    // released sensor set; baseline and timeline rejections still apply.
+    payload.pair_admission = SolvePairAdmission::compute(
+        &payload.sensor_layout,
+        &payload.active_channels,
+        &payload.node_clock_assessments,
+        &payload.config.localization_solve,
+    );
     if let Some(render) = classifier_render {
         attach_classifier_render_windows(&mut payload, parked_buffers, render);
     }
