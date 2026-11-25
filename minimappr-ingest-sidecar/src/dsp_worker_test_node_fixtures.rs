@@ -265,8 +265,36 @@ pub(super) async fn fixture_frame_manifest(
     source: &CoherentPointSource,
     geometry: &FixtureClusterGeometry,
 ) -> DspManifest {
-    let channels = source.frame_channels(node, frame_index);
-    fixture_frame_manifest_from_channels(storage_root, node, frame_index, &channels, geometry).await
+    fixture_manifest_with_channels(
+        storage_root,
+        node,
+        frame_index,
+        FIXTURE_SAMPLE_RATE_HZ,
+        source.frame_channels(node, frame_index),
+        geometry,
+    )
+    .await
+}
+
+/// A silent frame of `node` on the shared packet timeline at another rate
+/// (mixed-rate clusters).
+pub(super) async fn fixture_silent_frame_manifest_at_rate(
+    storage_root: &std::path::Path,
+    node: &FixtureNode,
+    frame_index: usize,
+    sample_rate_hz: u32,
+) -> DspManifest {
+    let samples_per_frame =
+        (u64::from(sample_rate_hz) * FIXTURE_FRAME_DURATION_NS / 1_000_000_000) as usize;
+    fixture_manifest_with_channels(
+        storage_root,
+        node,
+        frame_index,
+        sample_rate_hz,
+        vec![vec![0.0; samples_per_frame]; node.channel_count()],
+        &FixtureClusterGeometry::AutomaticGps,
+    )
+    .await
 }
 
 /// `fixture_frame_manifest` with caller-built channels (one per sensor).
@@ -277,9 +305,29 @@ pub(super) async fn fixture_frame_manifest_from_channels(
     channels: &[Vec<f32>],
     geometry: &FixtureClusterGeometry,
 ) -> DspManifest {
+    fixture_manifest_with_channels(
+        storage_root,
+        node,
+        frame_index,
+        FIXTURE_SAMPLE_RATE_HZ,
+        channels.to_vec(),
+        geometry,
+    )
+    .await
+}
+
+async fn fixture_manifest_with_channels(
+    storage_root: &std::path::Path,
+    node: &FixtureNode,
+    frame_index: usize,
+    sample_rate_hz: u32,
+    channels: Vec<Vec<f32>>,
+    geometry: &FixtureClusterGeometry,
+) -> DspManifest {
     let frame_index_u64 = frame_index as u64;
+    let samples_per_frame = channels.first().map_or(0, Vec::len) as u64;
     let start_time_ns = FIXTURE_STREAM_START_NS + frame_index_u64 * FIXTURE_FRAME_DURATION_NS;
-    let start_sample_index = frame_index_u64 * FIXTURE_FRAME_SAMPLES as u64;
+    let start_sample_index = frame_index_u64 * samples_per_frame;
     let node_json = node.node_context_json();
     let payload = serde_json::json!({
         "node": node_json,
@@ -289,12 +337,12 @@ pub(super) async fn fixture_frame_manifest_from_channels(
                 "utc_start_ns": start_time_ns,
                 "utc_end_ns": start_time_ns + FIXTURE_FRAME_DURATION_NS,
                 "start_sample_index": start_sample_index,
-                "end_sample_index": start_sample_index + FIXTURE_FRAME_SAMPLES as u64,
-                "sample_rate_hz": FIXTURE_SAMPLE_RATE_HZ,
+                "end_sample_index": start_sample_index + samples_per_frame,
+                "sample_rate_hz": sample_rate_hz,
                 "channels": node.channel_count(),
                 "encoding": "pcm16le",
-                "samples_per_channel": FIXTURE_FRAME_SAMPLES,
-                "samples_b64": encode_pcm16le_b64(channels),
+                "samples_per_channel": samples_per_frame,
+                "samples_b64": encode_pcm16le_b64(&channels),
                 "sequence": frame_index_u64 + 1,
                 "time_quality": "gps_locked"
             }

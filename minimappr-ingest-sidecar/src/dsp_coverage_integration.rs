@@ -79,8 +79,12 @@ impl DspWorker {
         // A test delivery is a batch of one, so it ends at a batch boundary.
         let ingested_payload = self.ingest_one(manifest, pending_backlog_depth).await;
         let ready_payloads = self.take_ready_deferred_localizations(true).await;
-        for mut payload in ingested_payload.into_iter().chain(ready_payloads) {
-            self.prepare_dispatch(&mut payload).await;
+        let mut dispatched_payloads = Vec::new();
+        for payload in ingested_payload.into_iter().chain(ready_payloads) {
+            dispatched_payloads.extend(self.prepare_dispatch(payload).await);
+        }
+        dispatched_payloads.extend(self.release_held_renders_at_batch_boundary().await);
+        for payload in dispatched_payloads {
             let result = crate::actors::dsp_compute::run_math(payload);
             crate::actors::dsp_compute::run_io(result).await;
         }
@@ -109,8 +113,12 @@ impl DspWorker {
     pub(crate) async fn run_poll_tick_deferred_localizations(&mut self) -> usize {
         let ready_payloads = self.take_ready_deferred_localizations(true).await;
         let released_count = ready_payloads.len();
-        for mut payload in ready_payloads {
-            self.prepare_dispatch(&mut payload).await;
+        let mut dispatched_payloads = Vec::new();
+        for payload in ready_payloads {
+            dispatched_payloads.extend(self.prepare_dispatch(payload).await);
+        }
+        dispatched_payloads.extend(self.release_held_renders_at_batch_boundary().await);
+        for payload in dispatched_payloads {
             let result = crate::actors::dsp_compute::run_math(payload);
             crate::actors::dsp_compute::run_io(result).await;
         }

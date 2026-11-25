@@ -270,6 +270,37 @@ async def test_launch_without_buildable_geometry_does_not_block_the_sidecar(harn
     assert await harness.publisher.launch_geometry_json() is None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stored_overrides",
+    [
+        {"position_m": [float("nan"), 2.0, 3.0]},
+        {"position_m": [1.0, 2.0, 3.0], "position_std_m": float("inf")},
+    ],
+    ids=["nan_position", "infinite_accuracy"],
+)
+async def test_non_finite_stored_override_skips_that_node_and_still_launches(
+    harness: PublisherHarness, stored_overrides: dict, caplog: pytest.LogCaptureFixture
+) -> None:
+    harness.storage.node_rows.append(node_row("broken", overrides=stored_overrides))
+    harness.storage.node_rows.append(node_row("pinned", overrides={"position_m": [1.0, 2.0, 3.0]}))
+
+    with caplog.at_level(logging.WARNING):
+        launch_json = await harness.publisher.launch_geometry_json()
+
+    body = json.loads(launch_json)
+    assert list(body["node_placements"]) == ["pinned"]
+    assert any("broken" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_launch_body_that_cannot_serialize_does_not_block_the_sidecar(harness: PublisherHarness) -> None:
+    harness.storage.node_rows.append(node_row("pinned", overrides={"position_m": [1.0, 2.0, 3.0]}))
+    harness.publisher.adopted_push_body = lambda: {"site_origin": {"alt_m": float("nan")}}  # type: ignore[method-assign]
+
+    assert await harness.publisher.launch_geometry_json() is None
+
+
 class _FakeSidecarHttpHandler(BaseHTTPRequestHandler):
     server_version = "fake-sidecar"
     routes: dict[tuple[str, str], tuple[int, dict]] = {}

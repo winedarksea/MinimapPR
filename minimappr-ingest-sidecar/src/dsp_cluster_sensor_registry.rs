@@ -91,6 +91,7 @@ impl ClusterSensorRegistry {
             .and_then(|context| context.get("node"));
         let array = match validate_node_array_geometry(node, request.channel_count) {
             NodeArrayGeometryVerdict::LargeArrayOmniFallback { reason } => {
+                self.leave_automatic_cluster(request.stream_key, node_id);
                 return NodeRoutingOutcome {
                     route: self.unbuffered_large_array_route(request, node_id),
                     large_array_omni_fallback_reason: Some(reason),
@@ -99,7 +100,14 @@ impl ClusterSensorRegistry {
             NodeArrayGeometryVerdict::Usable(array) => Some(array),
             NodeArrayGeometryVerdict::UnusableSmallArray => None,
         };
-        let routed = match explicit_cluster_declaration(request.manifest) {
+        let explicit_cluster = explicit_cluster_declaration(request.manifest);
+        // A node routed anywhere else must not linger in the automatic
+        // cluster for the stale window: its silent channels there would hold
+        // every coverage wait.
+        if !matches!(explicit_cluster, ExplicitClusterDeclaration::Absent) || array.is_none() {
+            self.leave_automatic_cluster(request.stream_key, node_id);
+        }
+        let routed = match explicit_cluster {
             ExplicitClusterDeclaration::Declared(cluster) => {
                 self.route_into_explicit_cluster(request, node_id, array.as_ref(), cluster)
             }
@@ -235,16 +243,20 @@ impl ClusterSensorRegistry {
             body_offsets_m: array.body_offsets_m.clone(),
             reported_fix: node.and_then(reported_node_fix_from_node_context),
         };
-        let Ok(placed) = place_automatic_cluster_member(site_geometry, node_id, &member) else {
-            // A member that lost its trusted position must not keep lending
-            // its last one to the shared buffer.
-            if let Some(set) = self.sets_by_buffer_key.get_mut(&buffer_key) {
-                if set.remove_node(node_id) {
-                    set.layout_revision =
-                        issue_layout_revision(&mut self.last_issued_layout_revision);
-                }
+        let placed = match place_automatic_cluster_member(site_geometry, node_id, &member) {
+            Ok(placed) => Some(placed),
+            // A packet without a fix, or a momentarily untrusted one (gps <->
+            // gps_fallback flapping), keeps the member's last trusted placement
+            // for the stale window: leaving and rejoining would reorder the
+            // shared buffer, emptying its audio and releasing parked solves.
+            // The held sensors are not refreshed, so they expire on schedule.
+            Err(_) if self.holds_trusted_placement(&buffer_key, node_id, request) => None,
+            Err(_) => {
+                // Past the hold, a member that lost its trusted position must
+                // not keep lending its last one to the shared buffer.
+                self.leave_automatic_cluster(request.stream_key, node_id);
+                return Err(NodeLocalRoutingReason::NodePositionUntrustedNoOverride);
             }
-            return Err(NodeLocalRoutingReason::NodePositionUntrustedNoOverride);
         };
         let set = self
             .sets_by_buffer_key
@@ -256,20 +268,22 @@ impl ClusterSensorRegistry {
                 )
             });
         let mut changed = set.evict_stale(request.now_ns, self.stale_after_ns);
-        changed |= set.retain_node_channels(node_id, request.channel_count);
-        for (channel_index, position_m) in placed.sensor_positions_m.into_iter().enumerate() {
-            changed |= set.observe(
-                &sensor_id_for_node_channel(node_id, channel_index),
-                SensorObservation {
-                    position_m,
-                    position_source: placed.position_source,
-                    position_std_m: placed.position_std_m,
-                    sample_rate_hz: Some(request.sample_rate_hz),
-                },
-                request.now_ns,
-            );
+        if let Some(placed) = placed {
+            changed |= set.retain_node_channels(node_id, request.channel_count);
+            for (channel_index, position_m) in placed.sensor_positions_m.into_iter().enumerate() {
+                changed |= set.observe(
+                    &sensor_id_for_node_channel(node_id, channel_index),
+                    SensorObservation {
+                        position_m,
+                        position_source: placed.position_source,
+                        position_std_m: placed.position_std_m,
+                        sample_rate_hz: Some(request.sample_rate_hz),
+                    },
+                    request.now_ns,
+                );
+            }
+            set.automatic_members.insert(node_id.to_string(), member);
         }
-        set.automatic_members.insert(node_id.to_string(), member);
         changed |= replace_other_automatic_cluster_members(set, site_geometry, node_id);
         set.set_node_half_space(node_id, array.half_space);
         let coordinate_frame = site_geometry.coordinate_frame();
@@ -285,6 +299,34 @@ impl ClusterSensorRegistry {
             max_solve_sensors: self.max_solve_sensors,
         };
         Ok(snapshot_route(set, buffer_key, request, node_id, context))
+    }
+
+    /// True while every one of the node's channels still sits in the
+    /// automatic cluster from a trusted placement younger than the stale window.
+    fn holds_trusted_placement(
+        &self,
+        buffer_key: &str,
+        node_id: &str,
+        request: &NodeRoutingRequest,
+    ) -> bool {
+        self.sets_by_buffer_key.get(buffer_key).is_some_and(|set| {
+            set.automatic_members.contains_key(node_id)
+                && set.node_sensors_fresh(
+                    node_id,
+                    request.channel_count,
+                    request.now_ns,
+                    self.stale_after_ns,
+                )
+        })
+    }
+
+    fn leave_automatic_cluster(&mut self, stream_key: &str, node_id: &str) {
+        let buffer_key = cluster_buffer_key(AUTOMATIC_GPS_CLUSTER_ID, stream_key);
+        if let Some(set) = self.sets_by_buffer_key.get_mut(&buffer_key) {
+            if set.remove_node(node_id) {
+                set.layout_revision = issue_layout_revision(&mut self.last_issued_layout_revision);
+            }
+        }
     }
 
     fn route_node_local(

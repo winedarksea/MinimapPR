@@ -13,7 +13,8 @@ use crate::{
     },
     localization_solve_provenance::{localization_manifest_payload, localization_result_manifest},
     srp_phat::{
-        estimate_tetrahedral_steering, SrpPhatConfig, SrpPhatEvaluation, SrpPhatLocalization,
+        estimate_tetrahedral_steering_with_pair_filter, SrpPhatConfig, SrpPhatEvaluation,
+        SrpPhatLocalization,
     },
 };
 
@@ -98,13 +99,15 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
             ),
             ..SrpPhatConfig::default()
         };
-        estimate_tetrahedral_steering(
+        let admits_pair = |ch_a: usize, ch_b: usize| payload.pair_admission.admits_pair(ch_a, ch_b);
+        estimate_tetrahedral_steering_with_pair_filter(
             windows.as_slice(),
             &payload.active_channels,
             payload.sensor_layout.positions_m.as_slice(),
             payload.sr,
             payload.effective_sound_speed_mps,
             srp_config,
+            Some(&admits_pair),
         )
     } else {
         let skipped_reason = if payload.run_srp {
@@ -133,7 +136,8 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
     };
 
     let pair_tdoas = localization_evaluation.pair_tdoas;
-    let localization = localization_evaluation.localization;
+    let mut localization = localization_evaluation.localization;
+    inflate_covariance_for_pair_timing(&payload, &mut localization, &pair_tdoas);
 
     let fallback_reason = if let Some(ref reason) = payload.omni_fallback_reason {
         Some(reason.clone())
@@ -147,14 +151,18 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
 
     let (pcm_bytes, listenable_pcm_bytes, render_meta, render_cov) =
         if payload.run_classifier_render {
+            let admitted_classification_windows =
+                pair_admitted_render_windows(&payload, &payload.classification_windows);
+            let admitted_listenable_classification_windows =
+                pair_admitted_render_windows(&payload, &payload.listenable_classification_windows);
             let render_channels: &[Vec<f32>] = payload
                 .omni_channels_override
                 .as_deref()
-                .unwrap_or(payload.classification_windows.as_slice());
+                .unwrap_or(admitted_classification_windows.as_ref());
             let listenable_render_channels: &[Vec<f32>] = payload
                 .listenable_omni_channels_override
                 .as_deref()
-                .unwrap_or(payload.listenable_classification_windows.as_slice());
+                .unwrap_or(admitted_listenable_classification_windows.as_ref());
 
             let cov = render_coverage_json(
                 &payload.classification_coverage,
@@ -398,6 +406,48 @@ pub async fn run_io(result: ComputeMathResult) {
             }
         }
     }
+}
+
+/// Widens the published covariance by the clock error of the cross-node
+/// pairs the solve used (see `SolvePairAdmission::cross_node_timing_variance_m2`).
+fn inflate_covariance_for_pair_timing(
+    payload: &ComputePayload,
+    localization: &mut SrpPhatLocalization,
+    correlated_pairs: &[PairTdoa],
+) {
+    let Some(covariance_m2) = localization.position_covariance_m2.as_mut() else {
+        return;
+    };
+    let timing_variance_m2 = payload
+        .pair_admission
+        .cross_node_timing_variance_m2(correlated_pairs, payload.effective_sound_speed_mps)
+        as f32;
+    for (axis, row) in covariance_m2.iter_mut().enumerate() {
+        row[axis] += timing_variance_m2;
+    }
+}
+
+/// The trailing classification windows with every channel the pair admission
+/// keeps out of a beamformed render emptied (the render drops empty channels).
+/// Override channels (omni fallbacks) are node-local or unaligned mixes and
+/// pass through untouched.
+fn pair_admitted_render_windows<'a>(
+    payload: &ComputePayload,
+    windows: &'a [Vec<f32>],
+) -> std::borrow::Cow<'a, [Vec<f32>]> {
+    let render_excluded = payload
+        .pair_admission
+        .render_excluded_sensor_indices(&payload.sensor_layout);
+    if render_excluded.is_empty() {
+        return std::borrow::Cow::Borrowed(windows);
+    }
+    let mut admitted = windows.to_vec();
+    for sensor_index in render_excluded {
+        if let Some(window) = admitted.get_mut(sensor_index) {
+            window.clear();
+        }
+    }
+    std::borrow::Cow::Owned(admitted)
 }
 
 fn enrich_node_context_with_runtime_telemetry(payload: &mut ComputePayload) {

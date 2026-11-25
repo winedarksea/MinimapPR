@@ -206,11 +206,44 @@ impl ThreeNodeCluster {
             &self.source,
             &[&self.tetra, &self.near_point, &self.adjacent_point],
         );
+        assert_pair_timing_widens_the_published_covariance(solve);
+    }
+}
+
+/// Every admitted pair states its timing uncertainty (0 within one node), and
+/// the published covariance is at least (sound speed x worst cross-node pair
+/// uncertainty)^2 on every axis, since the SRP solver cannot weight pairs.
+fn assert_pair_timing_widens_the_published_covariance(solve: &DspManifest) {
+    let localization = solve.localization.as_ref().expect("localization payload");
+    let mut worst_cross_node_seconds = 0.0_f32;
+    for pair in &localization.pair_tdoas {
+        let seconds = pair
+            .timing_uncertainty_seconds
+            .unwrap_or_else(|| panic!("{pair:?} has no timing_uncertainty_seconds"));
+        if pair.is_cross_node == Some(true) {
+            assert!(
+                seconds > 0.0,
+                "{pair:?}: two clocks are never perfectly aligned"
+            );
+            worst_cross_node_seconds = worst_cross_node_seconds.max(seconds);
+        } else {
+            assert_eq!(seconds, 0.0, "{pair:?}: one node shares one clock");
+        }
+    }
+    let covariance_m2 = localization
+        .position_covariance_m2
+        .expect("a solved cluster position has a covariance");
+    let minimum_variance_m2 = (localization.sound_speed_mps * worst_cross_node_seconds).powi(2);
+    for (axis, row) in covariance_m2.iter().enumerate() {
+        assert!(
+            row[axis] >= minimum_variance_m2 * 0.999,
+            "axis {axis}: {} m^2 < clock floor {minimum_variance_m2} m^2",
+            row[axis]
+        );
     }
 }
 
 #[tokio::test]
-#[ignore = "localization overhaul milestone 2: no pair admission yet; every pair is correlated (R7)"]
 async fn short_baseline_cross_node_pair_is_excluded_while_both_other_node_pairs_solve() {
     let cluster = ThreeNodeCluster::new();
     let mut harness = RaceHarness::new(race_config(true)).await;
@@ -236,7 +269,6 @@ async fn short_baseline_cross_node_pair_is_excluded_while_both_other_node_pairs_
 }
 
 #[tokio::test]
-#[ignore = "localization overhaul milestone 2: a released parked solve rebuilds its pairs from coverage alone (R7)"]
 async fn late_packet_releasing_a_parked_solve_keeps_the_short_baseline_exclusion() {
     let cluster = ThreeNodeCluster::new();
     let mut harness = RaceHarness::new(race_config(true)).await;

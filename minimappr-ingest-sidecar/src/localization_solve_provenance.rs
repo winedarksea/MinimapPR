@@ -9,26 +9,75 @@
 //! `dsp_covered_event_solve`).
 
 use minimappr_core::localization_sensor_entry::{
-    ExcludedSensor, SolveExclusionReason, SolveProvenance, SOLVE_PROVENANCE_SCHEMA_VERSION,
+    ExcludedSensor, ExcludedSensorPair, NodeTimingEvidence, SolveExclusionReason, SolveProvenance,
+    SolveSensorEntry, SOLVE_PROVENANCE_SCHEMA_VERSION,
 };
 use uuid::Uuid;
 
 use crate::{
-    dsp_worker::{ComputePayload, PairTdoa, SolveSensorLayout},
+    dsp_worker::{ComputePayload, NodeClockAssessments, PairTdoa, SolveSensorLayout},
     manifests::{DspManifest, LocalizationManifestPayload, PairTdoaDiagnostic},
     srp_phat::{HalfSpace, SrpPhatLocalization},
 };
 
 /// A steering vector shorter than this carries no direction.
 const MINIMUM_STEERING_DIRECTION_MAGNITUDE: f32 = 1.0e-6;
+const NANOSECONDS_PER_SECOND_F64: f64 = 1.0e9;
 
 /// What one solve ran on, beyond its layout snapshot.
 pub(crate) struct SolveProvenanceInputs<'a> {
     pub(crate) solve_id: &'a str,
     pub(crate) attempt_kind: minimappr_core::localization_sensor_entry::SolveAttemptKind,
     pub(crate) active_sensor_indices: &'a [usize],
+    /// The solve's pair admission exclusions (`SolvePairAdmission`).
+    pub(crate) excluded_pairs: &'a [ExcludedSensorPair],
     pub(crate) window_center_time_ns: i128,
     pub(crate) window_seconds: f64,
+    /// The trigger-time clock snapshot the payload carries.
+    pub(crate) node_clock_assessments: &'a NodeClockAssessments,
+}
+
+/// Layout sensors with their node's clock evidence; a node absent from the
+/// snapshot keeps the layout's unknown/null clock fields.
+fn sensors_with_clock_evidence(
+    layout: &SolveSensorLayout,
+    node_clock_assessments: &NodeClockAssessments,
+) -> Vec<SolveSensorEntry> {
+    let mut sensors = layout.sensors.clone();
+    for sensor in &mut sensors {
+        if let Some(assessment) = node_clock_assessments.get(&sensor.node_id) {
+            sensor.clock_source = assessment.time_quality;
+            sensor.clock_offset_std_s = Some(assessment.timing_uncertainty_seconds);
+        }
+    }
+    sensors
+}
+
+/// One `node_timing` row per layout node, in sensor order.
+fn node_timing_evidence(
+    layout: &SolveSensorLayout,
+    node_clock_assessments: &NodeClockAssessments,
+) -> Vec<NodeTimingEvidence> {
+    let mut node_timing: Vec<NodeTimingEvidence> = Vec::new();
+    for sensor in &layout.sensors {
+        if node_timing.iter().any(|row| row.node_id == sensor.node_id) {
+            continue;
+        }
+        let Some(assessment) = node_clock_assessments.get(&sensor.node_id) else {
+            continue;
+        };
+        node_timing.push(NodeTimingEvidence {
+            node_id: assessment.node_id.clone(),
+            time_quality: assessment.time_quality,
+            clock_offset_std_s: Some(assessment.timing_uncertainty_seconds),
+            timeline_residual_ns: assessment
+                .timeline_residual_seconds
+                .map(|residual| (residual * NANOSECONDS_PER_SECOND_F64).round() as i64),
+            last_timestamp_step_ns: assessment.last_timestamp_step_ns,
+            timestamp_step_count: u64::from(assessment.timestamp_step_count),
+        });
+    }
+    node_timing
 }
 
 /// Every sensor of the layout is either active or excluded with a reason:
@@ -64,12 +113,11 @@ pub(crate) fn build_solve_provenance(
         coordinate_frame: layout.coordinate_frame.clone(),
         layout_revision: layout.layout_revision,
         geometry_push_revision: layout.geometry_push_revision,
-        sensors: layout.sensors.clone(),
+        sensors: sensors_with_clock_evidence(layout, inputs.node_clock_assessments),
         active_sensor_indices: inputs.active_sensor_indices.to_vec(),
         excluded_sensors,
-        // Clock evidence and pair admission land with milestone 2 (R5 / R7).
-        excluded_pairs: Vec::new(),
-        node_timing: Vec::new(),
+        excluded_pairs: inputs.excluded_pairs.to_vec(),
+        node_timing: node_timing_evidence(layout, inputs.node_clock_assessments),
         window_center_time_ns: i64::try_from(inputs.window_center_time_ns).unwrap_or(i64::MAX),
         window_seconds: inputs.window_seconds,
         solve_sample_rate_hz: layout.solve_sample_rate_hz,
@@ -93,7 +141,11 @@ pub(crate) fn localization_manifest_payload(
             lag_seconds: pair.tdoa.lag_seconds,
             confidence: pair.tdoa.confidence,
             is_cross_node: Some(layout.is_cross_node_pair(pair.ch_a, pair.ch_b)),
-            timing_uncertainty_seconds: None,
+            timing_uncertainty_seconds: Some(
+                payload
+                    .pair_admission
+                    .pair_timing_uncertainty_seconds(pair.ch_a, pair.ch_b) as f32,
+            ),
         })
         .collect();
     let steering_magnitude = localization
@@ -128,8 +180,10 @@ pub(crate) fn localization_manifest_payload(
                 solve_id: &payload.solve_id,
                 attempt_kind: payload.attempt_kind,
                 active_sensor_indices: &payload.active_channels,
+                excluded_pairs: payload.pair_admission.excluded_pairs(),
                 window_center_time_ns: payload.localization_window_center_time_ns,
                 window_seconds: payload.localization_window_seconds,
+                node_clock_assessments: &payload.node_clock_assessments,
             },
         )),
     }

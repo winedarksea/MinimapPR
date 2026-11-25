@@ -25,6 +25,8 @@ import urllib.request
 import numpy as np
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, model_validator
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -1826,6 +1828,26 @@ async def process_role_route_guard(request: Request, call_next):
         if not allowed:
             return JSONResponse(status_code=404, content={"detail": "Endpoint is not served by the ingest process"})
     return await call_next(request)
+
+
+def _non_finite_floats_as_text(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        return repr(value)
+    if isinstance(value, dict):
+        return {key: _non_finite_floats_as_text(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_non_finite_floats_as_text(item) for item in value]
+    return value
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error_handler(request: Request, exc: RequestValidationError):
+    # Starlette parses NaN/Infinity in JSON bodies; echoing that input back in
+    # the default 422 would make the response itself unserializable (a 500).
+    return JSONResponse(
+        status_code=422,
+        content={"detail": _non_finite_floats_as_text(jsonable_encoder(exc.errors()))},
+    )
 
 
 @app.exception_handler(RuntimeError)

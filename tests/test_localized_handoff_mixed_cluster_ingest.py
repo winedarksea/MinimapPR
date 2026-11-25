@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 
 from minimappr.api.rust_dsp_manifests import load_localized_render_manifest_bundle
+from minimappr.api.rust_solve_contract_degradation import SOLVE_CONTRACT_VIOLATION_FALLBACK_REASON
 from minimappr.classifiers.heuristic import HeuristicClassifier
 from minimappr.config import Settings
 from minimappr.core.audio_buffer import MultiSensorBuffer
@@ -225,5 +226,48 @@ async def test_cross_reporter_duplicates_merge_only_when_spatially_consistent(
     assert merged_count == 2 - expected_detection_count
     if expected_detection_count == 1:
         assert detections[0]["source_node_id"] == PLANAR_NODE_ID
+    await fusion.stop()
+    await storage.close()
+
+
+async def test_render_whose_solve_breaks_the_contract_is_stored_omni_and_counted(tmp_path: Path) -> None:
+    fusion, storage = await _started_fusion(tmp_path, solver="rust")
+    localization = mixed_cluster_solve_localization_payload(
+        arrival_order=ARRIVAL_ORDERS["planar_first"],
+        source_position_m=SOURCE_POSITION_M,
+        frame_id=site_frame_id_for_coordinate_frame(fusion.coordinate_frame),
+        reporting_node_id=POINT_NODE_ID,
+    )
+    # Version skew: an enum value this parser predates, without a schema bump.
+    localization["solve_provenance"]["buffer_scope"] = "federated_cluster"
+    manifest = classifier_render_manifest(node_payload=point_node_payload(), localization=localization, toa_ns=PACKET_TOA_NS)
+
+    await fusion.ingest_localized_render(load_localized_render_manifest_bundle(manifest_payload=manifest).request)
+
+    detections = await storage.list_detections(limit=10)
+    assert len(detections) == 1
+    assert detections[0]["reporting_modality"] == "omni"
+    assert tuple(detections[0]["position_m"]) == pytest.approx(POINT_NODE_POSITION_M)
+    assert fusion._metrics.localization_drops_by_reason.get(SOLVE_CONTRACT_VIOLATION_FALLBACK_REASON) == 1
+    await fusion.stop()
+    await storage.close()
+
+
+async def test_solve_manifest_without_toa_ns_is_stored_at_the_solve_window_center(tmp_path: Path) -> None:
+    fusion, storage = await _started_fusion(tmp_path, solver="rust")
+    localization = mixed_cluster_solve_localization_payload(
+        arrival_order=ARRIVAL_ORDERS["planar_first"],
+        source_position_m=SOURCE_POSITION_M,
+        frame_id=site_frame_id_for_coordinate_frame(fusion.coordinate_frame),
+        reporting_node_id=PLANAR_NODE_ID,
+    )
+    manifest = classifier_render_manifest(node_payload=planar_node_payload(), localization=localization, toa_ns=None)
+
+    await fusion.ingest_localized_render(load_localized_render_manifest_bundle(manifest_payload=manifest).request)
+
+    detections = await storage.list_detections(limit=10)
+    assert len(detections) == 1
+    assert detections[0]["reporting_modality"] == "localized"
+    assert int(detections[0]["timestamp_ns"]) == MIXED_WINDOW_CENTER_TIME_NS
     await fusion.stop()
     await storage.close()

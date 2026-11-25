@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest
+from minimappr.api.rust_solve_contract_degradation import SOLVE_CONTRACT_VIOLATION_FALLBACK_REASON
 from minimappr.core.fusion_stage_carriers import EventCandidate, LocalizationBranch, LocalizedCandidate
 from minimappr.core.localized_handoff_duplicate_merge import (
     CrossReporterDuplicateMerger,
@@ -82,6 +83,11 @@ class LocalizedRenderHandoff:
             reporting_modality = "omni"
         if reporting_modality == "omni" and node.position_m is None:
             raise ValueError("Omni classifier render requires node.position_m")
+        if payload.fallback_reason == SOLVE_CONTRACT_VIOLATION_FALLBACK_REASON:
+            # The loader already degraded the broken solve; count the lost localization.
+            host._record_silent_drop(
+                stage="localization", reason=SOLVE_CONTRACT_VIOLATION_FALLBACK_REASON, source_node_id=node.id
+            )
 
         registered_node, geometry = await self._register_node_and_resolve_geometry(
             payload,

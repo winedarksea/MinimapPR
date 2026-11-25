@@ -192,6 +192,13 @@ struct FarFieldRangeEstimate {
     range_projection_mode: &'static str,
 }
 
+/// Whether a solve may correlate channels `(ch_a, ch_b)` (buffer indices,
+/// `ch_a < ch_b`). The sidecar's pair admission (baseline, coverage, clock
+/// timeline) decides it; `None` admits every pair among the active channels.
+pub type AdmittedChannelPairFilter<'a> = &'a dyn Fn(usize, usize) -> bool;
+
+/// Every pair among `active_channels` (see
+/// [`estimate_tetrahedral_steering_with_pair_filter`]).
 pub fn estimate_tetrahedral_steering(
     windows: &[Vec<f32>],
     active_channels: &[usize],
@@ -200,10 +207,33 @@ pub fn estimate_tetrahedral_steering(
     sound_speed_mps: f32,
     config: SrpPhatConfig,
 ) -> SrpPhatEvaluation {
+    estimate_tetrahedral_steering_with_pair_filter(
+        windows,
+        active_channels,
+        mic_positions_m,
+        sample_rate_hz,
+        sound_speed_mps,
+        config,
+        None,
+    )
+}
+
+/// SRP-PHAT solve over the admitted pairs only: a rejected pair is never
+/// correlated, so it reaches neither the SRP grid, the reference TDOAs, the
+/// covariance nor the published `pair_tdoas`.
+pub fn estimate_tetrahedral_steering_with_pair_filter(
+    windows: &[Vec<f32>],
+    active_channels: &[usize],
+    mic_positions_m: &[[f32; 3]],
+    sample_rate_hz: u32,
+    sound_speed_mps: f32,
+    config: SrpPhatConfig,
+    admitted_pair_filter: Option<AdmittedChannelPairFilter<'_>>,
+) -> SrpPhatEvaluation {
     let mut ordered_channels = active_channels.to_vec();
     ordered_channels.sort_unstable();
 
-    let pair_observations = build_pair_observations(
+    let pair_observations = build_admitted_pair_observations(
         windows,
         &ordered_channels,
         mic_positions_m,
@@ -211,6 +241,7 @@ pub fn estimate_tetrahedral_steering(
         sound_speed_mps,
         config.localization_band_hz,
         config.interp_factor,
+        admitted_pair_filter,
     );
     let pair_tdoas = pair_observations
         .iter()
@@ -228,13 +259,26 @@ pub fn estimate_tetrahedral_steering(
         };
     }
 
+    // The reference TDOAs only exist for admitted pairs, so the channel with
+    // the most admitted partners anchors the fit (loudest among equals). With
+    // every pair admitted the counts tie and this is the loudest channel.
+    let admitted_partner_count = |channel: usize| {
+        pair_observations
+            .iter()
+            .filter(|pair| pair.ch_a == channel || pair.ch_b == channel)
+            .count()
+    };
     let reference_channel = ordered_channels
         .iter()
         .copied()
         .max_by(|left, right| {
-            window_rms(&windows[*left])
-                .partial_cmp(&window_rms(&windows[*right]))
-                .unwrap_or(Ordering::Equal)
+            admitted_partner_count(*left)
+                .cmp(&admitted_partner_count(*right))
+                .then_with(|| {
+                    window_rms(&windows[*left])
+                        .partial_cmp(&window_rms(&windows[*right]))
+                        .unwrap_or(Ordering::Equal)
+                })
         })
         .unwrap_or(ordered_channels[0]);
     let reference_rms = window_rms(&windows[reference_channel]);
@@ -411,6 +455,7 @@ fn degraded_localization(resolved_algorithm: &str, sound_speed_mps: f32) -> SrpP
     }
 }
 
+#[cfg(test)]
 fn build_pair_observations(
     windows: &[Vec<f32>],
     active_channels: &[usize],
@@ -420,9 +465,34 @@ fn build_pair_observations(
     localization_band_hz: [f32; 2],
     interp_factor: usize,
 ) -> Vec<PairObservation> {
+    build_admitted_pair_observations(
+        windows,
+        active_channels,
+        mic_positions_m,
+        sample_rate_hz,
+        sound_speed_mps,
+        localization_band_hz,
+        interp_factor,
+        None,
+    )
+}
+
+fn build_admitted_pair_observations(
+    windows: &[Vec<f32>],
+    active_channels: &[usize],
+    mic_positions_m: &[[f32; 3]],
+    sample_rate_hz: u32,
+    sound_speed_mps: f32,
+    localization_band_hz: [f32; 2],
+    interp_factor: usize,
+    admitted_pair_filter: Option<AdmittedChannelPairFilter<'_>>,
+) -> Vec<PairObservation> {
     let mut pairs = Vec::new();
     for (left_index, &ch_a) in active_channels.iter().enumerate() {
         for &ch_b in &active_channels[left_index + 1..] {
+            if admitted_pair_filter.is_some_and(|admits_pair| !admits_pair(ch_a, ch_b)) {
+                continue;
+            }
             let max_tau_s = pair_max_tau_s(
                 mic_positions_m[ch_a],
                 mic_positions_m[ch_b],
@@ -880,10 +950,16 @@ fn pairwise_far_field_direction(
 
     let mut rows = Vec::new();
     let mut targets = Vec::new();
+    // A channel whose pair with the reference was not admitted has no
+    // relative TDOA; it is left out of the direction fit rather than voiding it.
     for (left_index, &channel_a) in active_channels.iter().enumerate() {
-        let tau_a_seconds = relative_tdoa_seconds[channel_a]?;
+        let Some(tau_a_seconds) = relative_tdoa_seconds[channel_a] else {
+            continue;
+        };
         for &channel_b in &active_channels[left_index + 1..] {
-            let tau_b_seconds = relative_tdoa_seconds[channel_b]?;
+            let Some(tau_b_seconds) = relative_tdoa_seconds[channel_b] else {
+                continue;
+            };
             rows.push(sub(mic_positions_m[channel_b], mic_positions_m[channel_a]));
             targets.push(sound_speed_mps * (tau_a_seconds - tau_b_seconds));
         }
@@ -2755,3 +2831,7 @@ mod tests {
         assert_eq!(HalfSpace::from_wire_str("garbage"), HalfSpace::None);
     }
 }
+
+#[cfg(test)]
+#[path = "srp_phat_pair_filter_tests.rs"]
+mod srp_phat_pair_filter_tests;

@@ -61,8 +61,14 @@ fn provenance_reports_the_snapshot_and_a_reason_for_every_inactive_sensor() {
             solve_id: "solve-1",
             attempt_kind: SolveAttemptKind::EventTriggerAbsoluteRms,
             active_sensor_indices: &[0, 2],
+            excluded_pairs: &[ExcludedSensorPair {
+                sensor_index_a: 0,
+                sensor_index_b: 1,
+                reason: SolveExclusionReason::CoverageBelowThreshold,
+            }],
             window_center_time_ns: 1_500_000_000,
             window_seconds: 0.064,
+            node_clock_assessments: &NodeClockAssessments::new(),
         },
     );
     assert_eq!(provenance.solve_id, "solve-1");
@@ -90,9 +96,86 @@ fn provenance_reports_the_snapshot_and_a_reason_for_every_inactive_sensor() {
         ]
     );
     assert_eq!(provenance.node_local_routing_reason, None);
-    assert!(provenance.excluded_pairs.is_empty() && provenance.node_timing.is_empty());
+    let wire = serde_json::to_value(&provenance).unwrap();
+    assert_eq!(
+        wire["excluded_pairs"],
+        serde_json::json!([
+            {"sensor_index_a": 0, "sensor_index_b": 1, "reason": "coverage_below_threshold"}
+        ])
+    );
+    assert!(provenance.node_timing.is_empty());
     assert_eq!(provenance.window_center_time_ns, 1_500_000_000);
     assert_eq!(provenance.solve_sample_rate_hz, RATE_HZ);
+}
+
+#[test]
+fn node_timing_and_sensor_clock_fields_come_from_the_payload_snapshot() {
+    use crate::dsp_worker::NodeClockAssessment;
+    let layout = site_layout(None);
+    let assessment = |node_id: &str, time_quality, uncertainty, residual, step, count| {
+        (
+            node_id.to_string(),
+            NodeClockAssessment {
+                node_id: node_id.to_string(),
+                time_quality,
+                timing_uncertainty_seconds: uncertainty,
+                timeline_residual_seconds: residual,
+                last_timestamp_step_ns: step,
+                timestamp_step_count: count,
+                residual_over_hard_limit: false,
+            },
+        )
+    };
+    let snapshot = NodeClockAssessments::from([
+        assessment(
+            "planar-a",
+            NodeTimeQuality::GpsLocked,
+            1e-6,
+            Some(1.2e-6),
+            None,
+            0,
+        ),
+        assessment(
+            "point-b",
+            NodeTimeQuality::NtpDisciplined,
+            0.021,
+            Some(0.015),
+            Some(-21_000_000),
+            1,
+        ),
+    ]);
+    let provenance = build_solve_provenance(
+        &layout,
+        SolveProvenanceInputs {
+            solve_id: "solve-3",
+            attempt_kind: SolveAttemptKind::EventTriggerAbsoluteRms,
+            active_sensor_indices: &[0, 1, 2],
+            excluded_pairs: &[],
+            window_center_time_ns: 0,
+            window_seconds: 0.064,
+            node_clock_assessments: &snapshot,
+        },
+    );
+    let wire = serde_json::to_value(&provenance).unwrap();
+    assert_eq!(
+        wire["node_timing"],
+        serde_json::json!([
+            {"node_id": "planar-a", "time_quality": "gps_locked", "clock_offset_std_s": 1e-6,
+             "timeline_residual_ns": 1200, "last_timestamp_step_ns": null, "timestamp_step_count": 0},
+            {"node_id": "point-b", "time_quality": "ntp_disciplined", "clock_offset_std_s": 0.021,
+             "timeline_residual_ns": 15_000_000, "last_timestamp_step_ns": -21_000_000,
+             "timestamp_step_count": 1}
+        ])
+    );
+    assert_eq!(wire["sensors"][0]["clock_source"], "gps_locked");
+    assert_eq!(wire["sensors"][0]["clock_domain"], "utc");
+    assert_eq!(wire["sensors"][0]["clock_offset_std_s"], 1e-6);
+    assert_eq!(wire["sensors"][3]["clock_source"], "ntp_disciplined");
+    assert_eq!(wire["sensors"][3]["clock_offset_std_s"], 0.021);
+    assert_eq!(
+        provenance.sensors[3].position_m, layout.sensors[3].position_m,
+        "positions stay the snapshot"
+    );
 }
 
 #[test]
@@ -106,8 +189,10 @@ fn node_local_routing_reason_is_published() {
             solve_id: "solve-2",
             attempt_kind: SolveAttemptKind::NotAttempted,
             active_sensor_indices: &[],
+            excluded_pairs: &[],
             window_center_time_ns: 0,
             window_seconds: 0.064,
+            node_clock_assessments: &NodeClockAssessments::new(),
         },
     );
     let wire = serde_json::to_value(&provenance).unwrap();

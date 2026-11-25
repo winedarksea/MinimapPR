@@ -9,9 +9,7 @@ use minimappr_core::localization_sensor_entry::{
     CoordinateFrameKind, NodeTimeQuality, SensorPositionSource, SolveBufferScope,
     SolveCoordinateFrame, SolveSensorEntry,
 };
-
-/// Timebase of every packet timestamp the sidecar decodes today.
-const PACKET_CLOCK_DOMAIN_UTC: &str = "utc";
+use minimappr_core::packet_frame_timing::PACKET_TIMESTAMP_CLOCK_DOMAIN_UTC;
 
 pub(crate) type SensorOrderKey = (String, usize, String);
 
@@ -113,6 +111,30 @@ impl BufferSensorSet {
         self.automatic_members
             .retain(|node_id, _| node_has_sensors(node_id));
         self.sensors.len() != before
+    }
+
+    /// Exactly channels `0..channel_count` of the node are registered, each
+    /// refreshed within `stale_after_ns`.
+    pub(crate) fn node_sensors_fresh(
+        &self,
+        node_id: &str,
+        channel_count: usize,
+        now_ns: u128,
+        stale_after_ns: u128,
+    ) -> bool {
+        let mut registered_channel_count = 0;
+        for ((sensor_node_id, channel_index, _), sensor) in &self.sensors {
+            if sensor_node_id != node_id {
+                continue;
+            }
+            if *channel_index >= channel_count
+                || now_ns.saturating_sub(sensor.last_refreshed_ns) > stale_after_ns
+            {
+                return false;
+            }
+            registered_channel_count += 1;
+        }
+        registered_channel_count == channel_count
     }
 
     /// Drops every trace of a node (it lost its trusted position).
@@ -221,7 +243,7 @@ pub(crate) fn snapshot_route(
                 position_source: sensor.position_source,
                 position_std_m: sensor.position_std_m,
                 clock_source: NodeTimeQuality::Unknown,
-                clock_domain: PACKET_CLOCK_DOMAIN_UTC.to_string(),
+                clock_domain: PACKET_TIMESTAMP_CLOCK_DOMAIN_UTC.to_string(),
                 clock_offset_std_s: None,
             },
         )

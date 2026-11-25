@@ -53,8 +53,11 @@ pub(crate) struct ComputePayload {
     pub(crate) solve_id: String,
     /// Why this payload solves (or `not_attempted`).
     pub(crate) attempt_kind: SolveAttemptKind,
-    /// Pairs SRP/covariance/render may use (admit-all until milestone 2, R7).
+    /// Pairs SRP/covariance/render may use and their timing uncertainty (R7).
     pub(crate) pair_admission: SolvePairAdmission,
+    /// Clock evidence of every layout node, snapshotted at trigger; a parked
+    /// or deferred solve keeps the snapshot it triggered with.
+    pub(crate) node_clock_assessments: Arc<NodeClockAssessments>,
     pub(crate) source_ids: Vec<String>,
     pub(crate) sr: u32,
     pub(crate) now_ns: u128,

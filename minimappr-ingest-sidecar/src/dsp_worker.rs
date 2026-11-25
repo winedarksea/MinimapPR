@@ -70,6 +70,8 @@ mod dsp_manifest_publish;
 mod dsp_node_array_geometry_gate;
 #[path = "dsp_node_clock_assessment.rs"]
 mod dsp_node_clock_assessment;
+#[path = "dsp_node_clock_quality.rs"]
+mod dsp_node_clock_quality;
 #[path = "dsp_preprocess.rs"]
 mod dsp_preprocess;
 #[path = "dsp_solve_pair_admission.rs"]
@@ -100,8 +102,8 @@ use self::localization_event_span::*;
 use self::dsp_manifest_buffering::*;
 pub(crate) use self::dsp_manifest_publish::*;
 pub(crate) use self::dsp_node_array_geometry_gate::*;
-#[allow(unused_imports, reason = "filled by R5, consumed by R7 (milestone 2)")]
 pub(crate) use self::dsp_node_clock_assessment::*;
+pub(crate) use self::dsp_node_clock_quality::*;
 pub(crate) use self::dsp_preprocess::*;
 pub(crate) use self::dsp_solve_pair_admission::*;
 pub(crate) use self::dsp_solve_sensor_layout::*;
@@ -167,6 +169,8 @@ pub struct DspWorker {
     buffer_channel_sensor_ids: HashMap<String, Arc<Vec<String>>>,
     /// Which sensors back each buffer, their order, positions and rates.
     sensor_registry: ClusterSensorRegistry,
+    /// Per-node clock evidence; each solve snapshots its layout's nodes.
+    node_clock_quality: NodeClockQualityTracker,
     /// Per-node preprocessing state (biquad memory etc.). Keyed by `node_id`
     /// extracted from the stream_key prefix, matching how `node_audio_overrides`
     /// is keyed in [`DspWorkerState`]. Lives outside the shared RwLock so frame
@@ -223,6 +227,7 @@ impl DspWorker {
             ));
         let sensor_registry = ClusterSensorRegistry::new(&config.localization_solve);
         let localization_trigger = LocalizationEventTrigger::new(&config);
+        let node_clock_quality = NodeClockQualityTracker::new(&config.localization_solve);
         Self {
             manifest_store,
             derived_cache,
@@ -235,6 +240,7 @@ impl DspWorker {
             buffers: HashMap::new(),
             buffer_channel_sensor_ids: HashMap::new(),
             sensor_registry,
+            node_clock_quality,
             node_audio_state: HashMap::new(),
             last_classifier_render_ns_by_stream: HashMap::new(),
             last_localization_ns_by_stream: HashMap::new(),
@@ -437,15 +443,20 @@ impl DspWorker {
             let ingested_payload = self.ingest_one(manifest, pending_backlog_depth).await;
             // A newer candidate can supersede (and so release) a parked one.
             let ready_payloads = self.take_ready_deferred_localizations(false).await;
-            for mut payload in ingested_payload.into_iter().chain(ready_payloads) {
-                self.prepare_dispatch(&mut payload).await;
-                dispatch(payload);
+            for payload in ingested_payload.into_iter().chain(ready_payloads) {
+                for ready in self.prepare_dispatch(payload).await {
+                    dispatch(ready);
+                }
             }
         }
         // Batch boundary (also the idle poll tick): decide parked windows.
-        for mut payload in self.take_ready_deferred_localizations(true).await {
-            self.prepare_dispatch(&mut payload).await;
-            dispatch(payload);
+        for payload in self.take_ready_deferred_localizations(true).await {
+            for ready in self.prepare_dispatch(payload).await {
+                dispatch(ready);
+            }
+        }
+        for ready in self.release_held_renders_at_batch_boundary().await {
+            dispatch(ready);
         }
     }
 
@@ -463,13 +474,6 @@ impl DspWorker {
                 owned_segments.len(),
             )
             .await;
-        }
-
-        if self
-            .should_skip_stale_manifest_for_live_buffer(owned_segments.first()?)
-            .await
-        {
-            return None;
         }
 
         // The node's own array failed the geometry gate (too many mics, or
@@ -526,6 +530,7 @@ impl DspWorker {
         let now_ns = system_now_ns();
         let cutoff = now_ns.saturating_sub(ttl_ns);
         self.sensor_registry.evict_stale_sensors(now_ns);
+        self.node_clock_quality.evict_stale(now_ns);
         let stale: Vec<String> = self
             .last_heartbeat_ns_by_stream
             .iter()
@@ -573,12 +578,22 @@ impl DspWorker {
     }
 
     /// Last step before a payload leaves for compute, in dispatch order: a
-    /// covering render takes over the event solve, then attempts are counted.
-    async fn prepare_dispatch(&mut self, payload: &mut ComputePayload) {
-        let buffers = self.buffers.get(&payload.stream_key).map(Vec::as_slice);
-        self.recent_event_trigger_solves
-            .remember_or_attach(payload, buffers);
-        self.note_stage_attempts(payload).await;
+    /// covering render takes over the event solve (or waits for a parked
+    /// one), then attempts are counted. Returns what to dispatch now.
+    async fn prepare_dispatch(&mut self, payload: ComputePayload) -> Vec<ComputePayload> {
+        let ready = self.route_through_covered_event_solves(payload);
+        for payload in &ready {
+            self.note_stage_attempts(payload).await;
+        }
+        ready
+    }
+
+    async fn release_held_renders_at_batch_boundary(&mut self) -> Vec<ComputePayload> {
+        let ready = self.release_every_held_render_no_longer_waiting();
+        for payload in &ready {
+            self.note_stage_attempts(payload).await;
+        }
+        ready
     }
 
     async fn note_stage_attempts(&self, payload: &ComputePayload) {
@@ -613,6 +628,10 @@ mod dsp_worker_coverage_race_tests;
 #[cfg(test)]
 #[path = "dsp_worker_never_streamed_member_tests.rs"]
 mod dsp_worker_never_streamed_member_tests;
+
+#[cfg(test)]
+#[path = "dsp_worker_clock_evidence_tests.rs"]
+mod dsp_worker_clock_evidence_tests;
 
 #[cfg(test)]
 #[path = "dsp_worker_test_node_fixtures.rs"]
