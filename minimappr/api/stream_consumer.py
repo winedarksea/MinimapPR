@@ -102,6 +102,10 @@ def _enrich_node_payload_from_context(
     return node_payload
 
 
+def _optional_text(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
 def _coerce_int(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
@@ -498,6 +502,8 @@ class IngestStreamConsumer:
                         start_sample_index=start_sample_index,
                         end_sample_index=end_sample_index,
                         end_time_ns=end_time_ns,
+                        time_quality=_optional_text(node_context.get("time_quality")),
+                        sequence=_coerce_int(frame_payload.get("sequence")),
                     )
             except ValueError as exc:
                 logger.warning(
