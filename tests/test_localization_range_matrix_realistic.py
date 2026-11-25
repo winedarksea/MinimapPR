@@ -125,23 +125,109 @@ DEFAULT_DIAGONAL_CELL_IDS = (
 )
 
 MILESTONE_2_WIDENING_REASON = "milestone 2: needs R5/R7/P9 widening"
-# Cells the pipeline cannot pass yet, with the reason; the integrator removes
-# an entry when the milestone that fixes it lands (strict: an unexpected pass fails).
+_HAND_MEASURED_WIDENING = (
+    MILESTONE_2_WIDENING_REASON + " (hand-measured position_std_m 0.3 m is not reflected: stated std ~0.05 m)"
+)
+_NTP_CROSS_NODE_WIDENING = (
+    MILESTONE_2_WIDENING_REASON + " (NTP cross-node pairs weighted as if GPS-locked: stated std ~0.05 m)"
+)
+_PLANAR_FAR_FIELD_GAP = (
+    "pipeline gap, not milestone 2: a planar array at 100 m+ (alone, or with its coplanar point node) solves "
+    "below min_localization_confidence and is stored omni, where a tetra at the same range localizes"
+)
+_SPREAD_FAR_FIELD_GAP = (
+    "pipeline gap, not milestone 2: the four-node cross-node solve at 100 m+ is unusable (event solve "
+    "range_asymptotic at confidence ~0.1, or the right bearing at about half the range with a covariance "
+    "that excludes the truth); no stored detection reaches the oracle class even GPS-locked"
+)
+_COMPACT_PLANAR_POINT_WEAK_CLOCK_GAP = (
+    "solver gap reported by P9, persists after milestone 2: compact planar + one point node with a biased "
+    "NTP clock collapses near the array with a too-small covariance"
+)
+
+
+def _gap(base: str, detail: str) -> str:
+    return f"{base}; measured: {detail}"
+
+
+# Cells the pipeline cannot pass yet (measured with --runxfail on this branch),
+# with the reason; the integrator removes an entry when the milestone that
+# fixes it lands (strict: an unexpected pass fails). Entries whose reason starts
+# with "milestone 2" are expected to flip; "pipeline gap" / "solver gap" ones are
+# open defects outside milestone 2.
 KNOWN_PIPELINE_GAPS: dict[str, str] = {
-    "10m-planar_point_coplanar-gps_locked-gps": (
-        "pipeline gap, not milestone 2: the coplanar planar+point cross-node solve returns the mirror image "
-        "(z error -3.5 m) with a covariance that excludes the truth (Mahalanobis^2 ~2500); the half-space "
-        "prior only applies to single-node solves and nothing widens the vertical axis"
+    # -- diagonal --
+    "10m-four_node_spread-ntp_timed-gps": _gap(
+        _NTP_CROSS_NODE_WIDENING, "localized 6.8 m off at 6.2 deg bearing error; oracle guarantees a 3-D fix"
     ),
-    "10m-four_node_spread-ntp_timed-gps": MILESTONE_2_WIDENING_REASON,
-    "100m-four_node_spread-gps_locked-hand_measured": (
-        MILESTONE_2_WIDENING_REASON + " (hand-measured position_std_m must down-weight cross-node pairs: today the "
-        "16-sensor SRP solve points the wrong way at confidence ~0.15 and the stored detection is omni)"
+    "100m-four_node_spread-gps_locked-hand_measured": _gap(
+        _SPREAD_FAR_FIELD_GAP + "; also " + MILESTONE_2_WIDENING_REASON,
+        "85 m off, bearing 45 deg wrong vs stated angular std 17 deg (Mahalanobis^2 55 > 13.8), or omni at confidence 0.15",
     ),
-    "1000m-four_node_spread-gps_locked-gps": (
-        "pipeline gap, not milestone 2: at 1 km the GPS-locked four-node solve gets the bearing right but "
-        "returns roughly half the range (290-710 m off) with a stated covariance that excludes the truth"
+    "1000m-four_node_spread-gps_locked-gps": _gap(
+        _SPREAD_FAR_FIELD_GAP, "bearing right but 460-710 m short with stated std 11-81 m, or no detection covers the event"
     ),
+    # -- milestone 2 widening, cross-node --
+    "1m-planar_point_coplanar-gps_locked-hand_measured": _gap(
+        _HAND_MEASURED_WIDENING, "claims a 3-D fix (0.28 m off) the oracle allows only as heard"
+    ),
+    "1m-four_node_spread-gps_locked-hand_measured": _gap(
+        _HAND_MEASURED_WIDENING, "0.31 m off vs stated std 0.05 m (Mahalanobis^2 39 > 16.3)"
+    ),
+    "1m-four_node_spread-ntp_timed-gps": _gap(
+        _NTP_CROSS_NODE_WIDENING, "1.53 m off vs stated std 0.05 m (Mahalanobis^2 934), bearing 19.7 deg"
+    ),
+    "10m-four_node_spread-gps_locked-hand_measured": _gap(
+        _HAND_MEASURED_WIDENING, "1.6 m off, bearing-only; oracle guarantees a 3-D fix"
+    ),
+    "10m-four_node_spread-ntp_timed-hand_measured": _gap(
+        MILESTONE_2_WIDENING_REASON, "stored omni (render fallback); oracle guarantees a 3-D fix"
+    ),
+    "100m-planar_point_coplanar-ntp_timed-hand_measured": _gap(
+        _HAND_MEASURED_WIDENING, "bearing 46 deg wrong vs stated angular std 5 deg (Mahalanobis^2 82 > 13.8)"
+    ),
+    # -- solver gaps P9 reports (compact planar + one point, weak clock) --
+    "10m-planar_point_coplanar-ntp_timed-gps": _gap(
+        _COMPACT_PLANAR_POINT_WEAK_CLOCK_GAP, "9.3 m off vs stated std [0.06, 0.07, 0.20] m, claims a 3-D fix"
+    ),
+    "10m-planar_point_coplanar-ntp_timed-hand_measured": _gap(
+        _COMPACT_PLANAR_POINT_WEAK_CLOCK_GAP, "9.5 m off vs stated std [0.06, 0.06, 0.19] m, claims a 3-D fix"
+    ),
+    "1000m-planar_point_coplanar-ntp_timed-gps": _gap(
+        _COMPACT_PLANAR_POINT_WEAK_CLOCK_GAP, "998 m off vs stated std [0.06, 0.09, 0.46] m, claims a 3-D fix"
+    ),
+    "1000m-planar_point_coplanar-ntp_timed-hand_measured": _gap(
+        _COMPACT_PLANAR_POINT_WEAK_CLOCK_GAP, "998 m off vs stated std [0.06, 0.08, 0.45] m, claims a 3-D fix"
+    ),
+    # -- planar far field --
+    **{
+        f"{range_m}m-single_planar-{clock}-{position}": _gap(_PLANAR_FAR_FIELD_GAP, "stored omni (low_localization_confidence)")
+        for range_m in (100, 1000)
+        for clock in CLOCK_CLASSES
+        for position in POSITION_SOURCES
+    },
+    "100m-planar_point_coplanar-gps_locked-gps": _gap(_PLANAR_FAR_FIELD_GAP, "stored omni (low_localization_confidence)"),
+    "100m-planar_point_coplanar-gps_locked-hand_measured": _gap(
+        _PLANAR_FAR_FIELD_GAP + "; also " + MILESTONE_2_WIDENING_REASON,
+        "bearing 51 deg wrong vs stated angular std 8 deg (Mahalanobis^2 46 > 13.8)",
+    ),
+    # -- spread far field --
+    "100m-four_node_spread-gps_locked-gps": _gap(_SPREAD_FAR_FIELD_GAP, "no stored detection covers the event"),
+    "100m-four_node_spread-ntp_timed-gps": _gap(_SPREAD_FAR_FIELD_GAP, "no stored detection covers the event"),
+    "100m-four_node_spread-ntp_timed-hand_measured": _gap(_SPREAD_FAR_FIELD_GAP, "stored omni"),
+    "1000m-four_node_spread-gps_locked-hand_measured": _gap(_SPREAD_FAR_FIELD_GAP, "no stored detection covers the event"),
+    "1000m-four_node_spread-ntp_timed-gps": _gap(_SPREAD_FAR_FIELD_GAP, "no stored detection covers the event"),
+    "1000m-four_node_spread-ntp_timed-hand_measured": _gap(_SPREAD_FAR_FIELD_GAP, "stored omni"),
+}
+# Cells that passed in one full-matrix run and failed in another (opt-in only):
+# non-strict, so they neither hide nor break the run.
+KNOWN_FLAKY_CELLS: dict[str, str] = {
+    "1m-planar_point_coplanar-gps_locked-gps": "flaky: range claim on the 6-sensor solve comes and goes run to run",
+    "1m-four_node_spread-ntp_timed-hand_measured": (
+        "flaky: sometimes stored omni (passes), sometimes a 1.2 m-off 3-D fix with stated std 0.05 m "
+        "(" + MILESTONE_2_WIDENING_REASON + ")"
+    ),
+    "1000m-planar_point_coplanar-gps_locked-gps": "flaky: some runs store no detection covering the event",
 }
 
 CELLS_BY_ID = {cell.cell_id: cell for cell in all_cells()}
@@ -158,6 +244,10 @@ def _cell_param(cell_id: str):
         marks.append(
             pytest.mark.xfail(strict=True, raises=RangeMatrixCellViolation, reason=KNOWN_PIPELINE_GAPS[cell_id])
         )
+    if cell_id in KNOWN_FLAKY_CELLS:
+        marks.append(
+            pytest.mark.xfail(strict=False, raises=RangeMatrixCellViolation, reason=KNOWN_FLAKY_CELLS[cell_id])
+        )
     return pytest.param(cell_id, id=cell_id, marks=marks)
 
 
@@ -173,6 +263,9 @@ def test_matrix_covers_every_combination_and_the_diagonal_spans_every_axis():
     assert {cell.clock_class for cell in diagonal} == set(CLOCK_CLASSES)
     assert {cell.position_source for cell in diagonal} == set(POSITION_SOURCES)
     assert set(KNOWN_PIPELINE_GAPS) <= set(CELLS_BY_ID)
+    assert set(KNOWN_FLAKY_CELLS) <= set(CELLS_BY_ID)
+    assert not set(KNOWN_FLAKY_CELLS) & set(KNOWN_PIPELINE_GAPS)
+    assert not set(KNOWN_FLAKY_CELLS) & set(DEFAULT_DIAGONAL_CELL_IDS)
 
 
 def test_pass_class_table_is_the_oracle_verdict():

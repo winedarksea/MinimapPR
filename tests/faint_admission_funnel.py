@@ -188,9 +188,14 @@ def _event_trigger_manifests(manifests: list[dict], span_ns: tuple[int, int]) ->
     return selected
 
 
+def _attempt_kinds(manifests: list[dict]) -> tuple[str, ...]:
+    return tuple(sorted({str(manifest["localization"]["solve_provenance"]["attempt_kind"]) for manifest in manifests}))
+
+
 def _bearing_error_deg(scene: AcousticScene, position_m) -> float:
     node_m = scene.node_position_enu_m(NODE_ID)
-    return angular_difference_deg(bearing_deg(node_m, np.asarray(position_m)), bearing_deg(node_m, np.asarray(scene.source_position_enu_m)))
+    truth_m = np.asarray(scene.source_position_enu_m)
+    return angular_difference_deg(bearing_deg(node_m, np.asarray(position_m)), bearing_deg(node_m, truth_m))
 
 
 def _stored_modality(detections: list[dict]) -> str:
@@ -227,14 +232,19 @@ def run_funnel_step(
     )
     manifests = list(run.manifests_by_id.values())
     if in_band_snr_db is None:
-        whole_capture_ns = (run.capture_start_packet_time_ns, run.capture_start_packet_time_ns + int(NOISE_ONLY_CAPTURE_SECONDS * NANOSECONDS_PER_SECOND))
-        false_triggers = _event_trigger_manifests(manifests, whole_capture_ns)
+        capture_end_ns = run.capture_start_packet_time_ns + int(NOISE_ONLY_CAPTURE_SECONDS * NANOSECONDS_PER_SECOND)
+        false_triggers = _event_trigger_manifests(manifests, (run.capture_start_packet_time_ns, capture_end_ns))
         return FunnelRow(
-            site=site.name, in_band_snr_db=None, window_rms_over_floor_db=None,
+            site=site.name,
+            in_band_snr_db=None,
+            window_rms_over_floor_db=None,
             triggered=bool(false_triggers),
-            trigger_kinds=tuple(sorted({str(m["localization"]["solve_provenance"]["attempt_kind"]) for m in false_triggers})),
-            event_solve_algorithms=(), usable_localization=False, best_bearing_error_deg=None,
-            stored_modality=MODALITY_NONE, losing_stage=None,
+            trigger_kinds=_attempt_kinds(false_triggers),
+            event_solve_algorithms=(),
+            usable_localization=False,
+            best_bearing_error_deg=None,
+            stored_modality=MODALITY_NONE,
+            losing_stage=None,
             false_triggers_per_minute=len(false_triggers) * SECONDS_PER_MINUTE / NOISE_ONLY_CAPTURE_SECONDS,
         )
     span_ns = span_for(run)
@@ -261,7 +271,7 @@ def run_funnel_step(
         in_band_snr_db=in_band_snr_db,
         window_rms_over_floor_db=20.0 * np.log10(loudest_event_window_rms(scene, captures[NODE_ID]) / site.sensor_noise_rms),
         triggered=bool(trigger_manifests),
-        trigger_kinds=tuple(sorted({str(m["localization"]["solve_provenance"]["attempt_kind"]) for m in trigger_manifests})),
+        trigger_kinds=_attempt_kinds(trigger_manifests),
         event_solve_algorithms=tuple(sorted({str(m["localization"].get("resolved_algorithm")) for m in trigger_manifests})),
         usable_localization=usable,
         best_bearing_error_deg=best_error,
