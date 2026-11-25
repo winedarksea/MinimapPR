@@ -7,7 +7,8 @@ Runs after a `capture_kind == "calibration"` session stops:
                 multichannel PCM16 WAV (channel i == channel_sensor_ids[i])
                 plus its per-frame packet timing table
                 (calibration/frame_timing.py).
-  2. Manifest — node geometry (geo + local ENU + sensor offsets + orientation),
+  2. Manifest — node geometry (geo + local ENU + sensor offsets + orientation,
+                position_source / position_std_m as the live solve used them),
                 site origin/coordinate mode, environment snapshot, per-node
                 sync diagnostics.
   3. Detections — system outputs recorded live during the window (reference
@@ -35,10 +36,10 @@ from typing import Any, Optional
 import numpy as np
 
 from minimappr.calibration.frame_timing import frame_timing_bundle_path, frame_timing_table_from_capture
+from minimappr.calibration.node_placement_record import calibration_node_placement_record
 from minimappr.core.capture_session import CaptureSessionRecord
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.localization import speed_of_sound_mps
-from minimappr.models import GeoPoint
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,9 @@ class CalibrationPipeline:
             raise RuntimeError("calibration session is missing its time window")
 
         audio_dir = record.work_dir / "audio"
+        # The same placement inputs the sidecar geometry push reads, so the
+        # bundle records the geometry the live solve used.
+        estimator_states_by_node_id = await self._storage.list_node_position_estimator_states()
         node_manifests: list[dict[str, Any]] = []
         for node_id, sensor_ids in record.node_channel_map.items():
             if not sensor_ids:
@@ -124,6 +128,7 @@ class CalibrationPipeline:
                     sensor_ids=list(sensor_ids),
                     sample_rate_hz=sample_rate_hz,
                     sync_diag=sync_diag,
+                    estimator_state_row=estimator_states_by_node_id.get(node_id),
                 )
             )
 
@@ -183,53 +188,22 @@ class CalibrationPipeline:
         sensor_ids: list[str],
         sample_rate_hz: int,
         sync_diag: dict,
+        estimator_state_row: Optional[dict],
     ) -> dict[str, Any]:
         node_row: Optional[dict] = await self._storage.get_node_by_id(node_id)
-        position_geo: Optional[dict] = None
-        position_m: Optional[list[float]] = None
-        sensor_offsets_m: list = []
-        orientation: dict = {}
-        node_type: Optional[str] = None
-        if node_row is not None:
-            node_type = node_row.get("node_type")
-            sensor_offsets_m = node_row.get("sensor_offsets_m") or []
-            raw_orientation = node_row.get("orientation")
-            orientation = raw_orientation if isinstance(raw_orientation, dict) else {}
-            geo = node_row.get("position_geo")
-            if isinstance(geo, dict) and geo.get("lat") is not None:
-                position_geo = {
-                    "lat": float(geo["lat"]),
-                    "lon": float(geo["lon"]),
-                    "alt_m": float(geo.get("alt_m") or 0.0),
-                }
-                local = self._coordinate_frame.geo_to_local(
-                    GeoPoint(lat=position_geo["lat"], lon=position_geo["lon"], alt_m=position_geo["alt_m"])
-                )
-                position_m = [float(local[0]), float(local[1]), float(local[2])]
-            else:
-                raw_local = node_row.get("position_m")
-                if isinstance(raw_local, (list, tuple)) and len(raw_local) >= 3:
-                    position_m = [float(raw_local[0]), float(raw_local[1]), float(raw_local[2])]
-                    geo_point = self._coordinate_frame.local_to_geo(
-                        (position_m[0], position_m[1], position_m[2])
-                    )
-                    position_geo = {
-                        "lat": geo_point.lat,
-                        "lon": geo_point.lon,
-                        "alt_m": geo_point.alt_m,
-                    }
+        placement = calibration_node_placement_record(node_row, estimator_state_row, self._coordinate_frame)
+        raw_orientation = node_row.get("orientation") if node_row is not None else None
         return {
             "node_id": node_id,
-            "node_type": node_type,
+            "node_type": node_row.get("node_type") if node_row is not None else None,
             "audio_file": f"audio/{node_id}.wav",
             "frame_timing_file": frame_timing_bundle_path(node_id),
             "sample_rate_hz": int(sample_rate_hz),
             "audio_start_time_ns": int(sync_diag.get("requested_start_ns") or 0),
             "channel_sensor_ids": sensor_ids,
-            "position_geo": position_geo,
-            "position_m": position_m,
-            "sensor_offsets_m": sensor_offsets_m,
-            "orientation": orientation,
+            **placement.manifest_fields(),
+            "sensor_offsets_m": (node_row.get("sensor_offsets_m") or []) if node_row is not None else [],
+            "orientation": raw_orientation if isinstance(raw_orientation, dict) else {},
             "sync_diag": sync_diag,
         }
 

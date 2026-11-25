@@ -69,6 +69,16 @@ all additions are optional and default to v1 behaviour. Unknown keys are ignored
   replay needs it, the in-process replay still infers from the offset count)
   and `frame_timing_file` (§2.1). Both are written by calibration capture;
   older bundles lack them and stay valid.
+- **Optional survey keys (E9, `docs/field_capture_protocol.md`).**
+  `position_source` (`operator_override`, `stationary_estimate`,
+  `reported_gps` or `fallback_static`: where `position_m` came from, with the
+  sidecar's precedence), `position_std_m` (1-sigma accuracy in metres, `null`
+  when nothing states one), `body_to_world_quaternion_wxyz` (the mount
+  rotation as a unit quaternion, written whenever `orientation` is known, so
+  identity is explicit) and `cluster_id` (nodes without it share the site-wide
+  cluster). Calibration capture writes the first three;
+  `minimappr/calibration/bundle_validation.py` checks them. Replay does not
+  read them yet.
 
 ### 2.1 Per-frame timing (`frame_timing/{node_id}.json`)
 
@@ -133,7 +143,9 @@ exist so that a localized detection there can be recognized as an echo promotion
 ### 3.2 Geometry
 
 Static point (v1 shape, `position_geo`; v2 also accepts `position_m`; if both are
-given `position_m` wins):
+given `position_m` wins). Either geometry may carry an optional
+`position_std_m`, the 1-sigma accuracy of the truth position (E9; validation
+reads it, scoring does not yet):
 
 ```json
 {"type": "static", "position_geo": {"lat": 45.0001, "lon": -93.0001, "alt_m": 252.0}}
