@@ -3458,6 +3458,9 @@ async def test_omni_suppression_distance_gate_still_enriches_near(tmp_path: Path
         snippet_dir=tmp_path / "snippets",
         snippet_retention_seconds=0,
         omni_suppression_max_distance_m=50.0,
+        # The bucketed policy's site-wide omni suppression; the seeded row never
+        # entered the entity registry that replaces it for wildlife by default.
+        entity_reporting_enabled=False,
     )
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     settings.snippet_dir.mkdir(parents=True, exist_ok=True)

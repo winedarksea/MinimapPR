@@ -299,6 +299,8 @@ async def test_coyote_alert_cooldown_avoids_repeat_flood(tmp_path: Path) -> None
         classifier=classifier,
         localizer=localizer,
         reporting_window_seconds=0.05,
+        # Bucketed reporting: with bird entities (the default) both fixes are one coyote, one row.
+        entity_reporting_enabled=False,
     )
 
     channels = np.full((4, 1024), 0.25, dtype=np.float32)

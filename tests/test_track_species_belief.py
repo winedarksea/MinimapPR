@@ -11,6 +11,7 @@ from minimappr.core.track_species_belief import (
     species_evidence_from_detection,
 )
 from minimappr.core.tracking import TrackManager
+from minimappr.sim.tracker_scenario_catalog import WILDLIFE_CONTINUOUS_MOTION
 
 T0 = 1_700_000_000_000_000_000
 SECOND = 1_000_000_000
@@ -179,7 +180,8 @@ async def test_hidden_track_not_counted_in_multi_node_metric():
 
 
 def test_flags_off_skips_evidence_work():
-    manager = _manager()
+    # Stationary_hold (wildlife's default) consumes evidence too, so it is off here.
+    manager = _manager(**WILDLIFE_CONTINUOUS_MOTION)
     evidence = manager.field_mode.detection_evidence(
         label="robin", confidence=0.8, classifier_scores={"robin": 0.8}, species_evidence=None
     )
