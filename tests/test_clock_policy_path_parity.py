@@ -260,7 +260,7 @@ def test_rust_handoff_resolve_lets_gps_locked_pairs_dominate_and_widens_covarian
 
 def test_rust_and_python_clock_class_defaults_match() -> None:
     rust_source = RUST_SOLVE_CONFIG_PATH.read_text()
-    class_json = re.search(r'const DEFAULT_CLOCK_CLASS_UNCERTAINTY_JSON: &str = r#"(\{.*?\})"#;', rust_source)
+    class_json = re.search(r'const DEFAULT_CLOCK_CLASS_UNCERTAINTY_JSON: &str =\s*r#"(\{.*?\})"#;', rust_source)
     assert class_json is not None, "DEFAULT_CLOCK_CLASS_UNCERTAINTY_JSON not found in localization_solve_config.rs"
     assert json.loads(class_json.group(1)) == overhaul_defaults.default_localization_clock_class_uncertainty_seconds()
     assert json.loads(class_json.group(1)) == Settings().localization_clock_class_uncertainty_seconds

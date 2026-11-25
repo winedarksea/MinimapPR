@@ -175,9 +175,16 @@ def timestamp_step_contract_violations(result: ReplayRunResult, step: PacketTime
         cross_node_admitted = [pair for pair in admitted if node_of_sensor(pair[0]) != node_of_sensor(pair[1])]
         if cross_node_admitted:
             violations.append(f"{prefix}: cross-node pairs still admitted: {cross_node_admitted[:4]}...")
+        # SRP solves only the reporter's connected array: the stepped node's
+        # own pairs stay admitted (never excluded, checked above) but are
+        # correlated only when that node reports.
         stepped_own_pairs = [pair for pair in admitted if node_of_sensor(pair[0]) == node_of_sensor(pair[1]) == stepped_node_id]
-        if len(stepped_own_pairs) != TETRA_OWN_PAIR_COUNT:
-            violations.append(f"{prefix}: {len(stepped_own_pairs)} own pairs of {stepped_node_id} admitted, expected {TETRA_OWN_PAIR_COUNT}")
+        expected_stepped_own_pairs = TETRA_OWN_PAIR_COUNT if provenance["reporting_node_id"] == stepped_node_id else 0
+        if len(stepped_own_pairs) != expected_stepped_own_pairs:
+            violations.append(
+                f"{prefix}: {len(stepped_own_pairs)} own pairs of {stepped_node_id} correlated, "
+                f"expected {expected_stepped_own_pairs}"
+            )
 
     stored = event_detections(result)
     if not stored:

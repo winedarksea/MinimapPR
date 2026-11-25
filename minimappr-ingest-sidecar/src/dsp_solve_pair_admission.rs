@@ -1,14 +1,19 @@
 //! Which sensor pairs one solve may correlate, and how well each admitted
 //! pair is timed. Computed once per solve from its layout snapshot, active
-//! sensors and clock snapshot, and honoured by SRP pair observations (and so
-//! the covariance), render channel selection, the deferred path and the
-//! published `excluded_pairs` / `pair_tdoas`.
+//! sensors and clock snapshot, and honoured by SRP pair observations, the
+//! position covariance (per-clock timing noise), render channel selection,
+//! the deferred path and the published `excluded_pairs` / `pair_tdoas`.
+//!
+//! SRP solves only the active sensors joined to the reporting node through
+//! admitted pairs (`solve_sensor_indices`): its reference fit, centroid,
+//! aperture and grid assume one connected array, so a timeline-rejected
+//! node (all its cross-node pairs dropped) must leave the geometry too.
 //!
 //! Policy (owner decision): a weak clock class never excludes a pair, it only
 //! widens `timing_uncertainty_seconds`. A pair is dropped only when it cannot
 //! be measured (missing coverage), cannot carry information (baseline under
 //! the minimum), or a node's measured timeline is known to be wrong (residual
-//! over the hard limit; that node's own intra-node pairs still solve).
+//! over the hard limit; that node's own intra-node pairs stay admitted).
 //! Sensors the layout already excluded (rate, geometry, cap) contribute no
 //! pairs at all: their exclusion is reported once, on the sensor.
 
@@ -17,8 +22,9 @@ use std::collections::BTreeSet;
 use minimappr_core::localization_sensor_entry::{ExcludedSensorPair, SolveExclusionReason};
 
 use crate::{
-    dsp_worker::{NodeClockAssessments, PairTdoa, SolveSensorLayout},
+    dsp_worker::{NodeClockAssessments, SolveSensorLayout},
     localization_solve_config::LocalizationSolveConfig,
+    srp_phat::ChannelClockOffsets,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -32,6 +38,9 @@ pub(crate) struct SolvePairAdmission {
     /// the hard limit; their audio cannot be time-aligned with other nodes.
     timeline_rejected_node_ids: BTreeSet<String>,
     reporting_node_id: String,
+    /// Active sensors connected to the reporting node through admitted pairs,
+    /// ascending: the channel set SRP solves on.
+    solve_sensor_indices: Vec<usize>,
 }
 
 impl SolvePairAdmission {
@@ -119,13 +128,30 @@ impl SolvePairAdmission {
                 }
             }
         }
+        let admitted_active_sensor_indices: Vec<usize> = pair_eligible_sensor_indices
+            .iter()
+            .copied()
+            .filter(|sensor_index| active_sensor_indices.contains(sensor_index))
+            .collect();
+        let solve_sensor_indices = reporter_connected_sensor_indices(
+            layout,
+            &admitted_active_sensor_indices,
+            &excluded_pairs,
+        );
         SolvePairAdmission {
             excluded_pairs,
             sensor_node_indices,
             node_timing_uncertainty_seconds,
             timeline_rejected_node_ids,
             reporting_node_id: layout.reporting_node_id.clone(),
+            solve_sensor_indices,
         }
+    }
+
+    /// The channels SRP solves on (see the module docs). Provenance keeps
+    /// listing every covered sensor as active and every rejected pair.
+    pub(crate) fn solve_sensor_indices(&self) -> &[usize] {
+        &self.solve_sensor_indices
     }
 
     pub(crate) fn admits_pair(&self, sensor_index_a: usize, sensor_index_b: usize) -> bool {
@@ -156,27 +182,15 @@ impl SolvePairAdmission {
             .hypot(self.node_timing_uncertainty_seconds[node_b])
     }
 
-    /// Variance (m^2) to add on every axis of the published position
-    /// covariance for the clock error of the pairs the solve correlated.
-    ///
-    /// Why the worst admitted cross-node pair, isotropically: the SRP solver
-    /// weights every pair equally, so it cannot down-weight a poorly timed
-    /// node; and a node's clock offset shifts all of its cross-node TDOAs by
-    /// the same amount, so the error does not average out across its pairs.
-    /// The largest pair uncertainty times sound speed is therefore the range
-    /// difference error the fix absorbs. The solver's covariance does not say
-    /// which direction it lands in, so it widens every axis (honest coverage
-    /// over a tight ellipse: "weak clocks widen the error").
-    pub(crate) fn cross_node_timing_variance_m2(
-        &self,
-        correlated_pairs: &[PairTdoa],
-        sound_speed_mps: f32,
-    ) -> f64 {
-        let worst_pair_timing_uncertainty_seconds = correlated_pairs
-            .iter()
-            .map(|pair| self.pair_timing_uncertainty_seconds(pair.ch_a, pair.ch_b))
-            .fold(0.0_f64, f64::max);
-        (f64::from(sound_speed_mps) * worst_pair_timing_uncertainty_seconds).powi(2)
+    /// Each buffer channel's clock (its node) and every clock's 1-sigma
+    /// offset, for the solver's measurement-noise term: a node's offset
+    /// shifts all of its cross-node TDOAs together, so the noise is
+    /// correlated per clock, not independent per pair.
+    pub(crate) fn channel_clock_offsets(&self) -> ChannelClockOffsets<'_> {
+        ChannelClockOffsets {
+            clock_index_by_channel: &self.sensor_node_indices,
+            clock_offset_std_seconds: &self.node_timing_uncertainty_seconds,
+        }
     }
 
     /// Buffer channels the beamformed render must leave out: a node whose
@@ -204,6 +218,55 @@ impl SolvePairAdmission {
             .map(|(sensor_index, _)| sensor_index)
             .collect()
     }
+}
+
+/// Walks admitted pairs outward from the reporter's active
+/// sensors. A reporter with no covered sensor (a parked solve released after
+/// its own coverage lapsed) anchors on the largest connected group instead,
+/// so the solve still describes one array.
+fn reporter_connected_sensor_indices(
+    layout: &SolveSensorLayout,
+    admitted_active_sensor_indices: &[usize],
+    excluded_pairs: &[ExcludedSensorPair],
+) -> Vec<usize> {
+    let pair_admitted = |a: usize, b: usize| {
+        !excluded_pairs
+            .iter()
+            .any(|pair| (pair.sensor_index_a, pair.sensor_index_b) == (a.min(b), a.max(b)))
+    };
+    let connected_from = |seeds: Vec<usize>| {
+        let mut connected = seeds.clone();
+        let mut frontier = seeds;
+        while let Some(sensor_index) = frontier.pop() {
+            for &candidate in admitted_active_sensor_indices {
+                if !connected.contains(&candidate) && pair_admitted(sensor_index, candidate) {
+                    connected.push(candidate);
+                    frontier.push(candidate);
+                }
+            }
+        }
+        connected.sort_unstable();
+        connected
+    };
+    let reporter_sensor_indices: Vec<usize> = admitted_active_sensor_indices
+        .iter()
+        .copied()
+        .filter(|index| layout.sensors[*index].node_id == layout.reporting_node_id)
+        .collect();
+    if !reporter_sensor_indices.is_empty() {
+        return connected_from(reporter_sensor_indices);
+    }
+    let mut largest_group: Vec<usize> = Vec::new();
+    for &sensor_index in admitted_active_sensor_indices {
+        if largest_group.contains(&sensor_index) {
+            continue;
+        }
+        let group = connected_from(vec![sensor_index]);
+        if group.len() > largest_group.len() {
+            largest_group = group;
+        }
+    }
+    largest_group
 }
 
 fn sensor_separation_m(

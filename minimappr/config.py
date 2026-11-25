@@ -1788,6 +1788,15 @@ class Settings:
     localization_cross_node_max_timeline_residual_seconds: float = (
         overhaul_defaults.DEFAULT_LOCALIZATION_CROSS_NODE_MAX_TIMELINE_RESIDUAL_SECONDS
     )
+    localization_timeline_residual_window_frames: int = (
+        overhaul_defaults.DEFAULT_LOCALIZATION_TIMELINE_RESIDUAL_WINDOW_FRAMES
+    )
+    localization_timeline_residual_percentile: float = (
+        overhaul_defaults.DEFAULT_LOCALIZATION_TIMELINE_RESIDUAL_PERCENTILE
+    )
+    localization_timeline_residual_over_limit_clear_ratio: float = (
+        overhaul_defaults.DEFAULT_LOCALIZATION_TIMELINE_RESIDUAL_OVER_LIMIT_CLEAR_RATIO
+    )
     localization_clock_class_uncertainty_seconds: dict = field(
         default_factory=overhaul_defaults.default_localization_clock_class_uncertainty_seconds
     )
@@ -3404,6 +3413,18 @@ class Settings:
             localization_cross_node_max_timeline_residual_seconds=_env_float(
                 "MINIMAPPR_LOCALIZATION_CROSS_NODE_MAX_TIMELINE_RESIDUAL_SECONDS",
                 overhaul_defaults.DEFAULT_LOCALIZATION_CROSS_NODE_MAX_TIMELINE_RESIDUAL_SECONDS,
+            ),
+            localization_timeline_residual_window_frames=_env_int(
+                "MINIMAPPR_LOCALIZATION_TIMELINE_RESIDUAL_WINDOW_FRAMES",
+                overhaul_defaults.DEFAULT_LOCALIZATION_TIMELINE_RESIDUAL_WINDOW_FRAMES,
+            ),
+            localization_timeline_residual_percentile=_env_float(
+                "MINIMAPPR_LOCALIZATION_TIMELINE_RESIDUAL_PERCENTILE",
+                overhaul_defaults.DEFAULT_LOCALIZATION_TIMELINE_RESIDUAL_PERCENTILE,
+            ),
+            localization_timeline_residual_over_limit_clear_ratio=_env_float(
+                "MINIMAPPR_LOCALIZATION_TIMELINE_RESIDUAL_OVER_LIMIT_CLEAR_RATIO",
+                overhaul_defaults.DEFAULT_LOCALIZATION_TIMELINE_RESIDUAL_OVER_LIMIT_CLEAR_RATIO,
             ),
             localization_clock_class_uncertainty_seconds=_env_json_dict(
                 "MINIMAPPR_LOCALIZATION_CLOCK_CLASS_UNCERTAINTY_SECONDS",

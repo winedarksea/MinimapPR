@@ -172,7 +172,8 @@ pub(crate) fn localization_manifest_payload(
         effective_band_hz: Some(payload.config.localization_band_hz),
         dominant_frequency_hz: localization.dominant_frequency_hz,
         received_level_dbfs,
-        half_space_applied: layout.solve_half_space(&payload.active_channels) != HalfSpace::None,
+        half_space_applied: layout.solve_half_space(payload.pair_admission.solve_sensor_indices())
+            != HalfSpace::None,
         pair_tdoas,
         solve_provenance: Some(build_solve_provenance(
             layout,

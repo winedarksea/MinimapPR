@@ -12,6 +12,11 @@ use crate::{
     },
 };
 
+#[path = "srp_phat_clock_covariance.rs"]
+mod srp_phat_clock_covariance;
+use srp_phat_clock_covariance::clock_offset_position_covariance_m2;
+pub use srp_phat_clock_covariance::ChannelClockOffsets;
+
 const EPSILON: f32 = 1e-9;
 const FAR_FIELD_RANGE_CONVERGENCE_TOLERANCE_M: f32 = 0.05;
 
@@ -197,6 +202,16 @@ struct FarFieldRangeEstimate {
 /// timeline) decides it; `None` admits every pair among the active channels.
 pub type AdmittedChannelPairFilter<'a> = &'a dyn Fn(usize, usize) -> bool;
 
+/// What a multi-node solve knows beyond the windows: which pairs it may
+/// correlate, and how each channel's clock is timed. Both `None` reproduce
+/// the single-clock, every-pair solve.
+#[derive(Clone, Copy, Default)]
+pub struct SolveChannelConstraints<'a> {
+    pub admitted_pair_filter: Option<AdmittedChannelPairFilter<'a>>,
+    /// Adds the clock offsets' effect on the solved position to its covariance.
+    pub channel_clock_offsets: Option<ChannelClockOffsets<'a>>,
+}
+
 /// Every pair among `active_channels` (see
 /// [`estimate_tetrahedral_steering_with_pair_filter`]).
 pub fn estimate_tetrahedral_steering(
@@ -230,6 +245,34 @@ pub fn estimate_tetrahedral_steering_with_pair_filter(
     config: SrpPhatConfig,
     admitted_pair_filter: Option<AdmittedChannelPairFilter<'_>>,
 ) -> SrpPhatEvaluation {
+    estimate_tetrahedral_steering_with_solve_constraints(
+        windows,
+        active_channels,
+        mic_positions_m,
+        sample_rate_hz,
+        sound_speed_mps,
+        config,
+        SolveChannelConstraints {
+            admitted_pair_filter,
+            channel_clock_offsets: None,
+        },
+    )
+}
+
+/// The admitted-pair solve, with the clock offsets of `constraints` carried
+/// into the published position covariance. `active_channels` must be one
+/// connected array: the reference fit, centroid, aperture and grid all
+/// assume it.
+pub fn estimate_tetrahedral_steering_with_solve_constraints(
+    windows: &[Vec<f32>],
+    active_channels: &[usize],
+    mic_positions_m: &[[f32; 3]],
+    sample_rate_hz: u32,
+    sound_speed_mps: f32,
+    config: SrpPhatConfig,
+    constraints: SolveChannelConstraints<'_>,
+) -> SrpPhatEvaluation {
+    let admitted_pair_filter = constraints.admitted_pair_filter;
     let mut ordered_channels = active_channels.to_vec();
     ordered_channels.sort_unstable();
 
@@ -371,6 +414,23 @@ pub fn estimate_tetrahedral_steering_with_pair_filter(
         .fold(1.0e-5_f32, f32::max);
     let (confidence, range_observability) =
         candidate_confidence_and_observability(&candidate, peak_score, tau_scale);
+    let mut position_covariance_m2 = candidate.position_covariance_m2;
+    if let Some(clock_covariance_m2) = constraints.channel_clock_offsets.and_then(|clocks| {
+        clock_offset_position_covariance_m2(
+            candidate.position_m,
+            reference_channel,
+            &measured_tdoa,
+            mic_positions_m,
+            sound_speed_mps,
+            clocks,
+        )
+    }) {
+        for (row, clock_row) in position_covariance_m2.iter_mut().zip(clock_covariance_m2) {
+            for (value, clock_value) in row.iter_mut().zip(clock_row) {
+                *value += clock_value;
+            }
+        }
+    }
 
     SrpPhatEvaluation {
         localization: SrpPhatLocalization {
@@ -378,7 +438,7 @@ pub fn estimate_tetrahedral_steering_with_pair_filter(
             resolved_algorithm: "srp_phat".to_string(),
             steering_direction: candidate.steering_direction,
             position_m: Some(candidate.position_m),
-            position_covariance_m2: Some(candidate.position_covariance_m2),
+            position_covariance_m2: Some(position_covariance_m2),
             range_observability,
             range_projection_mode: candidate.range_projection_mode.map(str::to_string),
             confidence,
