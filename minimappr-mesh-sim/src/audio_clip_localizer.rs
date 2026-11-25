@@ -53,7 +53,7 @@ fn true_time_at(world: &AcousticWorld, request: &CallLocalizationRequest, device
 
 /// The SNR-graded classifier stand-in, fed from world truth for the
 /// classifying node's window (the audio itself is what the localizer tests).
-fn truth_classifier(world: Arc<AcousticWorld>, detection_snr_db: f64, mask_tolerance_s: f64) -> Box<dyn Fn(&ClusterClassificationInput<'_>) -> Option<(ClassifierAnswer, f64)>> {
+fn truth_classifier(world: Arc<AcousticWorld>, detection_snr_db: f64, mask_tolerance_s: f64) -> Box<dyn Fn(&ClusterClassificationInput<'_>) -> Option<(ClassifierAnswer, f64)> + Send> {
     Box::new(move |input: &ClusterClassificationInput<'_>| {
         input.classifying_node_audio?;
         let device = input.cluster.classifying_node.0 as usize;

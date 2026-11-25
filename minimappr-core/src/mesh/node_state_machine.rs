@@ -100,11 +100,30 @@ pub enum NodeUserNotice {
     ClockInvalidated,
 }
 
+/// One emission the listener must search for, on the session clock. The
+/// slot list is what lets a phone place a search window per emitter without
+/// re-decoding the schedule (plan Stage B: the listener needs emitter, slot
+/// start and band, not only the round's end).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScheduledChirpSlot {
+    pub emitter_node_id: NodeId,
+    pub slot_start_ms: MeshMilliseconds,
+    pub band: FrequencyBandHz,
+    pub chirp_code_id: u16,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeAction {
     Send(OutboundMessage),
     EmitChirp { round_id: u32, emit_at_ms: MeshMilliseconds, chirp_low_hz: f32, chirp_high_hz: f32, chirp_code_id: u16 },
-    ListenForChirpRound { round_id: u32, listen_until_ms: MeshMilliseconds },
+    ListenForChirpRound {
+        round_id: u32,
+        round_start_ms: MeshMilliseconds,
+        listen_until_ms: MeshMilliseconds,
+        /// Every slot of the round in order, own emissions included (the
+        /// opener repeats as the closing chirp).
+        slots: Vec<ScheduledChirpSlot>,
+    },
     BecomeHost { host_term: u32, reason: SessionChangeReasonCode },
     UserNotice(NodeUserNotice),
 }
@@ -204,6 +223,11 @@ impl FieldNodeStateMachine {
     /// In sync once a published model postdates the last local invalidation.
     pub fn clock_in_sync(&self) -> bool {
         self.own_clock.is_some()
+    }
+
+    /// Own clock model from the latest logged `ClockModel` (status display).
+    pub fn own_clock_mapping(&self) -> Option<NodeClockMapping> {
+        self.own_clock.clone()
     }
 
     fn succession_rank(&self) -> Option<usize> {

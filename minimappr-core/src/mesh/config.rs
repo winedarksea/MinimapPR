@@ -7,6 +7,7 @@ use crate::layout::filtered_map_anchor::FilteredMapAnchorConfig;
 use crate::layout::gps_anchor_fit::AnchorFitConfig;
 use crate::layout::robust_layout_refine::LayoutRefineConfig;
 use crate::sync::clock_filter::ClockFilterConfig;
+use crate::sync::chirp_waveform::{ChirpWaveformKind, StereoOutputChannel, DEFAULT_CHIRP_DURATION_S};
 use crate::sync::clock_graph::ClockGraphConfig;
 
 use super::MeshMilliseconds;
@@ -180,6 +181,13 @@ pub struct ChirpSchedulerConfig {
     /// Reports later than this after the listen window are ignored.
     pub round_report_timeout_ms: MeshMilliseconds,
     pub chirp_band_hz: [f32; 2],
+    /// Waveform every emitter plays (the band is `chirp_band_hz`).
+    pub chirp_waveform_kind: ChirpWaveformKind,
+    pub chirp_duration_s: f64,
+    /// How far a node's slot estimate can be off: coarse session-clock error
+    /// (lowest-RTT alignment, ≈ RTT/2) plus output-latency jitter. The
+    /// listener widens each slot's search window by this on both sides.
+    pub coarse_schedule_uncertainty_ms: MeshMilliseconds,
 }
 
 impl Default for ChirpSchedulerConfig {
@@ -191,11 +199,16 @@ impl Default for ChirpSchedulerConfig {
             post_detection_round_delay_ms: 500,
             triggered_round_minimum_gap_ms: 8_000,
             new_member_round_minimum_gap_ms: 1_500,
-            slot_duration_ms: 220,
+            // Phase 1 prestudy: 250 ms fits a 50 ms chirp, ~35 m of flight and
+            // the ±coarse-uncertainty margin on both sides.
+            slot_duration_ms: 250,
             schedule_lead_time_ms: 400,
             round_listen_tail_ms: 300,
             round_report_timeout_ms: 2_000,
             chirp_band_hz: [13_000.0, 16_000.0],
+            chirp_waveform_kind: ChirpWaveformKind::UpDownHyperbolic,
+            chirp_duration_s: DEFAULT_CHIRP_DURATION_S,
+            coarse_schedule_uncertainty_ms: 30,
         }
     }
 }
@@ -236,6 +249,14 @@ pub struct IslandSyncConfig {
     /// join descriptor's `platform_name`; unknown models get the default.
     pub self_path_length_by_platform_m: BTreeMap<String, f64>,
     pub default_self_path_length_m: f64,
+    /// Per-model speaker position relative to the ranging mic in the phone
+    /// body frame (x right, y up the screen, z out of the screen), metres,
+    /// for `correct_for_speaker_mic_offsets`. Filled from Phase 1 run A3.
+    pub speaker_offset_body_frame_by_platform_m: BTreeMap<String, [f64; 3]>,
+    /// Per-model stereo channel that drives the bottom (chirp) speaker, from
+    /// Phase 1 run A1. Unknown models play on the default channel.
+    pub chirp_output_channel_by_platform: BTreeMap<String, StereoOutputChannel>,
+    pub default_chirp_output_channel: StereoOutputChannel,
     pub clock_graph: ClockGraphConfig,
     pub clock_filter: ClockFilterConfig,
     pub layout_refine: LayoutRefineConfig,
@@ -260,6 +281,9 @@ impl Default for IslandSyncConfig {
             relative_bearing_noise_std_deg: 8.0,
             self_path_length_by_platform_m: BTreeMap::new(),
             default_self_path_length_m: 0.02,
+            speaker_offset_body_frame_by_platform_m: BTreeMap::new(),
+            chirp_output_channel_by_platform: BTreeMap::new(),
+            default_chirp_output_channel: StereoOutputChannel::Right,
             clock_graph: ClockGraphConfig::default(),
             clock_filter: ClockFilterConfig::default(),
             layout_refine: LayoutRefineConfig::default(),

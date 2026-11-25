@@ -2,6 +2,7 @@
 //! state machines and carries out their actions (network sends, chirps,
 //! listen windows, takeover, transport switches, step-down).
 
+use minimappr_core::mesh::message_routing::delivery_for;
 use minimappr_core::mesh::host_state_machine::{FieldHostStateMachine, HostAction, HostInput, HostTakeover};
 use minimappr_core::mesh::node_state_machine::{DeviceStatusChange, LocalClassification, NodeAction, NodeInput};
 use minimappr_core::mesh::{MessageRecipient, OutboundMessage, TrafficClass};
@@ -24,22 +25,6 @@ const GNSS_FIX_JITTER_M: f64 = 0.5;
 const CLASSIFIER_MODEL_ID: u16 = 3;
 pub(crate) const CALL_BAND_LOW_FRACTION: f64 = 0.5;
 pub(crate) const CALL_BAND_HIGH_FRACTION: f64 = 2.0;
-
-fn is_host_bound(message: &FieldMessage) -> bool {
-    matches!(
-        message,
-        FieldMessage::JoinRequest(_)
-            | FieldMessage::Heartbeat(_)
-            | FieldMessage::DetectionEvent(_)
-            | FieldMessage::QueuedDetectionUpload(_)
-            | FieldMessage::ChirpArrivalReport(_)
-            | FieldMessage::ReadinessAnswer(_)
-            | FieldMessage::ClipPayload(_)
-            | FieldMessage::NodeStatusChange(_)
-            | FieldMessage::EventLogCatchUpRequest(_)
-            | FieldMessage::ChirpDirectionReport(_)
-    )
-}
 
 impl ScenarioRun {
     pub(crate) fn send_message(&mut self, from: usize, outbound: OutboundMessage) {
@@ -98,7 +83,7 @@ impl ScenarioRun {
                 NodeAction::EmitChirp { round_id, emit_at_ms, .. } => {
                     self.schedule(emit_at_ms as f64 / MILLISECONDS_PER_SECOND, EventPayload::ChirpEmission { device, round_id })
                 }
-                NodeAction::ListenForChirpRound { round_id, listen_until_ms } => {
+                NodeAction::ListenForChirpRound { round_id, listen_until_ms, .. } => {
                     self.devices[device].listening_rounds.insert(round_id);
                     self.schedule(listen_until_ms as f64 / MILLISECONDS_PER_SECOND, EventPayload::ListenEnd { device, round_id });
                 }
@@ -160,8 +145,8 @@ impl ScenarioRun {
             return;
         }
         let Some(message) = Self::decode(frame) else { return };
-        let to_host = is_host_bound(&message) || matches!(message, FieldMessage::HostAnnouncement(_));
-        let to_node = !is_host_bound(&message);
+        let delivery = delivery_for(&message);
+        let (to_host, to_node) = (delivery.to_host, delivery.to_node);
         if to_host && self.devices[to].host.is_some() {
             self.deliver_host_input(to, HostInput::MessageReceived { from, message: message.clone() });
         }

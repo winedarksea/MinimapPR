@@ -262,9 +262,10 @@ impl IslandSyncEngine {
         solution: &IslandRoundSolution,
         now_ms: MeshMilliseconds,
         config: &IslandSyncConfig,
-    ) {
-        let Some(island) = self.islands.get(&island_id) else { return };
+    ) -> Vec<(NodeId, ClockUpdateOutcome)> {
+        let Some(island) = self.islands.get(&island_id) else { return Vec::new() };
         let mut epoch_bumps = Vec::new();
+        let mut filter_outcomes = Vec::new();
         let reference_changed = island.reference_node.is_some_and(|r| r != solution.reference_node);
         let island = self.islands.get_mut(&island_id).expect("checked above");
         if reference_changed {
@@ -286,6 +287,7 @@ impl IslandSyncEngine {
             if matches!(outcome, ClockUpdateOutcome::SilentGapDetected { .. }) || !was_valid {
                 epoch_bumps.push(*node);
             }
+            filter_outcomes.push((*node, outcome));
         }
         if !solution.layout_positions_m.is_empty() {
             let mut local_positions_m = solution.layout_positions_m.clone();
@@ -337,6 +339,7 @@ impl IslandSyncEngine {
         for node in epoch_bumps {
             self.bump_epoch(node);
         }
+        filter_outcomes
     }
 
     /// Device clock → island reference clock for `node`, if its model is valid.

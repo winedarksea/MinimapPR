@@ -45,6 +45,7 @@ pub mod island_round_solver;
 pub mod island_sync_engine;
 pub mod layout_frames;
 pub mod local_tangent_plane;
+pub mod message_routing;
 pub mod node_host_link;
 pub mod node_message_handling;
 pub mod node_state_machine;
@@ -53,8 +54,12 @@ pub mod onset_clip_alignment;
 #[cfg(feature = "flac-codec")]
 pub mod onset_clip_set_localizer;
 #[cfg(test)]
+mod node_chirp_schedule_tests;
+#[cfg(test)]
 mod node_split_brain_tests;
 pub mod readiness_selection;
+pub mod round_diagnostics;
+pub mod session_clock_alignment;
 pub mod srp_seed_refiner;
 
 use crate::protocol::{FieldMessage, NodeId};

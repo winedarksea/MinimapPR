@@ -22,7 +22,7 @@ const TIE_LOSER: NodeId = NodeId(3);
 const FOLLOWER: NodeId = NodeId(5);
 const CONTESTED_TERM: u32 = 2;
 
-struct SilentAudio;
+pub(super) struct SilentAudio;
 
 impl NodeAudioWindowSource for SilentAudio {
     fn readiness(&self, _centre: u64, _half_window: u32, _band: FrequencyBandHz) -> LocalAudioReadiness {
@@ -39,7 +39,7 @@ impl NodeAudioWindowSource for SilentAudio {
     }
 }
 
-fn phone() -> NodeDescriptor {
+pub(super) fn phone() -> NodeDescriptor {
     NodeDescriptor {
         node_kind: NodeKind::Phone,
         platform_name: "test".into(),

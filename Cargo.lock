@@ -1571,6 +1571,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "minimappr-sync-spike"
+version = "0.1.0"
+dependencies = [
+ "minimappr-core",
+ "rustfft",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "minimappr-transport"
 version = "0.1.0"
 dependencies = [

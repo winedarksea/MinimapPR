@@ -19,6 +19,7 @@ use super::host_membership::SessionMembership;
 use super::island_round_solver::{solve_island_round, IslandRoundInput};
 use super::island_sync_engine::IslandSyncEngine;
 use super::local_tangent_plane::LocalTangentPlane;
+use super::round_diagnostics::{build_round_diagnostics, RoundDiagnostics, RoundDiagnosticsInput};
 use super::{MeshMilliseconds, MessageRecipient, OutboundMessage};
 
 /// Scheduler key for present nodes not yet in any island.
@@ -72,6 +73,8 @@ pub struct HostSyncPipeline {
     surveyed_provisional_nodes: BTreeSet<NodeId>,
     last_new_member_round_ms: Option<MeshMilliseconds>,
     previously_present: BTreeSet<NodeId>,
+    /// One entry per island solved in the most recent finished round.
+    pub last_round_diagnostics: Vec<RoundDiagnostics>,
 }
 
 impl HostSyncPipeline {
@@ -253,6 +256,7 @@ impl HostSyncPipeline {
         let fixes = self.gps_fixes(membership);
         let self_paths = membership.self_path_lengths();
         let island_ids: Vec<u32> = self.engine.islands.keys().copied().collect();
+        let mut round_diagnostics = Vec::new();
         for island_id in island_ids {
             let island = &self.engine.islands[&island_id];
             if island.members.len() < 2 {
@@ -297,28 +301,54 @@ impl HostSyncPipeline {
             let stalled = self.engine.nodes_with_silent_gap(island_id, &solution, sync);
             if !stalled.is_empty() {
                 members.retain(|node| !stalled.contains(node));
-                let Some(mut resolved) = solve(members) else { continue };
-                if resolved.reference_node == solution.reference_node {
-                    for node in &stalled {
-                        if let Some(offset) = solution.clock_offsets.get(node) {
-                            resolved.clock_offsets.insert(*node, *offset);
+                match solve(members) {
+                    Some(mut resolved) => {
+                        if resolved.reference_node == solution.reference_node {
+                            for node in &stalled {
+                                if let Some(offset) = solution.clock_offsets.get(node) {
+                                    resolved.clock_offsets.insert(*node, *offset);
+                                }
+                            }
                         }
+                        solution = resolved;
+                    }
+                    // Too few members left to re-solve (a two-phone island):
+                    // keep the round's offsets so the stalled node's filter
+                    // still re-seeds, but drop its suspect ranges and layout.
+                    // Skipping the island instead never re-seeds the filter,
+                    // so every later round is flagged again and the island
+                    // stops syncing for good (seen live on two phones).
+                    None => {
+                        solution.ranged_pairs.retain(|(a, b, _)| !stalled.contains(a) && !stalled.contains(b));
+                        solution.layout_positions_m.clear();
+                        solution.layout_sigmas_m.clear();
                     }
                 }
-                solution = resolved;
             }
             self.ranged_pairs_involving_muted += solution
                 .ranged_pairs
                 .iter()
                 .filter(|(a, b, _)| self.muted_nodes.contains(a) || self.muted_nodes.contains(b))
                 .count() as u64;
-            self.engine.apply_round_solution(island_id, &solution, now_ms, sync);
+            let filter_outcomes = self.engine.apply_round_solution(island_id, &solution, now_ms, sync);
+            round_diagnostics.push(build_round_diagnostics(
+                RoundDiagnosticsInput {
+                    round_id: round.round_id,
+                    island_id,
+                    completed_ms: now_ms,
+                    reports_received: round.reports.len(),
+                    solution: &solution,
+                    filter_outcomes: &filter_outcomes,
+                },
+                &self.engine,
+            ));
             let group_is_still = self.engine.islands[&island_id].members.iter().all(|node| {
                 membership.members.get(node).is_some_and(|member| member.motion_state == MotionState::Still)
             });
             self.engine.refresh_anchor(island_id, &fixes, now_ms, group_is_still, sync);
             records.extend(self.island_model_records(island_id, now_ms, sync));
         }
+        self.last_round_diagnostics = round_diagnostics;
         for island in self.engine.islands.values() {
             if island.members.len() >= MINIMUM_ROUND_EMITTERS && island.reference_node.is_none() {
                 self.schedulers.entry(island.island_id).or_default().note_fresh_clock_domain();

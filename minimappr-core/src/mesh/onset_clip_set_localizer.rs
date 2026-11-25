@@ -100,7 +100,9 @@ pub struct ClusterClassificationInput<'call> {
 }
 
 /// (answer, masked share of the window). None = cannot classify here.
-pub type ClusterWindowClassifier = dyn Fn(&ClusterClassificationInput<'_>) -> Option<(ClassifierAnswer, f64)>;
+/// `Send` so a localizer can live inside a shell object shared across threads
+/// (the phone FFI device sits behind a mutex used by capture and tick threads).
+pub type ClusterWindowClassifier = dyn Fn(&ClusterClassificationInput<'_>) -> Option<(ClassifierAnswer, f64)> + Send;
 
 /// One localized cluster plus where its led onsets were heard, on the
 /// reference clock: provenance for logs and simulator scoring.

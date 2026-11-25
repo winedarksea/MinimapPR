@@ -68,6 +68,22 @@ impl NodeRollingAudioBuffer {
         self.stage1_detector.process_pcm16_block(first_device_sample_index, block)
     }
 
+    /// Full-scale-normalised copy of a buffered window, for chirp detection
+    /// outside the device lock. `None` unless the whole window is buffered.
+    pub fn copy_window_as_f32(&self, window_first_device_sample_index: u64, window_sample_count: usize) -> Option<Vec<f32>> {
+        let window_end_exclusive = window_first_device_sample_index.checked_add(window_sample_count as u64)?;
+        if window_sample_count == 0 || !self.window_is_buffered(window_first_device_sample_index, window_end_exclusive) {
+            return None;
+        }
+        let start = (window_first_device_sample_index - self.first_buffered_device_sample_index) as usize;
+        Some(crate::chirp_detector::pcm16_to_unit_f32(&self.samples[start..start + window_sample_count]))
+    }
+
+    /// Oldest device index still buffered.
+    pub fn first_buffered_device_sample_index(&self) -> u64 {
+        self.first_buffered_device_sample_index
+    }
+
     fn window_is_buffered(&self, window_first: u64, window_end_exclusive: u64) -> bool {
         !self.samples.is_empty()
             && window_first >= self.first_buffered_device_sample_index
@@ -167,6 +183,17 @@ mod tests {
         let filter = DecimationFilterId::BirdBandWithRumbleCut.wire_byte();
         assert!(buffer.encode_clip(u64::MAX - 10, u32::MAX, filter).is_none());
         assert!(buffer.encode_clip(0, 0, filter).is_none());
+    }
+
+    #[test]
+    fn window_copy_requires_the_whole_window_buffered() {
+        let mut buffer = NodeRollingAudioBuffer::new(RETAINED_SAMPLES, Stage1DetectionMode::Birds);
+        buffer.push_capture_block(0, &[i16::MAX; BLOCK_SAMPLES]);
+        let window = buffer.copy_window_as_f32(10, 100).expect("buffered");
+        assert_eq!(window.len(), 100);
+        assert!((window[0] - 1.0).abs() < 1e-6);
+        assert!(buffer.copy_window_as_f32(BLOCK_SAMPLES as u64 - 10, 100).is_none());
+        assert!(buffer.copy_window_as_f32(u64::MAX - 5, 100).is_none());
     }
 
     #[test]

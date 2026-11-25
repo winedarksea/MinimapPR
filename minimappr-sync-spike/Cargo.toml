@@ -1,0 +1,16 @@
+[package]
+name = "minimappr-sync-spike"
+version = "0.1.0"
+edition.workspace = true
+description = "Offline Phase 1 analyser for two-phone chirp-lab recordings: arrival picks, two-way ranging, clock residuals and the Phase 1 gate report."
+
+# Host-only tool: reads chirp-lab bundles pulled from the phones (capture.wav,
+# session.json, events.jsonl, run_manifest.json) and writes report.{md,json}
+# plus a per-round CSV. Uses the core sync building blocks unchanged so the
+# numbers it reports are the ones the live session would compute.
+
+[dependencies]
+minimappr-core = { workspace = true }
+rustfft = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

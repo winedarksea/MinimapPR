@@ -32,6 +32,8 @@ members = [
     "minimappr-transport",
     # W4-android-skeleton: UniFFI surface for field-app/ (Gobley, KMP).
     "minimappr-ffi",
+    # Phase 1 sync spike: offline analyser for real two-phone chirp recordings.
+    "minimappr-sync-spike",
 ]
 exclude = [
     "minimappr-frontend",
@@ -80,4 +82,11 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.minimappr-sim-gates]
+opt-level = 3
+
+# The analyser matched-filters 30-minute recordings; unoptimised it is slow.
+[profile.test.package.minimappr-sync-spike]
+opt-level = 3
+
+[profile.dev.package.minimappr-sync-spike]
 opt-level = 3

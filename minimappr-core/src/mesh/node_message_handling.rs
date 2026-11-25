@@ -5,13 +5,14 @@
 
 use crate::protocol::detection_messages::{ClipPayload, ReadinessAnswer};
 use crate::protocol::mesh_messages::EventLogEntry;
+use crate::protocol::wire_codes::FrequencyBandHz;
 use crate::protocol::{FieldMessage, NodeId};
 
 use super::clock_mapping::NodeClockMapping;
 use super::config::DEVICE_SAMPLE_RATE_HZ;
 use super::event_log::decode_entry;
 use super::host_membership::descriptor_is_host_eligible;
-use super::node_state_machine::{FieldNodeStateMachine, NodeAction, NodeAudioWindowSource, NodeUserNotice};
+use super::node_state_machine::{FieldNodeStateMachine, NodeAction, NodeAudioWindowSource, NodeUserNotice, ScheduledChirpSlot};
 use super::{MeshMilliseconds, MessageRecipient, OutboundMessage};
 
 const SAMPLES_PER_MILLISECOND: u64 = (DEVICE_SAMPLE_RATE_HZ as u64) / 1_000;
@@ -135,9 +136,16 @@ impl FieldNodeStateMachine {
                 let round_start_ms = schedule.round_start_host_sample_index / SAMPLES_PER_MILLISECOND;
                 let mut actions = Vec::new();
                 let mut listen_until_ms = round_start_ms;
+                let mut listen_slots = Vec::with_capacity(schedule.slots.len());
                 for slot in &schedule.slots {
                     let slot_ms = round_start_ms + slot.slot_offset_samples as u64 / SAMPLES_PER_MILLISECOND;
                     listen_until_ms = listen_until_ms.max(slot_ms + self.config.scheduler.slot_duration_ms);
+                    listen_slots.push(ScheduledChirpSlot {
+                        emitter_node_id: slot.emitter_node_id,
+                        slot_start_ms: slot_ms,
+                        band: FrequencyBandHz { low_hz: slot.chirp_low_hz, high_hz: slot.chirp_high_hz },
+                        chirp_code_id: slot.chirp_code_id,
+                    });
                     if slot.emitter_node_id == self.node_id && !self.listen_only {
                         actions.push(NodeAction::EmitChirp {
                             round_id: schedule.round_id,
@@ -150,7 +158,9 @@ impl FieldNodeStateMachine {
                 }
                 actions.push(NodeAction::ListenForChirpRound {
                     round_id: schedule.round_id,
+                    round_start_ms,
                     listen_until_ms: listen_until_ms + self.config.scheduler.round_listen_tail_ms,
+                    slots: listen_slots,
                 });
                 actions
             }

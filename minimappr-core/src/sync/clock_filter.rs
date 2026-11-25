@@ -169,13 +169,27 @@ impl PhoneClockFilter {
         if innovation.abs() > self.config.silent_gap_jump_threshold_s
             && normalized_innovation.abs() > self.config.outlier_gate_sigma
         {
-            self.state = Some(ClockState {
-                offset_s: observed_offset_s,
-                covariance: [
-                    [measurement_variance, 0.0],
-                    [0.0, predicted.covariance[1][1]],
-                ],
-                ..predicted
+            // Keep the rate only once it rests on the minimum baseline: an
+            // unvalidated rate from two noisy rounds a few seconds apart can
+            // be hundreds of ppm off, and re-seeding the offset while keeping
+            // it makes every later prediction miss by milliseconds, so each
+            // round is flagged as a gap again and the rate never recovers
+            // (seen live: 281 ppm locked in on a two-phone session).
+            let rate_is_validated = self.has_valid_rate();
+            self.state = Some(if rate_is_validated {
+                ClockState {
+                    offset_s: observed_offset_s,
+                    covariance: [[measurement_variance, 0.0], [0.0, predicted.covariance[1][1]]],
+                    ..predicted
+                }
+            } else {
+                ClockState {
+                    reference_time_s,
+                    offset_s: observed_offset_s,
+                    rate_offset: 0.0,
+                    covariance: [[measurement_variance, 0.0], [0.0, self.config.initial_rate_sigma.powi(2)]],
+                    first_update_time_s: reference_time_s,
+                }
             });
             return ClockUpdateOutcome::SilentGapDetected { jump_s: innovation };
         }
@@ -309,5 +323,17 @@ mod tests {
         assert!(!filter.is_valid());
         assert!(filter.predict(0.0).is_none());
         assert!(filter.ticks_per_reference_tick().is_none());
+    }
+
+    #[test]
+    fn silent_gap_before_the_rate_baseline_resets_an_unvalidated_rate() {
+        let mut filter = PhoneClockFilter::new(ClockFilterConfig::default());
+        filter.update(0.0, 0.0, 15e-6);
+        // A 300 µs pick error two seconds later drags the young rate to ~150 ppm.
+        filter.update(2.0, 300e-6, 15e-6);
+        assert!(filter.predict(2.0).unwrap().rate_offset > 100e-6);
+        assert!(matches!(filter.update(7.0, 0.0, 15e-6), ClockUpdateOutcome::SilentGapDetected { .. }));
+        assert_eq!(filter.predict(7.0).unwrap().rate_offset, 0.0);
+        assert!(!filter.has_valid_rate());
     }
 }
