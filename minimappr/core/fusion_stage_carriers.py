@@ -57,6 +57,9 @@ class LocalizedCandidate:
     onset_attribution_context: Any = None
     # Closeout B2: parked by window label reconciliation; a sibling or the timeout emits it.
     held_for_window_label_reconciliation: bool = False
+    # No render or clip to classify (too few sensors, beamform error): "could not
+    # classify", not "classified as nothing", so a held fix applies geometry-only.
+    classification_unavailable: bool = False
     # P7: work a classification worker runs instead of the beamformed classification
     # (a point-network Rust render's clip classification, ``localized_render_reporting``);
     # returns the detections to deliver. None for every Python-ingest product.

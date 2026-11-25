@@ -186,13 +186,18 @@ classification (`position_observations_held_for_label`):
   new track for a second bird (`position_observations_held_applied_with_label`). The fix is not
   re-associated from scratch: in `gate_flock_echo` a poorly conditioned fix then jumped to a
   nearer provisional track whose filter was still loose.
-- An abstention, an empty classification, or a classification that finds nothing trackable
-  drops the fix (`position_observations_held_dropped`).
+- An abstention, an empty classification, a classification that finds nothing trackable, or a
+  label whose category is not tracked (tracking mode `none`) drops the fix
+  (`position_observations_held_dropped`). A dropped fix is resolved: no later release applies it.
+  A window-reconciliation sibling that assembles empty is dropped the same way when its window
+  is assembled, whether it was parked or completed the window.
 - If no classification ever arrives, the fix is applied geometry-only
   (`position_observations_held_applied_geometry_only`). That covers a classification-queue drop,
   chunk suppression, a saturated report window, a timeout, a backend failure and ledger eviction,
   and `position_observation_held_fix_max_wait_seconds` (`30`) is a deadline for anything else. A
-  released fix never moves `last_seen_ns` backwards.
+  solve with nothing to classify (an array too small to beamform, a beamform exception; drop
+  reason `classification_unavailable`) is "could not classify", not "classified as nothing", so
+  it is applied geometry-only too. A released fix never moves `last_seen_ns` backwards.
 
 Continuous-motion and hidden tracks still update at once, so the drone update-gap gate is
 unaffected. Event-only Rust solves are never held, because they carry no classification and only

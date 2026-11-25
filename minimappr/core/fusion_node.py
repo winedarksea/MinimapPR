@@ -75,6 +75,7 @@ from minimappr.core.localized_render_handoff_hooks import (
     SOLVE_ORIGIN_PYTHON_INGEST,
     build_localization_seam_collaborators,
 )
+from minimappr.core.classification_empty_outcome import resolve_classification_without_detections
 from minimappr.core.position_observation import position_observation_solve_id
 from minimappr.core.point_network_call_classification import PointNetworkCallClassifier
 from minimappr.core.point_network_call_requests import classify_python_ingest_call, register_python_ingest_call
@@ -1325,19 +1326,7 @@ class FusionNode:
                         source_node_id=product.candidate.source_node_id,
                     )
                 elif not detection_products:
-                    self._record_silent_drop(
-                        stage="classification",
-                        reason="empty_classification",
-                        candidate_id=product.candidate.id,
-                        event_time_ns=product.candidate.event_time_ns,
-                        source_node_id=product.candidate.source_node_id,
-                    )
-                    if (position_observations := self._position_observations()) is not None:
-                        # P5: the classifier found nothing: a held fix is dropped and the
-                        # solve's lone provisional track goes.
-                        await position_observations.classification_found_nothing_trackable(
-                            position_observation_solve_id(product)
-                        )
+                    await resolve_classification_without_detections(self, product)
                 else:
                     for detection_product in detection_products:
                         if await self._enqueue_stage(self._rules_queue, detection_product):
@@ -1840,6 +1829,7 @@ class FusionNode:
             return []
         localized = await self._classify_and_attribute_localized(product)
         if localized is None:
+            product.classification_unavailable = True
             self._withdraw_from_window_reconciliation(product)
             return []
         if self._window_label_reconciler is None or product.onset_attribution_context is None:
@@ -1856,12 +1846,18 @@ class FusionNode:
             product.held_for_window_label_reconciliation = True
             return []
         detection_products: list[DetectionProduct] = []
+        own_assembly_empty = False
         for sibling in ready:
             assembled = await self._assemble_localized_classification(sibling.product, sibling.classified)
-            if not assembled and sibling.product is not product:
+            if not assembled and sibling.product is product:
+                own_assembly_empty = True
+            elif not assembled:
                 # The worker only sees this product's outcome; account for parked siblings here.
-                self._record_empty_reconciled_sibling(sibling.product)
+                await resolve_classification_without_detections(self, sibling.product)
             detection_products.extend(assembled)
+        if own_assembly_empty and detection_products:
+            # The worker resolves this product as empty only when the whole window is.
+            await resolve_classification_without_detections(self, product)
         return detection_products
 
     async def _classify_and_attribute_localized(self, product: LocalizedCandidate) -> ClassifiedResult | None:
@@ -1949,22 +1945,13 @@ class FusionNode:
             try:
                 assembled = await self._assemble_localized_classification(sibling.product, sibling.classified)
                 if not assembled:
-                    self._record_empty_reconciled_sibling(sibling.product)
+                    await resolve_classification_without_detections(self, sibling.product)
                 for detection_product in assembled:
                     if await self._enqueue_stage(self._rules_queue, detection_product):
                         self._metrics.classification_stage_out += 1
             except Exception as exc:  # pragma: no cover - resilience path
                 self._metrics.classification_failures += 1
                 self._record_worker_exception(stage="classification", exc=exc, candidate_id=sibling.product.candidate.id)
-
-    def _record_empty_reconciled_sibling(self, product: LocalizedCandidate) -> None:
-        self._record_silent_drop(
-            stage="classification",
-            reason="empty_classification",
-            candidate_id=product.candidate.id,
-            event_time_ns=product.candidate.event_time_ns,
-            source_node_id=product.candidate.source_node_id,
-        )
 
     async def release_pending_window_reconciliation(self) -> None:
         """Emit every parked sibling now (drain and shutdown: no more siblings will come)."""
