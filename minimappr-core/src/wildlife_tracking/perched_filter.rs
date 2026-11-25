@@ -8,7 +8,7 @@
 //! χ²-inconsistent with the perch is a hop: the filter restarts at the fix
 //! instead of smearing the track halfway between two perches.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nalgebra::{Matrix3, Vector3};
 
@@ -62,12 +62,14 @@ struct PerchedInternalState {
 pub struct PerchedRandomWalkFilter {
     config: PerchedFilterConfig,
     states: BTreeMap<TrackId, PerchedInternalState>,
+    /// Tracks whose next fix restarts the filter (a relocation-gate hop).
+    restart_at_next_fix_track_ids: BTreeSet<TrackId>,
     pub relocation_count: u64,
 }
 
 impl PerchedRandomWalkFilter {
     pub fn new(config: PerchedFilterConfig) -> Self {
-        Self { config, states: BTreeMap::new(), relocation_count: 0 }
+        Self { config, states: BTreeMap::new(), restart_at_next_fix_track_ids: BTreeSet::new(), relocation_count: 0 }
     }
 
     pub fn has_track(&self, track_id: TrackId) -> bool {
@@ -93,6 +95,7 @@ impl PerchedRandomWalkFilter {
         if !self.states.contains_key(&track_id) {
             self.initialize_track(track_id, fallback_position_m);
         }
+        let gate_restart = self.restart_at_next_fix_track_ids.remove(&track_id);
         let diffusion = self.diffusion(dt_s);
         let measurement_covariance = self.measurement_covariance(measurement_covariance_m2);
         let snap_distance_m = self.config.relocation_snap_distance_m;
@@ -102,8 +105,11 @@ impl PerchedRandomWalkFilter {
         let innovation = measured - internal.position;
         let prior_covariance = internal.covariance + diffusion;
         let innovation_covariance = prior_covariance + measurement_covariance;
-        if is_relocation(&innovation, &innovation_covariance, snap_distance_m, snap_threshold) {
-            self.relocation_count += 1;
+        if gate_restart || is_relocation(&innovation, &innovation_covariance, snap_distance_m, snap_threshold) {
+            // A gate restart was counted by the relocation gate already.
+            if !gate_restart {
+                self.relocation_count += 1;
+            }
             internal.position = measured;
             internal.covariance = measurement_covariance;
             return estimate(&internal.position, &internal.covariance);
@@ -124,6 +130,7 @@ impl PerchedRandomWalkFilter {
     }
 
     pub fn initialize_track(&mut self, track_id: TrackId, position_m: &Position3) {
+        self.restart_at_next_fix_track_ids.remove(&track_id);
         self.states.insert(
             track_id,
             PerchedInternalState {
@@ -133,8 +140,16 @@ impl PerchedRandomWalkFilter {
         );
     }
 
+    /// The track's next `update` restarts the filter at that fix (a
+    /// relocation-gate hop). Initialising at the fix and then fusing the same
+    /// fix would count it twice and halve its covariance.
+    pub fn restart_at_next_fix(&mut self, track_id: TrackId) {
+        self.restart_at_next_fix_track_ids.insert(track_id);
+    }
+
     pub fn remove_track(&mut self, track_id: TrackId) {
         self.states.remove(&track_id);
+        self.restart_at_next_fix_track_ids.remove(&track_id);
     }
 
     fn diffusion(&self, dt_s: f64) -> Matrix3<f64> {
@@ -183,6 +198,18 @@ mod tests {
         let hopped = filter.update(1, &[0.0; 3], &[15.0, 0.0, 3.0], 5.0, None);
         assert_eq!(hopped.position_m, [15.0, 0.0, 3.0]);
         assert_eq!(filter.relocation_count, 1);
+    }
+
+    #[test]
+    fn gate_restart_takes_the_fix_once_not_twice() {
+        let mut filter = PerchedRandomWalkFilter::new(PerchedFilterConfig::default());
+        filter.initialize_track(1, &[0.0; 3]);
+        filter.restart_at_next_fix(1);
+        let fix_covariance: Covariance3 = [[1.5, 0.0, 0.0], [0.0, 1.5, 0.0], [0.0, 0.0, 211.0]];
+        let restarted = filter.update(1, &[0.0; 3], &[3.0, 0.0, 0.0], 8.0, Some(&fix_covariance));
+        assert_eq!(restarted.position_m, [3.0, 0.0, 0.0]);
+        assert!((restarted.covariance_m2[2][2] - 211.0).abs() < 1e-9);
+        assert_eq!(filter.relocation_count, 0);
     }
 
     #[test]

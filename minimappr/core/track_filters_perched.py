@@ -67,6 +67,8 @@ class PerchedRandomWalkTrackFilter:
         self._relocation_snap_distance_m = float(relocation_snap_distance_m)
         self._relocation_snap_min_mahalanobis_squared = float(relocation_snap_min_mahalanobis_squared)
         self._states: dict[str, _PerchedInternalState] = {}
+        # Tracks whose next fix restarts the filter (a relocation-gate hop).
+        self._restart_at_next_fix_track_ids: set[str] = set()
         self.relocation_count = 0
 
     # -- TrackFilter Protocol -----------------------------------------------
@@ -95,9 +97,13 @@ class PerchedRandomWalkTrackFilter:
         innovation = measured - internal.position_m
         prior_covariance = internal.covariance_m2 + self._diffusion(dt_s)
         innovation_covariance = prior_covariance + measurement_covariance
-        if self._is_relocation(innovation, innovation_covariance):
+        gate_restart = state.id in self._restart_at_next_fix_track_ids
+        self._restart_at_next_fix_track_ids.discard(state.id)
+        if gate_restart or self._is_relocation(innovation, innovation_covariance):
             # New perch: restart at the fix rather than averaging two perches.
-            self.relocation_count += 1
+            # A gate restart was counted by the relocation gate already.
+            if not gate_restart:
+                self.relocation_count += 1
             internal.position_m = measured.copy()
             internal.covariance_m2 = measurement_covariance.copy()
             return self._to_track_state(state, internal.position_m, internal.covariance_m2)
@@ -119,13 +125,23 @@ class PerchedRandomWalkTrackFilter:
         return self._to_track_state(state, internal.position_m, internal.covariance_m2)
 
     def initialize_track(self, track_id: str, position_m: tuple[float, float, float]) -> None:
+        self._restart_at_next_fix_track_ids.discard(track_id)
         self._states[track_id] = _PerchedInternalState(
             position_m=np.asarray(position_m, dtype=np.float64).copy(),
             covariance_m2=np.eye(3, dtype=np.float64) * self._initial_position_variance_m2,
         )
 
+    def restart_at_next_fix(self, track_id: str) -> None:
+        """The track's next ``update`` restarts the filter at that fix.
+
+        For a relocation-gate hop. Initialising at the fix and then fusing the
+        same fix would count it twice and halve its covariance.
+        """
+        self._restart_at_next_fix_track_ids.add(track_id)
+
     def remove_track(self, track_id: str) -> None:
         self._states.pop(track_id, None)
+        self._restart_at_next_fix_track_ids.discard(track_id)
 
     def soft_position_update(
         self, track_id: str, corrected_position_m: tuple[float, float, float]
@@ -233,6 +249,11 @@ class MotionModelRoutingTrackFilter:
             self._perched_filter.remove_track(track_id)
             self._perched_track_ids.discard(track_id)
             self._constant_velocity_filter.initialize_track(track_id, position_m)
+
+    def restart_perched_track_at_next_fix(self, track_id: str) -> None:
+        """A relocation-gate hop: the perched track restarts at its next fix."""
+        if track_id in self._perched_track_ids:
+            self._perched_filter.restart_at_next_fix(track_id)
 
     def _route(self, track_id: str) -> TrackFilter:
         return self._perched_filter if track_id in self._perched_track_ids else self._constant_velocity_filter

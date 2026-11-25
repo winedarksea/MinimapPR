@@ -338,7 +338,9 @@ class TrackManager(
                     track_filter=self._filter,
                 )
                 if matched_id is not None:
-                    self._filter.initialize_track(matched_id, position_m)
+                    # The update below restarts the perch at this fix (only perched
+                    # tracks relocate, so the filter is the motion-model router).
+                    self._filter.restart_perched_track_at_next_fix(matched_id)
 
             if matched_id is None:
                 # --- Reacquire a dormant identity before minting a new one ---

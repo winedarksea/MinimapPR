@@ -273,15 +273,16 @@ Contract: `docs/localization_solve_contract.md`; tracking: `docs/tracking.md`; c
   - the rectangular event window makes PHAT pull every pair toward zero lag.
   - Band plus taper took point-network recall from 0.30 to 0.45. Reconcile with the measured array bearing reversal behind the 3430 Hz ceiling before changing it (memory: localization band PHAT ceiling).
 - [ ] **3-node point networks never localize** — SRP needs 4 channels and `rust_tdoa_solve.py` 4 sensors (35 of 200 E8 held-out sites).
-- [ ] **Covariance calibration** — stated 95 % regions cover about 0.73 on E8 point networks (0.54 before the position-accuracy term). Correlation structure on coplanar and collinear layouts blocks starting the stationary filter from the fix covariance (`docs/tracking.md`, branch `loc/m3-hold-filter-init`, which also carries a relocation-gate double-fusion fix). `onset_overlap_two_species` stays at 0.44 m (was 0.33 m) until then.
+- [ ] **Covariance calibration** — stated 95 % regions cover about 0.73 on E8 point networks (0.54 before the position-accuracy term). Correlation structure on coplanar and collinear layouts blocks starting the stationary filter from the fix covariance (`docs/tracking.md`; experiment archived as tag `archive/loc-m3-hold-filter-init`; its relocation-gate double-fusion fix was merged). `onset_overlap_two_species` stays at 0.44 m (was 0.33 m) until then.
 - [ ] **Re-solve radial divergence** — `radial_range_refinement.py` doubles the radius while the cost falls and can return 10⁸–10⁹ m as `range_bearing_projected`; only the handoff gate keeps it out of storage.
 - [ ] **`solve_3x3` / `invert_3x3` absolute 1e-9 pivot** (`srp_phat.rs`) — near-field normal-matrix entries are 1e-5 to 1e-10, so the base covariance often falls back or comes out non-symmetric.
-- [ ] **E5 open cells** (25 strict xfails, reasons in `tests/test_localization_range_matrix_realistic.py`):
+- [ ] **E5 open cells** (24 strict xfails, reasons in `tests/test_localization_range_matrix_realistic.py`):
   - a compact planar array plus one weak-clock point collapses near the array with too small a covariance;
   - NTP cross-node solves;
   - planar arrays at 100 m and beyond;
-  - the four-node spread at 100 m and beyond;
+  - the four-node spread at 100 m and beyond (so the default diagonal has no passing four-node cell: `1000m-four_node_spread-gps_locked-hand_measured`, once reported as passing, stores no covering detection 7 of 7 times);
   - a hand-measured planar-plus-point cell claims a range the oracle allows only as heard.
+- [ ] **E5 `100m-four_node_spread-gps_locked-hand_measured` depends on which node reports** (non-strict xfail) — it passes when tetra-b reports (65 m off, bearing right, inside the widened covariance) and is stored omni through the render fallback when tetra-d reports. The outcome should not depend on the reporter: find why tetra-d's render loses the cross-node solve.
 - [ ] **Python 2-D path** — NTP-mixed solves can stall at the centroid; `localize_2d` lacks the node-position covariance term.
 - [ ] **Rust perched tracker ignores `tracking_mode_by_category`** — the enum and parity exist, but the tracker always runs `stationary_hold`.
 - [ ] **Point-network clip label replaces the sidecar label** — the Python classifier may be a different model or vocabulary from the sidecar's BirdNET; the replaced label is kept in provenance.
@@ -292,6 +293,7 @@ Contract: `docs/localization_solve_contract.md`; tracking: `docs/tracking.md`; c
   - an unmeasured mount still looks recorded;
   - there is no `cluster_id`;
   - the 120 s session cap.
+- [ ] **Hold event-only Rust solves while a covering render is possible** — the hold rule (`docs/tracking.md`) never holds event-only Rust solves, and they usually arrive before their covering render, so on the production Rust path an overlapping neighbour's fix still lands on a perched filter at once. Hold such a solve (bounded by the classifier render interval) when its one gating track is a labelled `stationary_hold` track and a render covering its span can still arrive.
 - [ ] **E10 blind spots** — detection count and classification metrics are info-only, so a Python render-handoff regression would not fail the gate.
 - [ ] **File size** — `fusion_node.py` is about 3,580 lines and `dsp_worker.rs` over 600.
 - [ ] **Bluefin deploy and live check** — needs approval.

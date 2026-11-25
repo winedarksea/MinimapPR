@@ -109,6 +109,42 @@ def perched_filter_case(seed: int) -> tuple[dict, dict]:
     return {"kind": "perched_filter", "initial_position_m": initial_position_m, "steps": steps}, {"steps": outputs}
 
 
+def perched_filter_gate_restart_case(seed: int) -> tuple[dict, dict]:
+    """Relocation-gate hops: the hop's fix restarts the perch once, never fused twice."""
+    rng = np.random.default_rng(seed)
+    perched = PerchedRandomWalkTrackFilter(
+        position_diffusion_m2_per_second=0.05, measurement_noise_m2=1.5,
+        initial_position_variance_m2=4.0, relocation_snap_distance_m=6.0,
+    )
+    perch = rng.uniform(-20, 20, size=3)
+    initial_position_m = perch.tolist()
+    perched.initialize_track("t", tuple(perch))
+    state = _track_state("t", perch, None, T0_NS)
+    steps, outputs = [], []
+    for _ in range(8):
+        restart_at_next_fix = bool(rng.uniform() < 0.3)
+        if restart_at_next_fix:
+            # Some hops land inside the snap distance, which only a gate restart catches.
+            perch = perch + rng.uniform(-8, 8, size=3)
+            perched.restart_at_next_fix("t")
+        measurement = (perch + rng.normal(scale=0.5, size=3)).tolist()
+        covariance = _random_covariance(rng, float(rng.uniform(0.2, 3.0))) if rng.uniform() < 0.7 else None
+        dt_s = float(rng.uniform(0.5, 12.0))
+        steps.append({
+            "measurement_m": measurement, "covariance_m2": covariance, "dt_s": dt_s,
+            "restart_at_next_fix": restart_at_next_fix,
+        })
+        relocations_before = perched.relocation_count
+        state = perched.update(state, tuple(measurement), dt_s, covariance)
+        predicted = perched.predict(state, 3.0)
+        outputs.append({
+            "position_m": list(state.position_m), "covariance_m2": state.position_covariance_m2,
+            "relocated": perched.relocation_count > relocations_before,
+            "predicted_covariance_m2": predicted.position_covariance_m2,
+        })
+    return {"kind": "perched_filter", "initial_position_m": initial_position_m, "steps": steps}, {"steps": outputs}
+
+
 def association_case(seed: int) -> tuple[dict, dict]:
     rng = np.random.default_rng(seed)
     associator = NearestNeighborAssociator(8.0, max_gate_m=32.0, chi2_gate=9.0, fingerprint_weight=0.0)
@@ -263,6 +299,7 @@ def all_cases() -> list[tuple[dict, dict]]:
         cases.append(entity_geometry_case(300 + seed))
     cases.append(entity_geometry_degenerate_case())
     cases.append(tracking_mode_case())
+    cases.extend(perched_filter_gate_restart_case(600 + seed) for seed in range(4))
     cases.extend(association_case(400 + seed) for seed in range(24))
     cases.extend(concurrency_case(500 + seed) for seed in range(16))
     for name, builder in SCENARIO_BUILDERS.items():

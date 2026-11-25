@@ -25,6 +25,9 @@ ALL_ON_SCENE_EXPECTATIONS = {
     # and the far bird's 391 m fix no longer starts a duplicate.
     "gate_flock_echo": (1.0, 1.0),
     "onset_faint_far_bird": (1.0, 1.0),
+    # Localization core overhaul: 0.44 m measured (0.33 m before milestone 3; see
+    # docs/tracking.md "Hold rule for perched tracks"). Locked in with headroom.
+    "onset_overlap_two_species": (1.0, 0.6),
 }
 BASELINE_COMPARISON_SCENE = "onset_same_band_two_species"
 

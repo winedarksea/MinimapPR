@@ -231,3 +231,19 @@ async def test_ghost_of_dropped_track_is_not_reverted():
     snapshot = await manager.snapshot()
     assert manager.field_mode.relocation_gate.relocations_reverted == 0
     assert next(t for t in snapshot if t.id == track.id).status == "dropped"
+
+
+def test_gate_restart_takes_the_fix_once_not_twice():
+    """A relocation-gate hop restarts at the fix with its covariance; it is not fused again."""
+    flt = _perched()
+    state = _state()
+    flt.initialize_track("t1", (0.0, 0.0, 0.0))
+    flt.restart_at_next_fix("t1")
+    fix_covariance = [[1.5, 0.0, 0.0], [0.0, 1.5, 0.0], [0.0, 0.0, 211.0]]
+    state = flt.update(state, (3.0, 0.0, 0.0), 8.0, fix_covariance)
+    assert state.position_m == (3.0, 0.0, 0.0)
+    assert state.position_covariance_m2[2][2] == pytest.approx(211.0, abs=1e-3)
+    assert flt.relocation_count == 0  # the relocation gate counts its own hops
+    # The restart is one-shot: the next fix inside the snap distance is fused.
+    state = flt.update(state, (3.5, 0.0, 0.0), 1.0, fix_covariance)
+    assert 3.0 < state.position_m[0] < 3.5

@@ -186,13 +186,18 @@ classification (`position_observations_held_for_label`):
   new track for a second bird (`position_observations_held_applied_with_label`). The fix is not
   re-associated from scratch: in `gate_flock_echo` a poorly conditioned fix then jumped to a
   nearer provisional track whose filter was still loose.
-- An abstention, an empty classification, or a classification that finds nothing trackable
-  drops the fix (`position_observations_held_dropped`).
+- An abstention, an empty classification, a classification that finds nothing trackable, or a
+  label whose category is not tracked (tracking mode `none`) drops the fix
+  (`position_observations_held_dropped`). A dropped fix is resolved: no later release applies it.
+  A window-reconciliation sibling that assembles empty is dropped the same way when its window
+  is assembled, whether it was parked or completed the window.
 - If no classification ever arrives, the fix is applied geometry-only
   (`position_observations_held_applied_geometry_only`). That covers a classification-queue drop,
   chunk suppression, a saturated report window, a timeout, a backend failure and ledger eviction,
   and `position_observation_held_fix_max_wait_seconds` (`30`) is a deadline for anything else. A
-  released fix never moves `last_seen_ns` backwards.
+  solve with nothing to classify (an array too small to beamform, a beamform exception; drop
+  reason `classification_unavailable`) is "could not classify", not "classified as nothing", so
+  it is applied geometry-only too. A released fix never moves `last_seen_ns` backwards.
 
 Continuous-motion and hidden tracks still update at once, so the drone update-gap gate is
 unaffected. Event-only Rust solves are never held, because they carry no classification and only
@@ -200,12 +205,36 @@ one per render interval is ever covered by a render. Holding them would only del
 deadline, and the gates that run again at attach still catch a covering render's contradicting
 label.
 
+**Limit on the production Rust path.** The rule protects perched tracks fully only on the
+Python-ingest path and for Rust classifier renders. An event-only Rust solve is applied at once,
+and it usually reaches the tracker before the render that covers it
+(`LocalizedRenderHandoff.observe_event_solve`). The render then repeats the solve id and only
+attaches its label. So with the Rust sidecar, an overlapping neighbour's poorly conditioned fix
+still lands on the perched filter immediately, as it did before milestone 3. Holding event solves
+while a covering render is still possible is an open TODO item.
+
+**What the rule costs.** A held fix whose classification abstains is dropped, not applied.
+Abstentions include faint long-range calls that the classifier cannot name (label `unknown` or
+confidence 0) and point-network clips judged `SPECIES_UNCERTAIN` (P7, two plausible callers).
+So near a labelled perched track, those calls never move any track, even when they really came
+from the perched bird.
+
 This keeps the reason for point 4: no capacity or dedupe drop starves the tracker, and only the
 classifier's own verdict can stop a fix reaching a perched bird. It is the same kind of
 exception as the ambiguity rule above.
 
-`gate_flock_echo` recalls less than it did before milestone 3 (`event_recall_sum` 0.56 to 0.33).
-This is expected: the extra recall came from a misassociation that P5 removed.
+`gate_flock_echo` has a lower event recall than before milestone 3 (0.56 to 0.33, 5 to 3 of 9
+calls); individual recall (1.00), median error (0.56 m), swaps and duplicates are unchanged.
+Event recall counts detection rows per entity, so it undercounts under entity reporting. A dump
+of per-event associations at the pre-milestone-3 commit (62cbb2a) against now explains the two
+lost events:
+
+- The 3.43 s row was chickadee-3's call. Its own fix was right ([10.0, 12.7] m, 0.3 m from that
+  bird), but it was bound to chickadee-1's track and shown at chickadee-1's entity position, so
+  the 2 s association slop credited it to chickadee-1's 1.0 s call. That was a misassociation
+  scored as a hit. Now no surfaced row is bound to the wrong bird.
+- The 4.62 s row was a correct second row for chickadee-1. It no longer surfaces as a row of its
+  own, which costs event recall only.
 
 `onset_overlap_two_species` (all-on) has a median error of 0.44 m, against 0.33 m before
 milestone 3. Before milestone 3, an abstaining classification (`unknown`, confidence 0) founded
@@ -214,11 +243,15 @@ the tanager's track now starts from its own first fix. That fix is poorly condit
 (variance 211 m²), but the stationary_hold filter restarts at it with its default isotropic
 4 m² variance, not the fix's.
 
-Starting the filter from the founding fix's covariance was tried (branch
-`loc/m3-hold-filter-init`, not merged). It brings this scene to 0.34 m, but makes
+Starting the filter from the founding fix's covariance was tried and not merged (tag
+`archive/loc-m3-hold-filter-init`, commit 9384cba). It brings this scene to 0.34 m, but makes
 `gate_countersinging_pair` worse (0.32 → 0.51 m) and `gate_collinear_trail` worse
 (0.08 → 0.21 m). In those coplanar and collinear layouts the solver's fix covariances have long
 axes (up to 900 m²) that are tilted, so a later fix's height correction drags the horizontal
 position along the tilt. The real fix is calibrating the correlation structure of the solver
-covariance. The same branch also carries a separate, smaller fix: a relocation-gate hop fused
-the same fix twice.
+covariance.
+
+A relocation-gate hop restarts the stationary_hold filter at the hop's fix with that fix's
+measurement covariance (`restart_at_next_fix`, Python and Rust), like the filter's own relocation
+snap. It used to initialise the filter at the fix and then fuse the same fix again, counting it
+twice and halving its covariance. This part of the experiment was kept.

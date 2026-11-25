@@ -305,7 +305,11 @@ class TrackManagerPositionObservationMethods:
         track for the other bird). Re-associating every held fix from scratch
         instead would let one poorly conditioned fix jump to a nearer
         provisional track whose filter is still loose (``gate_flock_echo``).
+        ``None`` means the fix reached no track (an untracked label category).
         """
+        if not self.tracks_category(classified_update_kwargs.get("label_category", UNCLASSIFIED_TRACK_CATEGORY)):
+            # An untracked source's fix must not move the perched track, whatever the category gate says.
+            return None
         async with self._lock:
             self._age_tracks(observation.event_time_ns)
             track = self._tracks.get(gating_track_id)

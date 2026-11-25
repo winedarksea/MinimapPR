@@ -445,6 +445,7 @@ def test_pre_render_report_window_cap_never_skips_onset_srp_products() -> None:
         return SimpleNamespace(
             localization_branch=SimpleNamespace(localization_method=method),
             candidate=SimpleNamespace(source_node_id="node-a", event_time_ns=1_000_000_000),
+            deferred_classification=None,
         )
 
     skip = FusionNode._should_skip_saturated_report_window
