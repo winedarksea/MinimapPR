@@ -146,8 +146,12 @@ its own.
 So a fix whose only gating track is a **labelled `stationary_hold` track** is held for its
 classification (`position_observations_held_for_label`):
 
-- An informative label applies the fix through the label-aware `update`, with species gates,
-  the concurrent-perch guard and relocation (`position_observations_held_applied_with_label`).
+- An informative label applies the fix to the track that gated it, unless the label-dependent
+  gates (species log-odds, concurrent-perch guard, both run against every live track) reject
+  that track or it is gone. In that case the label-aware `update` places it, for example on a
+  new track for a second bird (`position_observations_held_applied_with_label`). The fix is not
+  re-associated from scratch: in `gate_flock_echo` a poorly conditioned fix then jumped to a
+  nearer provisional track whose filter was still loose.
 - An abstention, an empty classification, or a classification that finds nothing trackable
   drops the fix (`position_observations_held_dropped`).
 - If no classification ever arrives, the fix is applied geometry-only
@@ -168,3 +172,11 @@ exception as the ambiguity rule above.
 
 `gate_flock_echo` recalls less than it did before milestone 3 (`event_recall_sum` 0.56 to 0.33).
 This is expected: the extra recall came from a misassociation that P5 removed.
+
+`onset_overlap_two_species` (all-on) has a median error of 0.44 m, against 0.33 m before
+milestone 3. Before milestone 3, an abstaining classification (`unknown`, confidence 0) founded
+a track, and the tanager's first call joined it. Abstentions no longer found or move tracks, so
+the tanager's track now starts from its own first fix. That fix is poorly conditioned in height
+(variance 211 m²), but the stationary_hold filter restarts at it with its default variance, not
+the fix's. Starting a track's filter from the first fix's covariance (P4's filters) would fix
+this.
