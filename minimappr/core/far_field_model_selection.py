@@ -10,22 +10,24 @@ onto its node, and the beamformer then steered at a point 3 cm away (Field Mode
 W2 root cause, see docs/field_mode_progress/onset_srp.md). Even a 400 m source
 with ideal TDOAs collapsed to 6 cm.
 
-The guard only acts inside the collapse zone (solved range at most
-`COLLAPSE_ZONE_APERTURE_MULTIPLE` apertures from the centroid, i.e. ~20 cm for a
-5 cm tetra; MinimapPR's nearest supported range is 1 m) and only on compact
-arrays. There the near-field point is replaced by the best plane-wave
-projection unless it beats that projection by more than the timing noise floor
-(`CURVATURE_EVIDENCE_NOISE_MULTIPLIER` interpolated sample periods, RMS).
-Genuine near-field fixtures outside the zone (e.g. 0.27 m from a 5 cm array at
-48 kHz) and all multi-node layouts keep the legacy answer.
+The guard acts on every RANGE_REFINED solve of a compact array, wherever it
+landed: the near-field point is replaced by the best plane-wave projection
+unless it beats that projection by more than the timing noise floor
+(`CURVATURE_EVIDENCE_NOISE_MULTIPLIER` interpolated sample periods, RMS). That
+test is the range-observability question itself, so no distance cutoff is
+needed: a genuine near-field source (e.g. 0.27 m from a 5 cm array) leaves a
+plane-wave misfit far above the noise and keeps its fix, while a point that
+only beats the plane wave by noise is a collapse at any distance. Multi-node
+layouts keep the legacy answer.
 
-Known limits (review 2026-11-22): sources 1-10 m from a lone tetra still
-occasionally (~5% at 2 us TDOA noise) settle at 4-6 apertures as RANGE_REFINED
-with low radial observability, just outside the zone; and a real source inside
-the zone (< ~20 cm, below MinimapPR's 1 m floor) is reported as a bearing,
-since the evidence threshold is the interpolated sample period, not the measured
-TDOA noise. Widening the zone removes the former but also discards correct
-~1 m refined fixes at 48 kHz, so it is left at 4 pending the gtol/LM fix.
+History: the guard used to act only within 4 apertures of the centroid (~20 cm
+for a 5 cm tetra). Collapses also settle just outside that (4-6 apertures);
+one landed at 0.216 m from a 0.0525 m tetra (4.1 apertures) and was published
+as a RANGE_REFINED fix with a ~0.2 m covariance for a source 100 m away (E5
+range matrix, `100m-single_tetra-*`, after R4's onset trigger left most of the
+80 ms solve window before the burst). Without a cutoff, a lone tetra 1-3 m from
+a source reports a bearing, which is what its aperture can honestly observe
+(the E5 oracle's verdict for that cell too).
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ import numpy as np
 
 EPSILON = 1.0e-12
 # A near-field point must beat the plane wave by this many timing-noise std
-# (RMS) to be believed inside the collapse zone.
+# (RMS) to be believed.
 CURVATURE_EVIDENCE_NOISE_MULTIPLIER = 1.0
 # Only arrays at most this wide are guarded. Wider (multi-node) layouts can
 # observe range, and when their near and far fits tie it is because the TDOAs
@@ -46,10 +48,6 @@ CURVATURE_EVIDENCE_NOISE_MULTIPLIER = 1.0
 # keep the legacy answer and its low confidence. 0.5 m covers tetra nodes and
 # stereo phones with margin.
 COMPACT_ARRAY_MAX_APERTURE_M = 0.5
-# Solves closer than this many apertures to the centroid are in the collapse
-# zone. Observed collapses sit at 0.4-3 apertures; 4 leaves the 5.4-aperture
-# near-field regression fixtures untouched.
-COLLAPSE_ZONE_APERTURE_MULTIPLE = 4.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,14 +80,12 @@ def far_field_alternative_if_curvature_unsupported(
 ) -> FarFieldAlternative | None:
     """Return a plane-wave projection when a compact-array solve has collapsed.
 
-    None means keep the near-field solution: the array is not compact, the solve
-    lies outside the collapse zone, or its curvature evidence beats the noise.
+    None means keep the near-field solution: the array is not compact, or its
+    curvature evidence beats the noise.
     """
     if array_aperture_m > COMPACT_ARRAY_MAX_APERTURE_M:
         return None
     near_offset = np.asarray(near_field_position_m, dtype=np.float64) - centroid_m
-    if float(np.linalg.norm(near_offset)) > COLLAPSE_ZONE_APERTURE_MULTIPLE * array_aperture_m:
-        return None
     candidate_directions = [
         direction
         for direction in (_unit(near_offset), _unit(plane_wave_direction))

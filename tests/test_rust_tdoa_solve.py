@@ -186,3 +186,47 @@ def test_bridge_returns_none_when_fewer_than_four_sensors() -> None:
         far_field_default_range_m=50.0,
     )
     assert result is None
+
+
+# Pair TDOAs a real sidecar measured for a lone Sirith tetra and a band-limited
+# burst 100 m out at azimuth 35 deg, elevation 10 deg (E5 range matrix cell
+# 100m-single_tetra-gps_locked-gps, R4 onset trigger: ~8 ms of burst in the
+# 80 ms window). Their exact 3-D fit sits 0.216 m from the centroid, 4.1
+# apertures out, and was published as range_refined with a 0.2 m covariance.
+_MEASURED_ONSET_WINDOW_PAIR_TDOAS = [
+    {"ch_a": 0, "ch_b": 1, "lag_seconds": 5.933148e-05, "confidence": 0.5008448},
+    {"ch_a": 0, "ch_b": 2, "lag_seconds": -7.956549e-05, "confidence": 0.5010929},
+    {"ch_a": 0, "ch_b": 3, "lag_seconds": 3.3073404e-05, "confidence": 0.5008651},
+    {"ch_a": 1, "ch_b": 2, "lag_seconds": -0.00013799986, "confidence": 0.50099057},
+    {"ch_a": 1, "ch_b": 3, "lag_seconds": -2.5358957e-05, "confidence": 0.50106305},
+    {"ch_a": 2, "ch_b": 3, "lag_seconds": 0.000113565264, "confidence": 0.5009882},
+]
+_MEASURED_ONSET_WINDOW_STEERING = (0.80438995, 0.55921805, 0.20057929)
+
+
+def test_lone_tetra_never_claims_range_for_a_100m_source_from_measured_tdoas() -> None:
+    sensor_positions = _sensor_positions()
+    ordered_ids = [f"ch{i}" for i in range(4)]
+    azimuth, elevation = np.radians(35.0), np.radians(10.0)
+    true_bearing = np.array([np.cos(elevation) * np.cos(azimuth), np.cos(elevation) * np.sin(azimuth), np.sin(elevation)])
+
+    result = solve_localization_from_rust_tdoas(
+        sensor_positions=sensor_positions,
+        ordered_sensor_ids=ordered_ids,
+        pair_tdoas=_MEASURED_ONSET_WINDOW_PAIR_TDOAS,
+        steering_direction=_MEASURED_ONSET_WINDOW_STEERING,
+        sound_speed_mps=SOUND_SPEED_MPS,
+        sample_rate_hz=SAMPLE_RATE_HZ,
+        interpolation_factor=4,
+        far_field_default_range_m=50.0,
+    )
+
+    assert result is not None
+    assert range_mode_is_unobservable(result.range_projection_mode)
+    centroid = np.mean([sensor_positions[s] for s in ordered_ids], axis=0)
+    recovered_bearing = _bearing(centroid, np.asarray(result.position_m))
+    assert float(np.degrees(np.arccos(np.clip(recovered_bearing @ true_bearing, -1.0, 1.0)))) < 5.0
+    # The stated uncertainty must reach the true 100 m range along the bearing.
+    radial_std_m = float(np.sqrt(true_bearing @ np.asarray(result.position_covariance_m2) @ true_bearing))
+    solved_range_m = float(np.linalg.norm(np.asarray(result.position_m) - centroid))
+    assert abs(solved_range_m - 100.0) < 4.0 * radial_std_m

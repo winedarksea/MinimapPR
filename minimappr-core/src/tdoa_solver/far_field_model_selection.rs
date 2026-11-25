@@ -4,11 +4,12 @@
 //! Why: four mics of a compact (5 cm tetra) array give three independent
 //! TDOAs, which a 3-D point always fits exactly, so the solve finds a point a
 //! few centimetres out that "explains" timing noise as wavefront curvature.
-//! Inside the collapse zone (a few apertures from the centroid) the near-field
-//! point is replaced by the best plane-wave projection unless it beats that
-//! projection by more than the timing-noise floor. Multi-node layouts and
-//! solves outside the zone keep the legacy answer. Thresholds must stay equal
-//! to the Python constants (parity gate).
+//! Wherever a compact array's solve lands, the near-field point is replaced by
+//! the best plane-wave projection unless it beats that projection by more than
+//! the timing-noise floor: that test is the range-observability question, so
+//! no distance cutoff applies (a 4-aperture cutoff let collapses 4-6 apertures
+//! out through as refined fixes). Multi-node layouts keep the legacy answer.
+//! Thresholds must stay equal to the Python constants (parity gate).
 
 use nalgebra::{DVector, Vector3};
 
@@ -21,9 +22,6 @@ pub const CURVATURE_EVIDENCE_NOISE_MULTIPLIER: f64 = 1.0;
 /// phones with margin. Wider layouts observe range; a near/far tie there means
 /// inconsistent TDOAs and keeps the legacy low-confidence answer.
 pub const COMPACT_ARRAY_MAX_APERTURE_M: f64 = 0.5;
-/// Solves closer than this many apertures to the centroid are in the collapse
-/// zone (observed collapses sit at 0.4-3 apertures).
-pub const COLLAPSE_ZONE_APERTURE_MULTIPLE: f64 = 4.0;
 
 /// A plane-wave projection replacing a collapsed near-field solve.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -58,19 +56,16 @@ fn unit_or_none(vector: Option<Vector3<f64>>) -> Option<Vector3<f64>> {
 }
 
 /// `Some` = replace the solve with this plane-wave projection; `None` = keep
-/// the near-field solution (not compact, outside the zone, or curvature
-/// evidence beats the noise).
+/// the near-field solution (not compact, or curvature evidence beats the
+/// noise).
 pub fn far_field_alternative_if_curvature_unsupported(
     inputs: &FarFieldGuardInputs<'_>,
 ) -> Option<FarFieldAlternative> {
-    // `!(a <= b)` so a NaN aperture/offset also leaves the solve untouched.
+    // `!(a <= b)` so a NaN aperture also leaves the solve untouched.
     if !(inputs.array_aperture_m <= COMPACT_ARRAY_MAX_APERTURE_M) {
         return None;
     }
     let near_offset = inputs.near_field_position_m - inputs.centroid_m;
-    if !(near_offset.norm() <= COLLAPSE_ZONE_APERTURE_MULTIPLE * inputs.array_aperture_m) {
-        return None;
-    }
     let mut best: Option<FarFieldAlternative> = None;
     // Order matters for exact ties: near-offset direction first, as in Python.
     for direction in [

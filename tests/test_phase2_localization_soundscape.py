@@ -323,10 +323,18 @@ def test_birdnet_hybrid_profile_uses_fixed_srp_for_tight_array_near_field() -> N
     )
 
     estimate = np.asarray(result.position_m, dtype=np.float64)
-    assert float(np.linalg.norm(estimate - source)) <= 0.10
     assert result.attempted_algorithm == "srp_phat"
     assert result.resolved_algorithm == "srp_phat"
-    assert result.range_projection_mode == "range_refined"
+    # 0.27 m from a 7 cm array the wavefront curvature beats the best plane wave
+    # by ~2 us RMS, under the solver's one-interpolated-sample (5.2 us) timing
+    # noise, so the honest answer is the bearing with an unobservable range
+    # (far_field_model_selection.py). It used to be published as range_refined
+    # only because the solve landed outside a fixed 4-aperture guard zone.
+    centroid = np.mean(np.vstack(list(sensor_positions.values())), axis=0)
+    estimated_direction = (estimate - centroid) / np.linalg.norm(estimate - centroid)
+    expected_direction = (source - centroid) / np.linalg.norm(source - centroid)
+    assert float(np.dot(estimated_direction, expected_direction)) > 0.95
+    assert range_mode_is_unobservable(result.range_projection_mode)
     assert result.position_covariance_m2 is not None
 
 

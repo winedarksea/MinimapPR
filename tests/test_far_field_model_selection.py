@@ -13,7 +13,6 @@ import numpy as np
 
 from minimappr.core.cartesian_tdoa import solve_cartesian_tdoa
 from minimappr.core.far_field_model_selection import (
-    COLLAPSE_ZONE_APERTURE_MULTIPLE,
     COMPACT_ARRAY_MAX_APERTURE_M,
     far_field_alternative_if_curvature_unsupported,
 )
@@ -128,7 +127,9 @@ def test_near_field_with_strong_curvature_evidence_is_kept() -> None:
     assert alternative is None
 
 
-def test_solves_outside_the_collapse_zone_are_left_alone() -> None:
+def test_compact_array_solve_without_curvature_evidence_is_replaced_at_any_range() -> None:
+    # 6 apertures out, past the old 4-aperture zone: a near point that fits no
+    # better than a plane wave is still a collapse, not a range measurement.
     alternative = far_field_alternative_if_curvature_unsupported(
         centroid_m=np.zeros(3),
         near_field_position_m=np.asarray([0.3, 0.0, 0.0]),
@@ -139,27 +140,23 @@ def test_solves_outside_the_collapse_zone_are_left_alone() -> None:
         far_field_radius_m=50.0,
         array_aperture_m=0.05,
     )
-    assert alternative is None
+    assert alternative is not None
+    np.testing.assert_allclose(alternative.position_m, [50.0, 0.0, 0.0])
 
 
 def test_single_tetra_bird_at_one_to_three_metres_keeps_its_bearing() -> None:
     # Release requirement: localization from 1 m out. One 5 cm tetra cannot
     # observe range at 1-3 m (curvature is below one interpolated sample), so the
-    # contract is an accurate bearing and never a "refined" fix inside the
-    # collapse zone. (Rare collapses just outside the zone still occur; see the
-    # module docstring of far_field_model_selection.)
+    # contract is an accurate bearing and never a "refined" fix, wherever the
+    # near-field basin lands (it used to slip through 4-6 apertures out).
     rng = np.random.default_rng(7)
     origin_m = np.zeros(3)
     positions = _tetra(origin_m)
-    aperture_m = 0.05
     for range_m in (1.0, 2.0, 3.0):
         source_m = range_m * np.asarray([0.6, 0.7, 0.3824])
-        for _ in range(5):
+        for _ in range(20):
             solve = _solve(positions, _measurements(positions, source_m, 2e-6, rng))
             assert _bearing_error_deg(origin_m, solve.position_m, source_m) < 10.0
+            assert range_mode_is_unobservable(solve.range_projection_mode)
             solved_range_m = float(np.linalg.norm(solve.position_m - np.mean(list(positions.values()), axis=0)))
-            if solve.range_projection_mode == RANGE_REFINED:
-                assert solved_range_m > COLLAPSE_ZONE_APERTURE_MULTIPLE * aperture_m
-            else:
-                assert range_mode_is_unobservable(solve.range_projection_mode)
-                assert solved_range_m > range_m
+            assert solved_range_m > range_m
