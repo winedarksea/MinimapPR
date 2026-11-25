@@ -100,11 +100,6 @@ zone or reporting-policy suppression. Both ingest paths hand every solve to
   that solve's position already moved; `update_count` and `last_seen_ns` stay as they are, and a
   hidden track becomes visible. Only when the classification's category contradicts that track (a
   misassociation), or the track is gone, does the label-aware `update` run instead.
-- **A provisional track is a weak anchor.** A hidden, unclassified track gates later fixes only
-  within `association_distance_m` of its predicted position. Its covariance comes from unclassified
-  fixes, possibly noise such as a texture-gated onset or an echo, which are often poorly ranged. Used
-  as a gate, that covariance would let one unconfirmed fix capture any later source along its
-  bearing.
 - **Bounded FIFO, drop-oldest.** `position_observation_queue_max_items` (`1024`) bounds the queue.
   Overflow drops the oldest observation and counts it (`position_observations_dropped_queue_full`).
   Observations are never coalesced: two callers of the same label in one cluster at the same time

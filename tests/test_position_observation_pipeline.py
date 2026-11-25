@@ -29,6 +29,13 @@ from minimappr.core.position_observation_config import position_observation_conf
 from minimappr.core.position_observation_pipeline import PositionObservationPipeline, SolveLedgerState
 from minimappr.core.tracking import TrackManager
 from minimappr.models import TimeQuality
+from minimappr.sim.continuous_source_scenes import DELIVERY_EVENT_LOCALIZATION_RESULT, drone_fly_by
+from tests.continuous_source_manifests import SCENE_REPORTER_IDS
+from tests.continuous_source_tracking_harness import (
+    default_scene_timing,
+    deliver_through_stream_consumer,
+    started_scene_fusion,
+)
 from tests.test_localized_render_handoff_seams import _render, _started_fusion
 
 T0_NS = 1_739_950_000_000_000_000
@@ -279,23 +286,6 @@ async def test_classification_reveals_the_provisional_track_in_place_without_mov
     assert await tracker.snapshot() == [classified]
 
 
-async def test_provisional_track_does_not_capture_a_fix_through_its_loose_covariance() -> None:
-    """One unclassified, poorly ranged fix must not pull in a source far along its bearing."""
-    tracker, metrics = TrackManager(Settings()), FusionMetrics()
-    pipeline = _pipeline(tracker, metrics)
-    elongated_covariance_m2 = [[0.1, 0.0, 0.0], [0.0, 400.0, 0.0], [0.0, 0.0, 0.1]]
-    noise = _localized_product(candidate_id="evt-noise", position_m=(10.0, 1.0, 0.0))
-    noise.localization_branch.localization_position_covariance_m2 = elongated_covariance_m2
-    await _observe(pipeline, noise, SOLVE_ORIGIN_PYTHON_INGEST)
-    await _observe(
-        pipeline,
-        _localized_product(candidate_id="evt-call", position_m=(10.5, 20.0, 2.0), event_time_ns=T0_NS + 2_000_000_000),
-        SOLVE_ORIGIN_PYTHON_INGEST,
-    )
-    await pipeline.drain()
-    assert sorted(track.update_count for track in await tracker.snapshot(include_hidden=True)) == [1, 1]
-
-
 async def test_non_event_triggered_solve_cannot_start_a_track() -> None:
     tracker, metrics = TrackManager(Settings()), FusionMetrics()
     pipeline = _pipeline(tracker, metrics)
@@ -463,3 +453,20 @@ async def test_backlog_dropped_detection_still_updated_the_track(tmp_path: Path)
     assert fusion._metrics.position_observations_applied == 1
     await fusion.stop()
     await storage.close()
+
+
+async def test_event_only_localization_result_reaches_the_tracker_through_the_stream_consumer(tmp_path: Path) -> None:
+    scene = drone_fly_by(default_scene_timing(), reporter_ids=SCENE_REPORTER_IDS)
+    event_deliveries = [delivery for delivery in scene.deliveries if delivery.kind == DELIVERY_EVENT_LOCALIZATION_RESULT]
+    fusion, storage = await started_scene_fusion(tmp_path)
+    try:
+        record = await deliver_through_stream_consumer(fusion, scene, event_deliveries[:3])
+    finally:
+        await fusion.stop()
+        await storage.close()
+
+    assert [observation.solve_id for observation in record.observations] == [
+        delivery.solve_id for delivery in event_deliveries[:3]
+    ]
+    assert all(observation.update_count_increase == 1 for observation in record.observations)
+    assert record.visible_track_ids == set()  # unclassified until a render's label arrives

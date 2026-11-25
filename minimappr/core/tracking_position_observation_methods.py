@@ -2,22 +2,16 @@
 
 Mixed into ``TrackManager``; relies on its ``_lock``, ``_tracks``, ``_filter``,
 ``_associator``, ``_field_mode``, ``_fingerprints``, ``_id_counter``, helper
-methods and P4's ``apply_label_category_tracking_mode``. Split from ``update`` because a solve reaches the tracker in two
-steps:
+methods and P4's ``apply_label_category_tracking_mode``. Split from ``update``
+because a solve reaches the tracker in two steps:
 
 1. ``apply_position_observation``: the position, at the solve's first
    arrival. The fix associates on geometry alone (the label is unknown, which
    every gate treats as a wildcard) and never touches the track's label or
    dynamics. With no match, an event-triggered fix may start a *hidden*
-   tentative track. Two guards keep geometry-only association from merging
-   sources the label-aware ``update`` would have kept apart:
-   - more than one track gates the fix: geometry cannot pick the source, so
-     the fix is left to its classification's label-aware ``update``;
-   - a hidden-unclassified track gates only within ``association_distance_m``
-     of its predicted position. Its covariance comes from unclassified fixes
-     (possibly noise: a texture-gated onset, an echo) that are often poorly
-     ranged, elongated by tens of metres; used as a gate, it lets one
-     unconfirmed fix capture any later source along its bearing.
+   tentative track. When more than one track gates the fix, geometry cannot
+   pick the source (two birds a few metres apart), so the fix is left to its
+   classification's label-aware ``update`` (species gates, fingerprints).
 2. ``attach_classification_to_observed_track``: the label, later, on the track
    the position already moved, without moving it again (no change to
    ``update_count`` or ``last_seen_ns``); a hidden track becomes visible. Only
@@ -32,7 +26,6 @@ rules until a classification reveals them.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -60,10 +53,6 @@ class PositionObservationTrackOutcome:
     started_track: bool
     # Several tracks gate the fix; it waits for its classification's label-aware update.
     deferred_ambiguous: bool = False
-
-
-def _distance_m(first_m, second_m) -> float:
-    return math.dist(tuple(first_m), tuple(second_m))
 
 
 def _informative_label_category(value: str | None) -> str | None:
@@ -133,10 +122,6 @@ class TrackManagerPositionObservationMethods:
             if track.status == TrackStatus.DROPPED.value:
                 continue
             predicted = self._filter.predict(track, max((timestamp_ns - track.last_seen_ns) / 1_000_000_000.0, 0.0))
-            if self._is_unclassified_hidden(track.id) and (
-                _distance_m(predicted.position_m, observation.position_m) >= self._cfg.association_distance_m
-            ):
-                continue
             if self._associate_with(observation, [predicted], context) is not None:
                 gating_track_ids.append(track.id)
         return gating_track_ids
