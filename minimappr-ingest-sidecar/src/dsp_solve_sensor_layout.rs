@@ -81,6 +81,16 @@ impl SolveSensorLayout {
         self.positions_m.len()
     }
 
+    /// Sensors this solve may use (the buffer's minus every exclusion).
+    pub(crate) fn solve_eligible_sensor_count(&self) -> usize {
+        self.sensor_count() - self.excluded_sensors.len()
+    }
+
+    /// Key of the dispatch gates this layout's solves share (`dsp_dispatch_gate_key`).
+    pub(crate) fn dispatch_gate_key(&self, buffer_key: &str) -> String {
+        super::dsp_dispatch_gate_key::dispatch_gate_key(buffer_key, self.solve_sample_rate_hz)
+    }
+
     /// Resets the per-channel entries of excluded sensors (empty window, no
     /// coverage), so a wrong-rate or capped channel reaches neither SRP nor
     /// the render.

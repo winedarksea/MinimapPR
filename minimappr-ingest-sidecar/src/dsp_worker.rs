@@ -58,6 +58,8 @@ mod dsp_compute_payload;
 mod dsp_coverage_integration;
 #[path = "dsp_covered_event_solve.rs"]
 mod dsp_covered_event_solve;
+#[path = "dsp_dispatch_gate_key.rs"]
+mod dsp_dispatch_gate_key;
 #[path = "dsp_dispatch_gates.rs"]
 mod dsp_dispatch_gates;
 #[path = "dsp_localization_trigger.rs"]
@@ -97,6 +99,7 @@ pub(crate) use self::dsp_buffer_sensor_set::*;
 pub(crate) use self::dsp_cluster_sensor_registry::*;
 pub(crate) use self::dsp_compute_payload::*;
 use self::dsp_covered_event_solve::*;
+use self::dsp_dispatch_gate_key::*;
 use self::dsp_localization_trigger::*;
 use self::localization_event_span::*;
 use self::dsp_manifest_buffering::*;
@@ -541,15 +544,30 @@ impl DspWorker {
             return;
         }
         for key in &stale {
+            self.last_classifier_render_ns_by_stream.remove(key);
+            self.last_localization_ns_by_stream.remove(key);
+            self.localization_trigger.forget_stream(key);
+            self.last_heartbeat_ns_by_stream.remove(key);
+        }
+        // Gates are per buffer and solve rate; a buffer goes only once no rate
+        // group still heartbeats on it.
+        let stale_buffer_keys: HashSet<String> = stale
+            .iter()
+            .map(|key| buffer_key_of_dispatch_gate_key(key).to_string())
+            .collect();
+        for key in &stale_buffer_keys {
+            if self
+                .last_heartbeat_ns_by_stream
+                .keys()
+                .any(|gate_key| buffer_key_of_dispatch_gate_key(gate_key) == key)
+            {
+                continue;
+            }
             self.buffers.remove(key);
             self.buffer_channel_sensor_ids.remove(key);
             self.sensor_registry.forget_buffer(key);
             self.deferred_localizations.forget(key);
             self.recent_event_trigger_solves.forget(key);
-            self.last_classifier_render_ns_by_stream.remove(key);
-            self.last_localization_ns_by_stream.remove(key);
-            self.localization_trigger.forget_stream(key);
-            self.last_heartbeat_ns_by_stream.remove(key);
             // node_audio_state is keyed by node_id (prefix before "__"), not stream_key.
             // Only remove if no remaining stream for that node still active.
             let node_id = key.split("__").next().unwrap_or(key.as_str());

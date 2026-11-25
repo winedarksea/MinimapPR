@@ -49,6 +49,25 @@ async fn frame_manifest(
     sample_rate_hz: u32,
     frame_index: usize,
 ) -> DspManifest {
+    cluster_frame_manifest(
+        harness,
+        (CLUSTER_ID, cluster_positions()),
+        node_id,
+        channel_count,
+        sample_rate_hz,
+        frame_index,
+    )
+    .await
+}
+
+async fn cluster_frame_manifest(
+    harness: &RaceHarness,
+    (cluster_id, cluster_sensor_positions): (&str, Vec<(String, [f32; 3])>),
+    node_id: &str,
+    channel_count: usize,
+    sample_rate_hz: u32,
+    frame_index: usize,
+) -> DspManifest {
     let samples_per_frame =
         (u64::from(sample_rate_hz) * FRAME_DURATION_NS / 1_000_000_000) as usize;
     let start_time_ns = STREAM_START_NS + frame_index as u64 * FRAME_DURATION_NS;
@@ -82,8 +101,8 @@ async fn frame_manifest(
         &format!("seg-{node_id}-{frame_index}"),
         &format!("{node_id}__audio_main__0001"),
         payload,
-        Some(CLUSTER_ID.to_string()),
-        Some(cluster_positions()),
+        Some(cluster_id.to_string()),
+        Some(cluster_sensor_positions),
     )
     .await
 }
@@ -135,4 +154,123 @@ async fn mixed_rate_cluster_buffers_keep_each_rate_and_exclude_the_mismatch() {
     let pairs = &tetra_solve.localization.as_ref().unwrap().pair_tdoas;
     assert!(!pairs.is_empty());
     assert!(pairs.iter().all(|pair| pair.ch_a != 0 && pair.ch_b != 0));
+}
+
+const TWO_TETRA_CLUSTER_ID: &str = "rate-guard-tetras";
+const FIRST_TETRA_NODE: &str = "rg-tetra-a";
+const SECOND_TETRA_NODE: &str = "rg-tetra-b";
+const TWO_TETRA_SEPARATION_M: f32 = 3.0;
+
+fn two_tetra_positions() -> Vec<(String, [f32; 3])> {
+    [
+        (FIRST_TETRA_NODE, 0.0),
+        (SECOND_TETRA_NODE, TWO_TETRA_SEPARATION_M),
+    ]
+    .into_iter()
+    .flat_map(|(node_id, east_m)| {
+        SIRITH_MIC_POSITIONS_M
+            .iter()
+            .enumerate()
+            .map(move |(channel, offset)| {
+                (
+                    format!("{node_id}:ch{channel}"),
+                    [east_m + offset[0], offset[1], offset[2]],
+                )
+            })
+    })
+    .collect()
+}
+
+/// Event-triggered solves of a two-tetra cluster, as (reporter, solve rate,
+/// rate-excluded sensor count), with `leader` posting first in every slot.
+async fn two_tetra_event_solves(
+    leader: (&str, u32),
+    follower: (&str, u32),
+) -> Vec<(String, u32, usize)> {
+    let mut harness = RaceHarness::new(race_config(true)).await;
+    for frame_index in 0..FRAME_COUNT {
+        harness.advance_clock_ms(FRAME_DURATION_NS / 1_000_000);
+        for (node_id, rate_hz) in [leader, follower] {
+            let manifest = cluster_frame_manifest(
+                &harness,
+                (TWO_TETRA_CLUSTER_ID, two_tetra_positions()),
+                node_id,
+                4,
+                rate_hz,
+                frame_index,
+            )
+            .await;
+            harness.deliver_manifest(manifest).await;
+        }
+    }
+    let published = drain_published_manifests(&mut harness.events);
+    attempted_localization_results(&published)
+        .into_iter()
+        .map(solve_provenance)
+        .filter(|provenance| provenance.attempt_kind == SolveAttemptKind::EventTriggerAbsoluteRms)
+        .map(|provenance| {
+            let rate_excluded = provenance
+                .excluded_sensors
+                .iter()
+                .filter(|entry| entry.reason == SolveExclusionReason::SampleRateMismatch)
+                .count();
+            (
+                provenance.reporting_node_id.clone(),
+                provenance.solve_sample_rate_hz,
+                rate_excluded,
+            )
+        })
+        .collect()
+}
+
+/// Regression (E4): every dispatch gate was keyed by the shared cluster
+/// buffer, so the node posting first consumed the cluster's trigger, cadence
+/// and render slots and a node at another rate (excluded from the leader's
+/// solves) never solved at all.
+#[tokio::test]
+async fn each_rate_group_of_a_mixed_rate_cluster_gets_its_own_event_solves() {
+    for (leader, follower) in [
+        (
+            (FIRST_TETRA_NODE, TETRA_RATE_HZ),
+            (SECOND_TETRA_NODE, POINT_RATE_HZ),
+        ),
+        (
+            (SECOND_TETRA_NODE, POINT_RATE_HZ),
+            (FIRST_TETRA_NODE, TETRA_RATE_HZ),
+        ),
+    ] {
+        let solves = two_tetra_event_solves(leader, follower).await;
+        for (node_id, rate_hz) in [leader, follower] {
+            let own: Vec<_> = solves
+                .iter()
+                .filter(|(reporter, _, _)| reporter == node_id)
+                .collect();
+            assert!(!own.is_empty(), "{node_id} never solved: {solves:?}");
+            // The leader's frame-0 solve predates the follower's first packet,
+            // so only "excludes the other node once it streams" is required.
+            assert!(
+                own.iter().all(|(_, solve_rate, _)| *solve_rate == rate_hz)
+                    && own.iter().any(|(_, _, rate_excluded)| *rate_excluded == 4),
+                "{node_id}: {solves:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_same_rate_cluster_still_solves_each_event_once() {
+    let solves = two_tetra_event_solves(
+        (FIRST_TETRA_NODE, TETRA_RATE_HZ),
+        (SECOND_TETRA_NODE, TETRA_RATE_HZ),
+    )
+    .await;
+    // ~0.96 s of audio under a 0.8 s cooldown: two trigger windows, one
+    // shared solve each, all led by the first poster with nothing excluded.
+    assert_eq!(
+        solves,
+        vec![
+            (FIRST_TETRA_NODE.to_string(), TETRA_RATE_HZ, 0),
+            (FIRST_TETRA_NODE.to_string(), TETRA_RATE_HZ, 0),
+        ]
+    );
 }

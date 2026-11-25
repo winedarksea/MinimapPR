@@ -33,7 +33,7 @@ impl DspWorker {
         reason: &str,
     ) -> Option<ComputePayload> {
         if !self.should_publish_classifier_render(
-            &owned.buffer_key,
+            &owned.sensor_layout.dispatch_gate_key(&owned.buffer_key),
             owned.now_ns,
             pending_backlog_depth,
         ) {
@@ -107,26 +107,26 @@ impl DspWorker {
 
     pub(super) fn resolve_buffered_manifest_timing_gates(
         &mut self,
-        stream_key: &str,
-        channel_count: usize,
+        gate_key: &str,
+        solve_eligible_sensor_count: usize,
         audio_end_ns: u128,
         pending_backlog_depth: usize,
         trigger_evidence: LocalizationTriggerEvidence<'_>,
     ) -> BufferedManifestTimingGates {
         // A buffer that cannot solve has no event trigger; its node stays
         // visible through the heartbeat cadence.
-        let event_trigger = if channel_count >= MIN_SRP_CHANNEL_COUNT {
-            self.localization_trigger_opening(stream_key, audio_end_ns, trigger_evidence)
+        let event_trigger = if solve_eligible_sensor_count >= MIN_SRP_CHANNEL_COUNT {
+            self.localization_trigger_opening(gate_key, audio_end_ns, trigger_evidence)
         } else {
             None
         };
         let on_localization_cadence = event_trigger.is_some();
         let run_classifier_render =
-            self.should_publish_classifier_render(stream_key, audio_end_ns, pending_backlog_depth);
-        let run_srp = channel_count >= MIN_SRP_CHANNEL_COUNT
+            self.should_publish_classifier_render(gate_key, audio_end_ns, pending_backlog_depth);
+        let run_srp = solve_eligible_sensor_count >= MIN_SRP_CHANNEL_COUNT
             && (on_localization_cadence || run_classifier_render);
         let on_heartbeat_cadence =
-            on_localization_cadence || self.should_emit_heartbeat(stream_key, audio_end_ns);
+            on_localization_cadence || self.should_emit_heartbeat(gate_key, audio_end_ns);
         BufferedManifestTimingGates {
             event_trigger,
             on_localization_cadence,
@@ -142,6 +142,8 @@ impl DspWorker {
         buffered: BufferedManifestAudio,
         pending_backlog_depth: usize,
     ) -> Option<ComputePayload> {
+        let gate_key = owned.sensor_layout.dispatch_gate_key(&owned.buffer_key);
+        let solve_eligible_sensor_count = owned.sensor_layout.solve_eligible_sensor_count();
         // Only the final contiguous segment of an upload reaches dispatch, so
         // the floor follows the audio each solve decision is made on.
         let node_frame_relatively_loud = self.localization_trigger.observe_node_frame(
@@ -159,7 +161,7 @@ impl DspWorker {
             .all(|state| state.coverage.is_none())
         {
             let run_classifier_render = self.should_publish_classifier_render(
-                &owned.buffer_key,
+                &gate_key,
                 buffered.audio_end_ns,
                 pending_backlog_depth,
             );
@@ -288,8 +290,8 @@ impl DspWorker {
             .map(|state| state.window.clone())
             .collect();
         let mut timing_gates = self.resolve_buffered_manifest_timing_gates(
-            &owned.buffer_key,
-            owned.buffer_channel_count,
+            &gate_key,
+            solve_eligible_sensor_count,
             buffered.audio_end_ns,
             pending_backlog_depth,
             LocalizationTriggerEvidence {
@@ -309,7 +311,7 @@ impl DspWorker {
                 owned.effective_sound_speed_mps,
             ),
             timing_gates.on_localization_cadence,
-            owned.buffer_channel_count,
+            solve_eligible_sensor_count,
         );
         let mut deferred_classifier_render = None;
         if coverage_deferral_span.is_some() {
@@ -386,7 +388,7 @@ impl DspWorker {
         // Past the last early return: the triggered solve now either leaves
         // with this payload or parks for the coverage wait, so it counts.
         if timing_gates.event_trigger.is_some() {
-            self.commit_localization_trigger(&owned.buffer_key, buffered.audio_end_ns);
+            self.commit_localization_trigger(&gate_key, buffered.audio_end_ns);
         }
         let node_noise_floor_rms = self
             .localization_trigger
@@ -444,7 +446,9 @@ impl DspWorker {
             run_srp: timing_gates.run_srp,
             run_classifier_render: timing_gates.run_classifier_render,
             skip_localization_result: false,
-            omni_fallback_reason: (owned.buffer_channel_count < 4)
+            // Fewer usable sensors than SRP needs (a point node, or the only
+            // node at its rate in a mixed-rate cluster): omni render.
+            omni_fallback_reason: (solve_eligible_sensor_count < MIN_SRP_CHANNEL_COUNT)
                 .then(|| "single_point_node".to_string()),
             omni_channels_override: None,
             listenable_omni_channels_override: None,
