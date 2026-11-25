@@ -61,6 +61,8 @@ class DiagnosticsService:
                     "strategy": self._settings.localization_strategy,
                     "band_min_hz": self._settings.localization_band_min_hz,
                     "band_max_hz": self._settings.localization_band_max_hz,
+                    "cross_node_band_max_hz": self._settings.localization_cross_node_band_max_hz,
+                    "cross_node_window_taper_fraction": self._settings.localization_cross_node_window_taper_fraction,
                     "window_seconds": self._settings.localization_window_seconds,
                     "classification_window_seconds": self._settings.classification_window_seconds,
                     "reporting_window_seconds": self._settings.reporting_window_seconds,

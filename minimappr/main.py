@@ -3204,6 +3204,8 @@ async def get_config(request: Request) -> dict:
         ],
         "localization_band_min_hz": settings.localization_band_min_hz,
         "localization_band_max_hz": settings.localization_band_max_hz,
+        "localization_cross_node_band_max_hz": settings.localization_cross_node_band_max_hz,
+        "localization_cross_node_window_taper_fraction": settings.localization_cross_node_window_taper_fraction,
         "birdnet_chunked_dispatch_enabled": settings.birdnet_chunked_dispatch_enabled,
         "birdnet_trigger_min_confidence": settings.birdnet_trigger_min_confidence,
         "birdnet_geo_min_confidence": settings.birdnet_geo_min_confidence,
@@ -3547,6 +3549,8 @@ _SIDECAR_RESTART_REQUIRED_KEYS = {
     "min_localization_confidence",
     "localization_band_min_hz",
     "localization_band_max_hz",
+    "localization_cross_node_band_max_hz",
+    "localization_cross_node_window_taper_fraction",
     "localization_window_seconds",
     "birdnet_trigger_min_confidence",
     "birdnet_geo_min_confidence",
@@ -3988,8 +3992,14 @@ async def patch_config(request: Request) -> dict:
             "retention_detection_metadata_seconds",
         } and value <= 0:
             errors.append(f"{key}: must be > 0")
-        elif key in {"localization_band_min_hz", "localization_band_max_hz"} and value < 0.0:  # type: ignore[operator]
+        elif key in {
+            "localization_band_min_hz",
+            "localization_band_max_hz",
+            "localization_cross_node_band_max_hz",
+        } and value < 0.0:  # type: ignore[operator]
             errors.append(f"{key}: must be >= 0")
+        elif key == "localization_cross_node_window_taper_fraction" and not 0.0 <= value <= 1.0:  # type: ignore[operator]
+            errors.append(f"{key}: must be in [0, 1]")
         elif key == "tracking_filter" and value not in _TRACKING_FILTERS:
             errors.append(f"tracking_filter: must be one of {sorted(_TRACKING_FILTERS)}")
         elif key == "association_distance_m" and value <= 0.0:  # type: ignore[operator]
@@ -4081,6 +4091,11 @@ async def patch_config(request: Request) -> dict:
     band_max = coerced.get("localization_band_max_hz", settings.localization_band_max_hz)
     if float(band_max) > 0.0 and float(band_max) <= float(band_min):
         errors.append("localization_band_max_hz: must be > localization_band_min_hz when enabled")
+    cross_node_band_max = coerced.get(
+        "localization_cross_node_band_max_hz", settings.localization_cross_node_band_max_hz
+    )
+    if 0.0 < float(cross_node_band_max) <= float(band_min):
+        errors.append("localization_cross_node_band_max_hz: must be > localization_band_min_hz when set")
 
     backoff_initial = float(
         coerced.get(

@@ -8,6 +8,12 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.optimize import least_squares
 
+from minimappr.core.localization_band_policy import (
+    LocalizationBandPolicy,
+    normalize_band_hz,
+    solve_pair_front_ends,
+    tukey_taper,
+)
 from minimappr.core.localization_uncertainty import (
     covariance_from_jacobian,
     covariance_to_nested_list,
@@ -88,6 +94,7 @@ def _phase_slope_tau(
     sample_rate_hz: int,
     n_fft: int,
     max_tau_s: float,
+    in_band: np.ndarray | None = None,
 ) -> float | None:
     """Frequency-domain phase-slope delay estimator.
 
@@ -97,6 +104,10 @@ def _phase_slope_tau(
     the delay is too large for reliable phase unwrapping (dense wrapping).
     """
     freqs_hz = np.fft.rfftfreq(n_fft, d=1.0 / sample_rate_hz)
+    if in_band is not None:
+        # Same bins as the PHAT mask, like the Rust `phase_slope_tau`.
+        freqs_hz = freqs_hz[in_band]
+        cross_spectrum = cross_spectrum[in_band]
     magnitudes = np.abs(cross_spectrum)
     peak_mag = float(np.max(magnitudes)) if magnitudes.size > 0 else 0.0
     if peak_mag < 1e-30:
@@ -128,7 +139,10 @@ def gcc_phat(
     sample_rate_hz: int,
     max_tau_s: float,
     interp: int = 4,
+    band_hz: tuple[float, float] | None = None,
 ) -> tuple[float, float]:
+    """``band_hz`` masks the whitened cross-spectrum to that band (a 0 ceiling
+    is Nyquist), mirroring the Rust ``bin_in_band``; ``None`` keeps every bin."""
     n = signal.size + reference_signal.size
     if n <= 0:
         return 0.0, 0.0
@@ -139,7 +153,14 @@ def gcc_phat(
 
     denom = np.abs(response)
     denom[denom < 1e-12] = 1e-12
-    cross_corr = np.fft.irfft(response / denom, n=interp * n)
+    whitened = response / denom
+    effective_band = normalize_band_hz(band_hz, sample_rate_hz)
+    in_band: np.ndarray | None = None
+    if effective_band is not None:
+        bin_frequencies_hz = np.fft.rfftfreq(n, d=1.0 / sample_rate_hz)
+        in_band = (bin_frequencies_hz >= effective_band[0]) & (bin_frequencies_hz <= effective_band[1])
+        whitened = np.where(in_band, whitened, 0.0)
+    cross_corr = np.fft.irfft(whitened, n=interp * n)
 
     max_shift = int(interp * sample_rate_hz * max_tau_s)
     max_shift = max(1, min(max_shift, cross_corr.size // 2))
@@ -170,6 +191,7 @@ def gcc_phat(
             sample_rate_hz=sample_rate_hz,
             n_fft=n,
             max_tau_s=max_tau_s,
+            in_band=in_band,
         )
         if phase_tau is not None and abs(phase_tau - tau) < 1.0 / sample_rate_hz:
             tau = phase_tau
@@ -191,6 +213,9 @@ class LocalizationEngine:
     # obs_factor floor for bearing-observed solves (see cartesian_tdoa.py
     # BEARING_OBSERVED_OBS_FACTOR_FLOOR). 0.0 = legacy confidence crushing.
     bearing_observed_obs_floor: float = 1.0
+    # Per-pair GCC-PHAT band and taper (intra-array vs cross-node); None
+    # correlates every bin of the windows as given.
+    band_policy: LocalizationBandPolicy | None = None
 
     def _validate_inputs(
         self,
@@ -240,6 +265,9 @@ class LocalizationEngine:
             humidity_fraction=humidity_fraction,
         )
         pair_stats = PairMeasurementStats()
+        pair_front_ends = solve_pair_front_ends(
+            self.band_policy, sensor_positions, sensor_ids, sensor_node_ids, sound_speed
+        )
         measurements = measure_pair_tdoas(
             sensor_positions=sensor_positions,
             sensor_windows=sensor_windows,
@@ -253,6 +281,7 @@ class LocalizationEngine:
             sensor_node_ids=sensor_node_ids,
             cross_node_max_tau_s=self.cross_node_max_tau_s,
             stats=pair_stats,
+            pair_front_ends=pair_front_ends,
         )
         array_aperture_m = max(
             (
@@ -277,6 +306,7 @@ class LocalizationEngine:
             amplitude_ratio_strength=self.amplitude_ratio_strength,
             pair_measurements=measurements,
             sensor_gain_offsets_db=sensor_gain_offsets_db,
+            pair_front_ends=pair_front_ends,
         )
         if (
             len(measurements) < 3
@@ -370,6 +400,13 @@ class LocalizationEngine:
         ref_pos = sensor_positions[reference_sensor]
 
         pair_stats = PairMeasurementStats()
+        pair_front_ends = solve_pair_front_ends(
+            self.band_policy,
+            sensor_positions,
+            sensor_ids,
+            sensor_node_ids,
+            speed_of_sound_mps(temperature_c=temperature_c, humidity_fraction=humidity_fraction),
+        )
         tdoa_s: dict[str, float] = {}
         pair_weights: dict[str, float] = {}
         pair_timing_uncertainty_s: dict[str, float] = {}
@@ -392,12 +429,15 @@ class LocalizationEngine:
             effective_max_tau_s = self.max_tau_s
             if is_cross_node and self.cross_node_max_tau_s is not None:
                 effective_max_tau_s = max(self.max_tau_s, float(self.cross_node_max_tau_s))
+            front_end = pair_front_ends.pair_front_end(sensor_id, reference_sensor) if pair_front_ends else None
+            taper_fraction = front_end.taper_fraction if front_end is not None else None
             tau_s, peak = gcc_phat(
-                signal=sensor_windows[sensor_id],
-                reference_signal=reference_signal,
+                signal=tukey_taper(sensor_windows[sensor_id], taper_fraction),
+                reference_signal=tukey_taper(reference_signal, taper_fraction),
                 sample_rate_hz=sample_rate_hz,
                 max_tau_s=effective_max_tau_s,
                 interp=max(1, self.interp_factor),
+                band_hz=front_end.band_hz if front_end is not None else None,
             )
             if not np.isfinite(tau_s) or not np.isfinite(peak):
                 raise LocalizationError(f"Non-finite GCC-PHAT output for sensor {sensor_id}")

@@ -19,10 +19,7 @@ from minimappr.audio_processing.chain import (
     NodePreprocessorFactory,
     create_localization_preprocessor,
 )
-from minimappr.audio_processing.stages import (
-    BandpassFilterStage,
-    HighpassFilterStage,
-)
+from minimappr.audio_processing.stages import HighpassFilterStage
 from minimappr.config import Settings
 from minimappr.utils.audio import read_wav_mono, write_wav_mono
 
@@ -115,7 +112,8 @@ def test_listening_wav_is_in_memory_and_does_not_modify_canonical_file(tmp_path:
 
 
 # ---------------------------------------------------------------------------
-# Localization band: a min-only band must build a real high-pass, not nothing
+# Localization band: the window filter is the band floor only; ceilings are
+# per pair in the GCC-PHAT bin mask (core/localization_band_policy.py)
 # ---------------------------------------------------------------------------
 
 
@@ -128,38 +126,29 @@ def _localization_stages(*, min_hz: float, max_hz: float) -> list:
     return [] if preprocessor is None else list(preprocessor.stages)
 
 
-def test_min_only_localization_band_builds_a_highpass() -> None:
-    """A disabled maximum means "up to Nyquist"; setting only the minimum used
-    to silently build no filter at all."""
-    stages = _localization_stages(min_hz=50.0, max_hz=0.0)
+@pytest.mark.parametrize("max_hz", [0.0, 3500.0])
+def test_localization_band_floor_builds_a_highpass_whatever_the_ceiling(max_hz: float) -> None:
+    """An explicit ceiling is the intra-array GCC-PHAT ceiling; cross-node pairs
+    must still see the wide band, so no window filter may cap it."""
+    stages = _localization_stages(min_hz=300.0, max_hz=max_hz)
 
     assert len(stages) == 1
     assert isinstance(stages[0], HighpassFilterStage)
-    assert stages[0].cutoff_hz == pytest.approx(50.0)
-
-
-def test_both_bounds_still_build_a_bandpass() -> None:
-    stages = _localization_stages(min_hz=300.0, max_hz=3500.0)
-
-    assert len(stages) == 1
-    assert isinstance(stages[0], BandpassFilterStage)
-    assert stages[0].low_hz == pytest.approx(300.0)
-    assert stages[0].high_hz == pytest.approx(3500.0)
+    assert stages[0].cutoff_hz == pytest.approx(300.0)
 
 
 def test_fully_disabled_localization_band_builds_nothing() -> None:
     assert _localization_stages(min_hz=0.0, max_hz=0.0) == []
 
 
-def test_default_localization_band_rejects_rumble_and_aliasing_frequencies() -> None:
-    """The shipped default is a 50 Hz high-pass capped at the array's spatial
-    aliasing limit (c / 2d = 343 / 0.1 = 3430 Hz). Both edges matter: GCC-PHAT
-    whitens every bin, so passing bins above the aliasing limit amplifies noise
-    into the TDOA estimate."""
+def test_default_localization_band_rejects_rumble_and_keeps_the_bird_band() -> None:
+    """The shipped default: a 50 Hz floor, each array's own c / 2d ceiling
+    (max 0) applied per pair in the PHAT mask, so the window filter keeps the
+    3.4-7 kHz calls that cross-node pairs correlate over."""
     sample_rate_hz = 16_000
     settings = Settings()
     assert settings.localization_band_min_hz == pytest.approx(50.0)
-    assert settings.localization_band_max_hz == pytest.approx(3430.0)
+    assert settings.localization_band_max_hz == pytest.approx(0.0)
 
     preprocessor = create_localization_preprocessor(settings.localization_config())
     assert preprocessor is not None
@@ -167,11 +156,11 @@ def test_default_localization_band_rejects_rumble_and_aliasing_frequencies() -> 
     t = np.linspace(0.0, 0.5, int(0.5 * sample_rate_hz), endpoint=False, dtype=np.float32)
     rumble = np.sin(2.0 * np.pi * 10.0 * t).astype(np.float32)
     in_band = np.sin(2.0 * np.pi * 1_000.0 * t).astype(np.float32)
-    aliasing = np.sin(2.0 * np.pi * 6_000.0 * t).astype(np.float32)
+    bird_call = np.sin(2.0 * np.pi * 6_000.0 * t).astype(np.float32)
 
     def _rms(signal: np.ndarray) -> float:
         return float(np.sqrt(np.mean(np.asarray(signal, dtype=np.float32) ** 2)))
 
     assert _rms(preprocessor.process(rumble, sample_rate_hz)) < 0.10 * _rms(rumble)
     assert _rms(preprocessor.process(in_band, sample_rate_hz)) > 0.70 * _rms(in_band)
-    assert _rms(preprocessor.process(aliasing, sample_rate_hz)) < 0.10 * _rms(aliasing)
+    assert _rms(preprocessor.process(bird_call, sample_rate_hz)) > 0.70 * _rms(bird_call)

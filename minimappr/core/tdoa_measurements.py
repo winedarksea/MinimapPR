@@ -8,6 +8,7 @@ from typing import Callable
 
 import numpy as np
 
+from minimappr.core.localization_band_policy import SensorPairFrontEnds, tukey_taper
 from minimappr.core.pair_timing_uncertainty import (
     MINIMUM_PAIR_MEASUREMENT_QUALITY,
     inverse_variance_pair_weight,
@@ -60,6 +61,7 @@ def measure_pair_tdoas(
     sensor_node_ids: dict[str, str] | None = None,
     cross_node_max_tau_s: float | None = None,
     stats: PairMeasurementStats | None = None,
+    pair_front_ends: SensorPairFrontEnds | None = None,
 ) -> list[PairTdoaMeasurement]:
     """Measure pairwise TDOAs, optionally enabling true cross-node correlation.
 
@@ -72,6 +74,10 @@ def measure_pair_tdoas(
     (the sidecar's pairs carry none either, so both ingest paths weight a pair
     set alike); it widens the solve covariance instead
     (``core/node_position_covariance.py``).
+
+    ``pair_front_ends`` gives each pair its band and window taper
+    (``core/localization_band_policy.py``); ``None`` correlates every bin of
+    the windows as given.
     """
     reference_time_std_s = solver_reference_time_std_seconds(sample_rate_hz, interpolation_factor)
     pair_candidates: list[tuple[float, str, str, float, bool, float]] = []
@@ -136,12 +142,21 @@ def measure_pair_tdoas(
         effective_max_tau_s = max_tau_s
         if not same_node and cross_node_max_tau_s is not None:
             effective_max_tau_s = max(max_tau_s, float(cross_node_max_tau_s))
+        signal = sensor_windows[sensor_a]
+        reference_signal = sensor_windows[sensor_b]
+        front_end_kwargs: dict[str, object] = {}
+        if pair_front_ends is not None:
+            front_end = pair_front_ends.pair_front_end(sensor_a, sensor_b)
+            signal = tukey_taper(signal, front_end.taper_fraction)
+            reference_signal = tukey_taper(reference_signal, front_end.taper_fraction)
+            front_end_kwargs["band_hz"] = front_end.band_hz
         tdoa_seconds, correlation_peak = gcc_phat_function(
-            signal=sensor_windows[sensor_a],
-            reference_signal=sensor_windows[sensor_b],
+            signal=signal,
+            reference_signal=reference_signal,
             sample_rate_hz=sample_rate_hz,
             max_tau_s=min(effective_max_tau_s, max(physical_max_tau_s, 1.0 / sample_rate_hz)),
             interp=max(1, interpolation_factor),
+            **front_end_kwargs,
         )
         if not np.isfinite(tdoa_seconds) or not np.isfinite(correlation_peak):
             continue

@@ -351,6 +351,8 @@ class LocalizationConfig:
     classification_window_seconds: float = 30.0
     localization_band_min_hz: float = 0.0
     localization_band_max_hz: float = 0.0
+    localization_cross_node_band_max_hz: float = 11_000.0
+    localization_cross_node_window_taper_fraction: float = 0.2
     skip_localization_for_classification: bool = False
     # Classification audio source: "beamformed" | "omni" | "nearest_node_omni".
     # Mirrors Settings.classification_audio_source so the fusion node can read it
@@ -1039,16 +1041,20 @@ class Settings:
     localization_max_tau_seconds: float = 0.02
     localization_algorithm: str = "gcc_phat"
     localization_strategy: str = "fixed"
-    # 50 Hz keeps wind rumble and DC drift out of the TDOA estimate. The 3430 Hz
-    # ceiling is the array's spatial aliasing limit (c / 2d = 343 / 0.1 for the
-    # ~50 mm SIRITH spacing) and is not optional: GCC-PHAT whitens every bin, so
-    # passing bins that carry no signal amplifies pure noise to unit magnitude
-    # with random phase. Measured on the tetra fixtures, removing the ceiling
-    # takes a 1500 Hz source from bearing-dot > 0.85 to -0.83 (reversed).
-    # Setting ``max_hz = 0`` disables the ceiling -- the band then runs to
-    # Nyquist as a pure high-pass, in both the Python chain and the Rust sidecar.
+    # GCC-PHAT band per pair type (core/localization_band_policy.py). 50 Hz keeps
+    # wind rumble and DC drift out of every pair. Intra-array pairs stop at the
+    # array's own spatial-alias ceiling c / (2 d_max) (tetra ~3266 Hz, planar
+    # ~3432 Hz): GCC-PHAT whitens every bin, so bins without signal add random
+    # phase, and a Nyquist band reversed a 1500 Hz tetra bearing (dot 0.85 ->
+    # -0.83). ``localization_band_max_hz = 0`` derives that ceiling per array; a
+    # positive value overrides it for every array. Cross-node pairs (long
+    # baselines, where c / 2d means nothing) use the wide cross-node band (0 =
+    # Nyquist) and a Tukey taper that removes the zero-lag pull of a rectangular
+    # cut through a loud call; E8 point-network recall 0.30 -> 0.45 with both.
     localization_band_min_hz: float = 50.0
-    localization_band_max_hz: float = 3430.0
+    localization_band_max_hz: float = 0.0
+    localization_cross_node_band_max_hz: float = 11_000.0
+    localization_cross_node_window_taper_fraction: float = 0.2
     localization_srp_grid_resolution_m: float = 0.5
     localization_search_padding_m: float = 2.0
     localization_far_field_default_range_m: float = 50.0
@@ -2004,6 +2010,12 @@ class Settings:
             raise ValueError("MINIMAPPR_LOCALIZATION_BAND_MAX_HZ must be >= 0")
         if self.localization_band_max_hz > 0.0 and self.localization_band_max_hz <= self.localization_band_min_hz:
             raise ValueError("MINIMAPPR_LOCALIZATION_BAND_MAX_HZ must be > MIN when enabled")
+        if self.localization_cross_node_band_max_hz < 0.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_CROSS_NODE_BAND_MAX_HZ must be >= 0")
+        if 0.0 < self.localization_cross_node_band_max_hz <= self.localization_band_min_hz:
+            raise ValueError("MINIMAPPR_LOCALIZATION_CROSS_NODE_BAND_MAX_HZ must be > MIN when set")
+        if not 0.0 <= self.localization_cross_node_window_taper_fraction <= 1.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_CROSS_NODE_WINDOW_TAPER_FRACTION must be in [0, 1]")
         if self.localization_srp_grid_resolution_m <= 0.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M must be > 0")
         if self.localization_search_padding_m <= 0.0:
@@ -2706,7 +2718,11 @@ class Settings:
             localization_algorithm=_env_str("MINIMAPPR_LOCALIZATION_ALGORITHM", "gcc_phat"),
             localization_strategy=_env_str("MINIMAPPR_LOCALIZATION_STRATEGY", "geometry_aware"),
             localization_band_min_hz=_env_float("MINIMAPPR_LOCALIZATION_BAND_MIN_HZ", 50.0),
-            localization_band_max_hz=_env_float("MINIMAPPR_LOCALIZATION_BAND_MAX_HZ", 3430.0),
+            localization_band_max_hz=_env_float("MINIMAPPR_LOCALIZATION_BAND_MAX_HZ", 0.0),
+            localization_cross_node_band_max_hz=_env_float("MINIMAPPR_LOCALIZATION_CROSS_NODE_BAND_MAX_HZ", 11_000.0),
+            localization_cross_node_window_taper_fraction=_env_float(
+                "MINIMAPPR_LOCALIZATION_CROSS_NODE_WINDOW_TAPER_FRACTION", 0.2
+            ),
             localization_srp_grid_resolution_m=_env_float("MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M", 0.5),
             localization_search_padding_m=_env_float("MINIMAPPR_LOCALIZATION_SEARCH_PADDING_M", 2.0),
             localization_far_field_default_range_m=_env_float(
@@ -3541,6 +3557,8 @@ class Settings:
             localization_strategy=self.localization_strategy,
             localization_band_min_hz=self.localization_band_min_hz,
             localization_band_max_hz=self.localization_band_max_hz,
+            localization_cross_node_band_max_hz=self.localization_cross_node_band_max_hz,
+            localization_cross_node_window_taper_fraction=self.localization_cross_node_window_taper_fraction,
             localization_srp_grid_resolution_m=self.localization_srp_grid_resolution_m,
             localization_search_padding_m=self.localization_search_padding_m,
             localization_far_field_default_range_m=self.localization_far_field_default_range_m,

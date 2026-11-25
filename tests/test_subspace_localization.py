@@ -50,6 +50,12 @@ def test_subspace_frequency_band_changes_configured_result(algorithm_name: str) 
         "localization_max_tau_seconds": 0.003,
         "localization_music_azimuth_step_deg": 3.0,
         "localization_music_elevation_step_deg": 3.0,
+        # GCC-PHAT pairs over every bin: on this noiseless two-tone fixture the
+        # tetra's 50-3266 Hz pair mask drops the coherent leakage bins, the
+        # pairs mix both tones and their fit swamps the subspace prior, so the
+        # subspace band under test would not reach the result.
+        "localization_band_min_hz": 0.0,
+        "localization_band_max_hz": 8000.0,
     }
     low_band_result = build_localizer_from_settings(
         Settings(
