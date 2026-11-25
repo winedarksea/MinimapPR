@@ -1274,7 +1274,7 @@ async def test_single_sensor_triggered_audio_yields_no_detection_or_track(tmp_pa
 
     # A single-sensor point node cannot beamform; triggered classification is
     # beamformed-only (raw omni inference belongs to ContinuousOmniScanner),
-    # so the candidate is dropped: it could not be classified at all.
+    # so the candidate is dropped as an empty classification.
     detections = await storage.list_detections(limit=10)
     assert detections == []
 
@@ -1282,7 +1282,7 @@ async def test_single_sensor_triggered_audio_yields_no_detection_or_track(tmp_pa
     assert tracks == []
 
     status = await fusion.status()
-    assert status["metrics"]["classification_drops_by_reason"].get("classification_unavailable") == 1
+    assert status["metrics"]["classification_drops_by_reason"].get("empty_classification") == 1
 
     # Stage timing twins (added with the 2026-08-01 lag review): every item that
     # reaches _classify_and_assemble — including this empty-classification drop —
