@@ -10,6 +10,11 @@ import numpy as np
 from pydantic import ValidationError
 
 from minimappr.core.geo import LocalCoordinateFrame
+from minimappr.core.pair_timing_uncertainty import (
+    ClockUncertaintyPolicy,
+    NodeClockEvidence,
+    node_timing_uncertainty_seconds,
+)
 from minimappr.core.sensor_world_position import sensor_world_position_m
 from minimappr.models import NodeOverrides, NodeSpec, SyncGrade, Vec3
 
@@ -65,6 +70,9 @@ class NodeRegistry:
         # Absent → 0.0 (surveyed / trusted-GPS default). Used to down-weight
         # cross-node TDOA pairs anchored on poorly-localized nodes.
         self._node_position_std_m: dict[str, float] = {}
+        # Latest clock report per node; the cross-node TDOA pair weights derive
+        # from it (core/pair_timing_uncertainty.py).
+        self._node_clock_evidence: dict[str, NodeClockEvidence] = {}
         self._overrides: dict[str, NodeOverrides] = {}
         self._lock = asyncio.Lock()
 
@@ -168,6 +176,7 @@ class NodeRegistry:
         """
         async with self._lock:
             self._nodes.pop(node_id, None)
+            self._node_clock_evidence.pop(node_id, None)
             stale_sensor_ids = [
                 sensor_id
                 for sensor_id, descriptor in self._sensors.items()
@@ -199,6 +208,22 @@ class NodeRegistry:
         async with self._lock:
             return {
                 sensor_id: self._node_position_std_m.get(descriptor.node_id, 0.0)
+                for sensor_id, descriptor in self._sensors.items()
+            }
+
+    async def record_node_clock_evidence(self, node_id: str, evidence: NodeClockEvidence) -> None:
+        async with self._lock:
+            self._node_clock_evidence[node_id] = evidence
+
+    async def sensor_timing_uncertainty_seconds(self, policy: ClockUncertaintyPolicy) -> dict[str, float]:
+        """Per-sensor clock 1σ (s), inherited from the sensor's node.
+
+        A node that has not reported a clock yet takes the policy's unknown
+        uncertainty: it is admitted, with a wide error, never excluded.
+        """
+        async with self._lock:
+            return {
+                sensor_id: node_timing_uncertainty_seconds(self._node_clock_evidence.get(descriptor.node_id), policy)
                 for sensor_id, descriptor in self._sensors.items()
             }
 

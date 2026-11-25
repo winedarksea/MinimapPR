@@ -15,6 +15,9 @@ from tests.helpers import CrossNodeSyntheticScene, synthesize_cross_node_scene
 
 SAMPLE_RATE_HZ = 48_000
 SOUND_SPEED_MPS = 343.2
+# Default clock-class 1σ (localization_clock_class_uncertainty_seconds).
+GPS_LOCKED_UNCERTAINTY_S = 1.0e-6
+FREE_RUNNING_UNCERTAINTY_S = 5.0e-2
 WIDE_NODES_M = {
     "tetra-a": (0.0, 0.0, 1.5),
     "point-b": (50.0, 0.0, 2.0),
@@ -29,19 +32,18 @@ def _source_at_range(distance_m: float) -> np.ndarray:
     return centroid + direction / np.linalg.norm(direction) * distance_m
 
 
-def _localize(scene: CrossNodeSyntheticScene, *, sensor_weights=None, min_sync=0.25):
+def _localize(scene: CrossNodeSyntheticScene, *, sensor_timing_uncertainty_seconds=None):
     return LocalizationEngine(
         max_tau_s=0.02,
         interp_factor=8,
         cross_node_max_tau_s=0.35,
-        cross_node_min_sync_weight=min_sync,
     ).localize(
         sensor_positions=scene.reported_sensor_positions_m,
         sensor_windows=scene.sensor_windows,
         sample_rate_hz=SAMPLE_RATE_HZ,
         temperature_c=20.0,
         humidity_fraction=0.5,
-        sensor_weights=sensor_weights,
+        sensor_timing_uncertainty_seconds=sensor_timing_uncertainty_seconds,
         sensor_node_ids=scene.sensor_node_ids,
     )
 
@@ -159,35 +161,82 @@ def test_rust_auto_gps_flat_geometry_matches_server_coordinate_frame() -> None:
     assert np.linalg.norm(python_position - rust_position) < 0.02
 
 
-def test_free_running_node_has_no_cross_node_measurements() -> None:
+def _node_clock_uncertainty(scene: CrossNodeSyntheticScene, free_running_node_id: str | None) -> dict[str, float]:
+    return {
+        sensor_id: FREE_RUNNING_UNCERTAINTY_S if node_id == free_running_node_id else GPS_LOCKED_UNCERTAINTY_S
+        for sensor_id, node_id in scene.sensor_node_ids.items()
+    }
+
+
+def test_free_running_node_pairs_are_kept_but_down_weighted() -> None:
+    """P9: clock class never drops a pair; it lowers the pair's weight."""
     scene = synthesize_cross_node_scene(
         source_position_m=_source_at_range(100.0),
         node_origins_m=WIDE_NODES_M,
         tetra_node_ids=("tetra-a",),
         seed=23,
     )
-    weights = {
-        sensor_id: 0.05 if node_id == "point-d" else 1.0
-        for sensor_id, node_id in scene.sensor_node_ids.items()
-    }
-    measurements = measure_pair_tdoas(
-        sensor_positions=scene.reported_sensor_positions_m,
-        sensor_windows=scene.sensor_windows,
-        sensor_ids=sorted(scene.sensor_windows),
-        sample_rate_hz=SAMPLE_RATE_HZ,
-        sound_speed_mps=SOUND_SPEED_MPS,
-        max_tau_s=0.02,
-        interpolation_factor=8,
-        sensor_weights=weights,
-        gcc_phat_function=gcc_phat,
-        sensor_node_ids=scene.sensor_node_ids,
-        cross_node_max_tau_s=0.35,
-        cross_node_min_sync_weight=0.25,
+
+    def _cross_node_weights(free_running_node_id: str | None) -> dict[tuple[str, str], float]:
+        measurements = measure_pair_tdoas(
+            sensor_positions=scene.reported_sensor_positions_m,
+            sensor_windows=scene.sensor_windows,
+            sensor_ids=sorted(scene.sensor_windows),
+            sample_rate_hz=SAMPLE_RATE_HZ,
+            sound_speed_mps=SOUND_SPEED_MPS,
+            max_tau_s=0.02,
+            interpolation_factor=8,
+            sensor_timing_uncertainty_seconds=_node_clock_uncertainty(scene, free_running_node_id),
+            gcc_phat_function=gcc_phat,
+            sensor_node_ids=scene.sensor_node_ids,
+            cross_node_max_tau_s=0.35,
+        )
+        return {
+            (m.sensor_a, m.sensor_b): m.weight
+            for m in measurements
+            if "point-d" in (scene.sensor_node_ids[m.sensor_a], scene.sensor_node_ids[m.sensor_b])
+        }
+
+    all_locked = _cross_node_weights(None)
+    point_d_free_running = _cross_node_weights("point-d")
+    assert point_d_free_running and set(point_d_free_running) == set(all_locked)
+    for pair_id, weight in point_d_free_running.items():
+        assert weight < all_locked[pair_id] * 1.0e-3
+
+
+def test_gps_locked_pairs_dominate_mixed_solve_and_covariance_widens() -> None:
+    """A free-running node whose clock is really 20 ms off: weighting by its
+    clock uncertainty keeps the GPS-locked pairs in charge, and the stated
+    covariance widens enough to contain the remaining error."""
+    distance_m = 100.0
+    offset_scene = synthesize_cross_node_scene(
+        source_position_m=_source_at_range(distance_m),
+        node_origins_m=WIDE_NODES_M,
+        tetra_node_ids=("tetra-a",),
+        seed=23,
+        node_clock_offsets_s={"point-d": 0.02},
     )
-    assert all(
-        "point-d" not in (measurement.sensor_a, measurement.sensor_b)
-        or scene.sensor_node_ids[measurement.sensor_a] == scene.sensor_node_ids[measurement.sensor_b]
-        for measurement in measurements
+    weighted = _localize(offset_scene, sensor_timing_uncertainty_seconds=_node_clock_uncertainty(offset_scene, "point-d"))
+    trusted_as_locked = _localize(offset_scene, sensor_timing_uncertainty_seconds=_node_clock_uncertainty(offset_scene, None))
+
+    def _error_m(result) -> float:
+        return float(np.linalg.norm(np.asarray(result.position_m) - offset_scene.source_position_m))
+
+    assert _error_m(weighted) <= 0.10 * distance_m
+    assert _error_m(trusted_as_locked) > 3.0 * _error_m(weighted)
+    weighted_std_m = float(np.sqrt(np.trace(np.asarray(weighted.position_covariance_m2))))
+    assert _error_m(weighted) <= 3.0 * weighted_std_m
+
+    clean_scene = synthesize_cross_node_scene(
+        source_position_m=_source_at_range(distance_m),
+        node_origins_m=WIDE_NODES_M,
+        tetra_node_ids=("tetra-a",),
+        seed=23,
+    )
+    clean_locked = _localize(clean_scene, sensor_timing_uncertainty_seconds=_node_clock_uncertainty(clean_scene, None))
+    clean_weighted = _localize(clean_scene, sensor_timing_uncertainty_seconds=_node_clock_uncertainty(clean_scene, "point-d"))
+    assert np.trace(np.asarray(clean_weighted.position_covariance_m2)) > 10.0 * np.trace(
+        np.asarray(clean_locked.position_covariance_m2)
     )
 
 

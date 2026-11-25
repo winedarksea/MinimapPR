@@ -28,6 +28,11 @@ from minimappr.core.cartesian_tdoa import (
     solve_cartesian_tdoa,
 )
 from minimappr.core.subspace_bearing import BearingPrior
+from minimappr.core.pair_timing_uncertainty import (
+    MINIMUM_PAIR_MEASUREMENT_QUALITY,
+    inverse_variance_pair_weight,
+    solver_reference_time_std_seconds,
+)
 from minimappr.core.tdoa_measurements import (
     PairTdoaMeasurement,
     normalized_pair_quality,
@@ -90,6 +95,53 @@ def _require_complete_sensor_map(
                 )
 
 
+def pair_measurements_from_rust_tdoas(
+    *,
+    ordered_sensor_ids: list[str],
+    pair_tdoas: list[dict],
+    reference_time_std_seconds: float,
+) -> tuple[list[PairTdoaMeasurement], dict[str, float]]:
+    """Weighted pair measurements plus per-sensor summed correlation quality.
+
+    A pair's optional ``timing_uncertainty_seconds`` (the sidecar's clock
+    uncertainty for that pair) enters the inverse-variance weight, so a weak
+    clock's pairs stay in but count for less and the solve covariance widens. An
+    older sidecar omits it: weight is the correlation quality, as before.
+    """
+    measurements: list[PairTdoaMeasurement] = []
+    confidence_by_sensor: dict[str, float] = {sensor_id: 0.0 for sensor_id in ordered_sensor_ids}
+    for pair in pair_tdoas:
+        try:
+            channel_a = int(pair["ch_a"])
+            channel_b = int(pair["ch_b"])
+            lag_seconds = float(pair["lag_seconds"])
+            confidence = float(pair.get("confidence", 0.0))
+            timing_uncertainty_seconds = float(pair.get("timing_uncertainty_seconds") or 0.0)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if channel_a == channel_b or not np.isfinite(lag_seconds):
+            continue
+        sensor_a = ordered_sensor_ids[channel_a]
+        sensor_b = ordered_sensor_ids[channel_b]
+        quality = normalized_pair_quality(confidence)
+        measurements.append(
+            PairTdoaMeasurement(
+                sensor_a=sensor_a,
+                sensor_b=sensor_b,
+                tdoa_seconds=lag_seconds,
+                correlation_peak=confidence,
+                weight=inverse_variance_pair_weight(
+                    measurement_quality=max(MINIMUM_PAIR_MEASUREMENT_QUALITY, quality),
+                    timing_uncertainty_seconds=timing_uncertainty_seconds,
+                    reference_time_std_seconds=reference_time_std_seconds,
+                ),
+            )
+        )
+        confidence_by_sensor[sensor_a] += quality
+        confidence_by_sensor[sensor_b] += quality
+    return measurements, confidence_by_sensor
+
+
 def solve_localization_from_rust_tdoas(
     *,
     sensor_positions: dict[str, np.ndarray],
@@ -124,32 +176,11 @@ def solve_localization_from_rust_tdoas(
     if sensor_count < 4:
         return None
 
-    measurements: list[PairTdoaMeasurement] = []
-    confidence_by_sensor: dict[str, float] = {sensor_id: 0.0 for sensor_id in ordered_sensor_ids}
-    for pair in pair_tdoas:
-        try:
-            channel_a = int(pair["ch_a"])
-            channel_b = int(pair["ch_b"])
-            lag_seconds = float(pair["lag_seconds"])
-            confidence = float(pair.get("confidence", 0.0))
-        except (KeyError, TypeError, ValueError):
-            continue
-        if channel_a == channel_b or not np.isfinite(lag_seconds):
-            continue
-        sensor_a = ordered_sensor_ids[channel_a]
-        sensor_b = ordered_sensor_ids[channel_b]
-        quality = normalized_pair_quality(confidence)
-        measurements.append(
-            PairTdoaMeasurement(
-                sensor_a=sensor_a,
-                sensor_b=sensor_b,
-                tdoa_seconds=lag_seconds,
-                correlation_peak=confidence,
-                weight=max(0.01, quality),
-            )
-        )
-        confidence_by_sensor[sensor_a] += quality
-        confidence_by_sensor[sensor_b] += quality
+    measurements, confidence_by_sensor = pair_measurements_from_rust_tdoas(
+        ordered_sensor_ids=ordered_sensor_ids,
+        pair_tdoas=pair_tdoas,
+        reference_time_std_seconds=solver_reference_time_std_seconds(sample_rate_hz, interpolation_factor),
+    )
 
     if len(measurements) < MIN_PAIR_MEASUREMENTS:
         return None

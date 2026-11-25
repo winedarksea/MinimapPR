@@ -15,7 +15,14 @@ from minimappr.core.tdoa_measurements import measure_pair_tdoas
 from tests.helpers import SIRITH_TETRA_SENSOR_OFFSETS_M, shift_signal
 
 
-def test_free_running_cross_node_tdoa_pairs_are_excluded() -> None:
+# Default free_running clock-class 1σ (localization_clock_class_uncertainty_seconds).
+FREE_RUNNING_UNCERTAINTY_S = 5.0e-2
+
+
+def test_free_running_cross_node_tdoa_pairs_are_kept_with_negligible_weight() -> None:
+    """P9: two free-running nodes' cross-node pairs are measured (weak clocks are
+    never excluded by class) but carry negligible weight next to the same-node
+    pairs, whose shared clock cancels."""
     sensor_positions = {
         **{
             f"tetra-a:ch{index}": np.asarray([index * 0.01, 0.0, 0.0])
@@ -42,17 +49,17 @@ def test_free_running_cross_node_tdoa_pairs_are_excluded() -> None:
         sound_speed_mps=343.2,
         max_tau_s=0.1,
         interpolation_factor=1,
-        sensor_weights={sensor_id: 0.05 for sensor_id in sensor_positions},
+        sensor_timing_uncertainty_seconds={sensor_id: FREE_RUNNING_UNCERTAINTY_S for sensor_id in sensor_positions},
         gcc_phat_function=lambda **_kwargs: (0.0, 1.0),
         sensor_node_ids=sensor_node_ids,
     )
 
-    assert len(measurements) == 12
-    assert all(
-        sensor_node_ids[measurement.sensor_a]
-        == sensor_node_ids[measurement.sensor_b]
-        for measurement in measurements
-    )
+    same_node = [m for m in measurements if sensor_node_ids[m.sensor_a] == sensor_node_ids[m.sensor_b]]
+    cross_node = [m for m in measurements if sensor_node_ids[m.sensor_a] != sensor_node_ids[m.sensor_b]]
+    assert len(same_node) == 12
+    assert len(cross_node) == 16
+    assert all(m.weight == pytest.approx(1.0) for m in same_node)
+    assert max(m.weight for m in cross_node) < 1.0e-6
 
 
 def test_two_free_running_tetra_bearings_localize_with_point_node_present() -> None:
@@ -70,7 +77,7 @@ def test_two_free_running_tetra_bearings_localize_with_point_node_present() -> N
     sensor_positions: dict[str, np.ndarray] = {}
     sensor_windows: dict[str, np.ndarray] = {}
     sensor_node_ids: dict[str, str] = {}
-    sensor_weights: dict[str, float] = {}
+    sensor_timing_uncertainty_seconds: dict[str, float] = {}
 
     for node_id, node_origin_m in node_origins_m.items():
         node_distances: list[tuple[str, float]] = []
@@ -83,7 +90,7 @@ def test_two_free_running_tetra_bearings_localize_with_point_node_present() -> N
             distance_m = float(np.linalg.norm(source_position_m - sensor_position_m))
             sensor_positions[sensor_id] = sensor_position_m
             sensor_node_ids[sensor_id] = node_id
-            sensor_weights[sensor_id] = 0.05
+            sensor_timing_uncertainty_seconds[sensor_id] = FREE_RUNNING_UNCERTAINTY_S
             node_distances.append((sensor_id, distance_m))
         minimum_distance_m = min(distance_m for _, distance_m in node_distances)
         for sensor_id, distance_m in node_distances:
@@ -99,7 +106,7 @@ def test_two_free_running_tetra_bearings_localize_with_point_node_present() -> N
     sensor_positions[point_sensor_id] = point_position_m
     sensor_windows[point_sensor_id] = excitation * (1.0 / point_distance_m)
     sensor_node_ids[point_sensor_id] = "point-c"
-    sensor_weights[point_sensor_id] = 0.05
+    sensor_timing_uncertainty_seconds[point_sensor_id] = FREE_RUNNING_UNCERTAINTY_S
 
     result = SRPPhatLocalizer(
         max_tau_s=0.003,
@@ -112,7 +119,7 @@ def test_two_free_running_tetra_bearings_localize_with_point_node_present() -> N
         sample_rate_hz=sample_rate_hz,
         temperature_c=20.0,
         humidity_fraction=0.5,
-        sensor_weights=sensor_weights,
+        sensor_timing_uncertainty_seconds=sensor_timing_uncertainty_seconds,
         sensor_node_ids=sensor_node_ids,
     )
 
@@ -235,7 +242,7 @@ def test_subspace_bearings_are_estimated_per_tetra_node(
         sample_rate_hz=sample_rate_hz,
         temperature_c=20.0,
         humidity_fraction=0.5,
-        sensor_weights={sensor_id: 0.05 for sensor_id in sensor_positions},
+        sensor_timing_uncertainty_seconds={sensor_id: FREE_RUNNING_UNCERTAINTY_S for sensor_id in sensor_positions},
         sensor_node_ids=sensor_node_ids,
     )
 

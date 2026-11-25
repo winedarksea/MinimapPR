@@ -152,7 +152,7 @@ def build_node_spatial_constraints(
                 sound_speed_mps=sound_speed_mps,
                 max_tau_s=max_tau_s,
                 interpolation_factor=interpolation_factor,
-                sensor_weights=None,
+                sensor_timing_uncertainty_seconds=None,
                 gcc_phat_function=gcc_phat_function,
                 sensor_node_ids=sensor_node_ids,
             )

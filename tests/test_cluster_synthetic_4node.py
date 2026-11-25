@@ -13,8 +13,10 @@ import pytest
 
 from minimappr.core.cluster_registry import ClusterRegistry
 from minimappr.core.localization_dispatch import LocalizationDispatcher
+from minimappr.config import Settings
 from minimappr.core.node_registry import NodeRegistry
-from minimappr.models import ClusterSpec, NodeSpec, NodeType, SyncGrade
+from minimappr.core.pair_timing_uncertainty import ClockUncertaintyPolicy, NodeClockEvidence
+from minimappr.models import ClusterSpec, NodeSpec, NodeType, SyncGrade, TimeQuality
 from tests.helpers import shift_signal
 
 
@@ -54,7 +56,7 @@ async def test_4node_square_cluster_recovers_known_source() -> None:
     nodes = NodeRegistry()
     for nid, pos in node_positions.items():
         await nodes.upsert(_single_mic_node(nid, pos), last_seen_ns=1)
-        await nodes.update_sensor_sync_grade(f"{nid}:ch0", SyncGrade.GPS_PPS)
+        await nodes.record_node_clock_evidence(nid, NodeClockEvidence(TimeQuality.GPS_LOCKED.value))
 
     clusters = ClusterRegistry()
     await clusters.upsert(ClusterSpec(
@@ -66,10 +68,12 @@ async def test_4node_square_cluster_recovers_known_source() -> None:
 
     # Resolve cluster topology.
     sensor_positions = await clusters.cluster_sensor_positions("cluster_square", nodes)
-    sensor_weights = await clusters.cluster_sensor_weights("cluster_square", nodes)
+    sensor_timing_uncertainty_seconds = await clusters.cluster_sensor_timing_uncertainty_seconds(
+        "cluster_square", nodes, ClockUncertaintyPolicy.from_settings(Settings())
+    )
     assert set(sensor_positions.keys()) == {f"n{i}:ch0" for i in range(4)}
-    # All GPS_PPS → all weights == 1.0.
-    assert all(w == pytest.approx(1.0) for w in sensor_weights.values())
+    # All GPS-locked → microsecond-class clocks everywhere.
+    assert all(u == pytest.approx(1.0e-6) for u in sensor_timing_uncertainty_seconds.values())
 
     # Synthesize per-mic windows via geometric delay propagation.
     duration_s = 0.25
@@ -96,7 +100,7 @@ async def test_4node_square_cluster_recovers_known_source() -> None:
         sample_rate_hz=SAMPLE_RATE_HZ,
         temperature_c=20.0,
         humidity_fraction=0.5,
-        sensor_weights=sensor_weights,
+        sensor_timing_uncertainty_seconds=sensor_timing_uncertainty_seconds,
     )
 
     estimate = np.array(result.position_m)
@@ -108,7 +112,7 @@ async def test_4node_square_cluster_recovers_known_source() -> None:
 
 @pytest.mark.asyncio
 async def test_uniform_weights_match_legacy_behavior() -> None:
-    """sensor_weights=None must reproduce the same result as uniform weights=1.0.
+    """No clock uncertainty must reproduce the same result as zero uncertainty.
 
     Bit-identity guard for the legacy code path described in the plan.
     """
@@ -139,7 +143,7 @@ async def test_uniform_weights_match_legacy_behavior() -> None:
     r_uniform = disp.localize(
         sensor_positions=positions, sensor_windows=windows,
         sample_rate_hz=SAMPLE_RATE_HZ, temperature_c=20.0, humidity_fraction=0.5,
-        sensor_weights={sid: 1.0 for sid in positions},
+        sensor_timing_uncertainty_seconds={sid: 0.0 for sid in positions},
     )
     np.testing.assert_allclose(r_default.position_m, r_uniform.position_m, atol=1e-9)
     assert r_default.confidence == pytest.approx(r_uniform.confidence, abs=1e-9)

@@ -2,12 +2,14 @@
 
 Three GPS_PPS nodes + one NTP-disciplined node form a cluster. We verify:
 
-* The cluster's ``sensor_weights`` reflect the hardcoded SYNC_GRADE_WEIGHTS
-  table (PPS = 1.0, NTP = 0.25, FREE = 0.05).
+* The cluster's per-sensor clock uncertainty follows the configured clock-class
+  defaults (``localization_clock_class_uncertainty_seconds``), floored at the
+  cluster's declared sync grade.
 * Localization still converges when the NTP sensor injects a realistic timing
-  jitter (≈ a few ms of skew). With NTP down-weighted, the recovered source
-  position remains within tolerance.
-* When the same NTP sensor is given equal weight (1.0), the down-weighting
+  jitter (≈ a few ms of skew). With the NTP node's pairs down-weighted by its
+  clock uncertainty (kept, never dropped), the recovered source position
+  remains within tolerance.
+* When the same NTP sensor is treated as perfectly timed, the down-weighting
   benefit disappears or is reduced — i.e., the weighting actually has effect.
 """
 from __future__ import annotations
@@ -17,13 +19,16 @@ import pytest
 
 from minimappr.core.cluster_registry import ClusterRegistry
 from minimappr.core.localization_dispatch import LocalizationDispatcher
+from minimappr.config import Settings
 from minimappr.core.node_registry import NodeRegistry
-from minimappr.models import ClusterSpec, NodeSpec, NodeType, SyncGrade
+from minimappr.core.pair_timing_uncertainty import ClockUncertaintyPolicy, NodeClockEvidence
+from minimappr.models import ClusterSpec, NodeSpec, NodeType, SyncGrade, TimeQuality
 from tests.helpers import shift_signal
 
 
 SAMPLE_RATE_HZ = 16_000
 SOUND_SPEED_MPS = 343.2
+CLOCK_POLICY = ClockUncertaintyPolicy.from_settings(Settings())
 
 
 def _node(node_id: str, position: tuple[float, float, float]) -> NodeSpec:
@@ -36,9 +41,15 @@ def _node(node_id: str, position: tuple[float, float, float]) -> NodeSpec:
     )
 
 
+async def _record_clocks(nodes: NodeRegistry, gps_node_ids: tuple[str, ...], ntp_node_id: str) -> None:
+    for nid in gps_node_ids:
+        await nodes.record_node_clock_evidence(nid, NodeClockEvidence(TimeQuality.GPS_LOCKED.value))
+    await nodes.record_node_clock_evidence(ntp_node_id, NodeClockEvidence(TimeQuality.NTP_DISCIPLINED.value))
+
+
 @pytest.mark.asyncio
-async def test_mixed_sync_cluster_weights_match_table() -> None:
-    """3 PPS + 1 NTP cluster: sensor_weights must equal SYNC_GRADE_WEIGHTS."""
+async def test_mixed_sync_cluster_timing_uncertainty_matches_class_defaults() -> None:
+    """3 PPS + 1 NTP cluster: per-sensor clock 1σ equals the class defaults."""
     nodes = NodeRegistry()
     positions = {
         "p0": (0.0, 0.0, 2.0),
@@ -48,9 +59,7 @@ async def test_mixed_sync_cluster_weights_match_table() -> None:
     }
     for nid, pos in positions.items():
         await nodes.upsert(_node(nid, pos), last_seen_ns=1)
-    for nid in ("p0", "p1", "p2"):
-        await nodes.update_sensor_sync_grade(f"{nid}:ch0", SyncGrade.GPS_PPS)
-    await nodes.update_sensor_sync_grade("ntp0:ch0", SyncGrade.NTP)
+    await _record_clocks(nodes, ("p0", "p1", "p2"), "ntp0")
 
     clusters = ClusterRegistry()
     await clusters.upsert(ClusterSpec(
@@ -59,10 +68,19 @@ async def test_mixed_sync_cluster_weights_match_table() -> None:
         declared_sync_grade=SyncGrade.GPS_PPS,
     ))
 
-    weights = await clusters.cluster_sensor_weights("mixed", nodes)
+    uncertainty = await clusters.cluster_sensor_timing_uncertainty_seconds("mixed", nodes, CLOCK_POLICY)
     for nid in ("p0", "p1", "p2"):
-        assert weights[f"{nid}:ch0"] == pytest.approx(1.0)
-    assert weights["ntp0:ch0"] == pytest.approx(0.25)
+        assert uncertainty[f"{nid}:ch0"] == pytest.approx(1.0e-6)
+    assert uncertainty["ntp0:ch0"] == pytest.approx(2.0e-3)
+
+    # A cluster declared NTP-synced caps every member at NTP-class timing.
+    await clusters.upsert(ClusterSpec(
+        id="mixed",
+        member_node_ids=list(positions.keys()),
+        declared_sync_grade=SyncGrade.NTP,
+    ))
+    floored = await clusters.cluster_sensor_timing_uncertainty_seconds("mixed", nodes, CLOCK_POLICY)
+    assert all(value == pytest.approx(2.0e-3) for value in floored.values())
 
 
 @pytest.mark.asyncio
@@ -80,9 +98,7 @@ async def test_mixed_sync_localization_converges_with_weighting() -> None:
     }
     for nid, pos in positions.items():
         await nodes.upsert(_node(nid, pos), last_seen_ns=1)
-    for nid in ("p0", "p1", "p2"):
-        await nodes.update_sensor_sync_grade(f"{nid}:ch0", SyncGrade.GPS_PPS)
-    await nodes.update_sensor_sync_grade("ntp0:ch0", SyncGrade.NTP)
+    await _record_clocks(nodes, ("p0", "p1", "p2"), "ntp0")
 
     clusters = ClusterRegistry()
     await clusters.upsert(ClusterSpec(
@@ -92,7 +108,8 @@ async def test_mixed_sync_localization_converges_with_weighting() -> None:
     ))
 
     sensor_positions = await clusters.cluster_sensor_positions("mixed", nodes)
-    weights = await clusters.cluster_sensor_weights("mixed", nodes)
+    uncertainty = await clusters.cluster_sensor_timing_uncertainty_seconds("mixed", nodes, CLOCK_POLICY)
+    sensor_node_ids = {sid: sid.split(":")[0] for sid in sensor_positions}
 
     source = np.array([1.3, 1.7, 1.8])
     n = 4096
@@ -116,7 +133,8 @@ async def test_mixed_sync_localization_converges_with_weighting() -> None:
         sample_rate_hz=SAMPLE_RATE_HZ,
         temperature_c=20.0,
         humidity_fraction=0.5,
-        sensor_weights=weights,
+        sensor_timing_uncertainty_seconds=uncertainty,
+        sensor_node_ids=sensor_node_ids,
     )
     equal = disp.localize(
         sensor_positions=sensor_positions,
@@ -124,7 +142,8 @@ async def test_mixed_sync_localization_converges_with_weighting() -> None:
         sample_rate_hz=SAMPLE_RATE_HZ,
         temperature_c=20.0,
         humidity_fraction=0.5,
-        sensor_weights={sid: 1.0 for sid in sensor_positions},
+        sensor_timing_uncertainty_seconds={sid: 0.0 for sid in sensor_positions},
+        sensor_node_ids=sensor_node_ids,
     )
 
     err_weighted = float(np.linalg.norm(np.array(weighted.position_m) - source))

@@ -8,6 +8,10 @@ import numpy as np
 
 from minimappr.models import ClusterSpec, SyncGrade
 from minimappr.core.node_registry import NodeRegistry, SensorDescriptor
+from minimappr.core.pair_timing_uncertainty import (
+    ClockUncertaintyPolicy,
+    declared_sync_grade_uncertainty_seconds,
+)
 
 
 class ClusterRegistry:
@@ -110,14 +114,30 @@ class ClusterRegistry:
             result[sid] = _min_grade(declared, d.effective_sync_grade)
         return result
 
-    async def cluster_sensor_weights(
+    async def cluster_sensor_timing_uncertainty_seconds(
         self,
         cluster_id: str,
         node_registry: NodeRegistry,
+        policy: ClockUncertaintyPolicy,
     ) -> dict[str, float]:
-        """Return {sensor_id: localization_weight} using SYNC_GRADE_WEIGHTS."""
-        grades = await self.cluster_sensor_grades(cluster_id, node_registry)
-        return {sid: grade.weight() for sid, grade in grades.items()}
+        """Return {sensor_id: clock 1σ seconds} for the cluster's sensors.
+
+        Each sensor's node uncertainty is floored at the cluster's declared sync
+        grade: the operator's declaration caps how good the clocks can be.
+        """
+        spec = await self.get(cluster_id)
+        if spec is None:
+            return {}
+        sensors = await self.sensors_in_cluster(cluster_id, node_registry)
+        node_uncertainty_by_sensor = await node_registry.sensor_timing_uncertainty_seconds(policy)
+        declared_floor_seconds = declared_sync_grade_uncertainty_seconds(spec.declared_sync_grade, policy)
+        return {
+            sensor_id: max(
+                node_uncertainty_by_sensor.get(sensor_id, policy.unknown_uncertainty_seconds),
+                declared_floor_seconds,
+            )
+            for sensor_id in sensors
+        }
 
     async def update_node_memberships(self, node_registry: NodeRegistry) -> None:
         """Propagate cluster_id into NodeRegistry's SensorDescriptors.

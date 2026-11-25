@@ -32,6 +32,7 @@ from minimappr.core.ingest_relative_trigger import NoiseFloorRelativeTrigger
 from minimappr.core.live_ingest_state import FrameIdentity, LiveIngestState
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.node_position_estimator import StationaryKdeState, compute_stationary_kde
+from minimappr.core.pair_timing_uncertainty import node_clock_evidence_from_frame
 from minimappr.core.preprocessing import NodePreprocessorFactory
 from minimappr.core.site_origin import node_has_trusted_gps_position
 from minimappr.interfaces import AudioPreprocessor, StorageBackend
@@ -363,6 +364,10 @@ class IngestProcessor:
         await self._registry.update_node_sensor_sync_grade(
             runtime.spec.id,
             frame_sync_grade,
+        )
+        await self._registry.record_node_clock_evidence(
+            runtime.spec.id,
+            node_clock_evidence_from_frame(frame.time_quality, frame.timing_diagnostics),
         )
         boot_session = _node_boot_session(normalized_node)
         toa_ns = frame.toa_ns or frame.start_time_ns

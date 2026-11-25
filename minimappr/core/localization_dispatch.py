@@ -119,7 +119,7 @@ class LocalizationDispatcher:
         sample_rate_hz: int,
         temperature_c: float,
         humidity_fraction: float,
-        sensor_weights: dict[str, float] | None = None,
+        sensor_timing_uncertainty_seconds: dict[str, float] | None = None,
         sensor_node_ids: dict[str, str] | None = None,
         sensor_gain_offsets_db: dict[str, float] | None = None,
         half_space: str | None = None,
@@ -130,7 +130,7 @@ class LocalizationDispatcher:
             sample_rate_hz=sample_rate_hz,
             temperature_c=temperature_c,
             humidity_fraction=humidity_fraction,
-            sensor_weights=sensor_weights,
+            sensor_timing_uncertainty_seconds=sensor_timing_uncertainty_seconds,
             sensor_node_ids=sensor_node_ids,
             sensor_gain_offsets_db=sensor_gain_offsets_db,
             half_space=half_space,
@@ -152,7 +152,7 @@ class LocalizationDispatcher:
         temperature_c: float,
         humidity_fraction: float,
         fixed_z_m: float | None = None,
-        sensor_weights: dict[str, float] | None = None,
+        sensor_timing_uncertainty_seconds: dict[str, float] | None = None,
         sensor_node_ids: dict[str, str] | None = None,
     ) -> LocalizationResult:
         fallback = self._fallback
@@ -163,7 +163,7 @@ class LocalizationDispatcher:
                 sample_rate_hz=sample_rate_hz,
                 temperature_c=temperature_c,
                 humidity_fraction=humidity_fraction,
-                sensor_weights=sensor_weights,
+                sensor_timing_uncertainty_seconds=sensor_timing_uncertainty_seconds,
             )
         self._last_attempted = "gcc_phat"
         if self.default_algorithm != "gcc_phat":
@@ -176,14 +176,14 @@ class LocalizationDispatcher:
                     self.default_algorithm,
                 )
         optional_kwargs: dict[str, object] = {}
-        if sensor_weights is not None and self._localizer_supports_sensor_weights(
+        if sensor_timing_uncertainty_seconds is not None and self._localizer_supports_sensor_timing_uncertainty_seconds(
             fallback,
             method_name="localize_2d",
         ):
-            optional_kwargs["sensor_weights"] = sensor_weights
+            optional_kwargs["sensor_timing_uncertainty_seconds"] = sensor_timing_uncertainty_seconds
         # Phase 5: node identity lets the engine's 2D path lift the cross-node
-        # tau ceiling and apply the sync gate. Signature-probed so lightweight
-        # test/downstream localizer stubs stay usable.
+        # tau ceiling and weight cross-node pairs by clock uncertainty.
+        # Signature-probed so lightweight test/downstream localizer stubs stay usable.
         if sensor_node_ids is not None and self._localizer_supports_parameter(
             fallback,
             parameter_name="sensor_node_ids",
@@ -221,7 +221,7 @@ class LocalizationDispatcher:
         sample_rate_hz: int,
         temperature_c: float,
         humidity_fraction: float,
-        sensor_weights: dict[str, float] | None = None,
+        sensor_timing_uncertainty_seconds: dict[str, float] | None = None,
         sensor_node_ids: dict[str, str] | None = None,
         sensor_gain_offsets_db: dict[str, float] | None = None,
         half_space: str | None = None,
@@ -233,7 +233,7 @@ class LocalizationDispatcher:
                 sample_rate_hz=sample_rate_hz,
                 temperature_c=temperature_c,
                 humidity_fraction=humidity_fraction,
-                sensor_weights=sensor_weights,
+                sensor_timing_uncertainty_seconds=sensor_timing_uncertainty_seconds,
                 sensor_node_ids=sensor_node_ids,
                 sensor_gain_offsets_db=sensor_gain_offsets_db,
                 half_space=half_space,
@@ -245,7 +245,7 @@ class LocalizationDispatcher:
             sample_rate_hz=sample_rate_hz,
             temperature_c=temperature_c,
             humidity_fraction=humidity_fraction,
-            sensor_weights=sensor_weights,
+            sensor_timing_uncertainty_seconds=sensor_timing_uncertainty_seconds,
             sensor_node_ids=sensor_node_ids,
             sensor_gain_offsets_db=sensor_gain_offsets_db,
             half_space=half_space,
@@ -260,7 +260,7 @@ class LocalizationDispatcher:
         sample_rate_hz: int,
         temperature_c: float,
         humidity_fraction: float,
-        sensor_weights: dict[str, float] | None = None,
+        sensor_timing_uncertainty_seconds: dict[str, float] | None = None,
         sensor_node_ids: dict[str, str] | None = None,
         sensor_gain_offsets_db: dict[str, float] | None = None,
         half_space: str | None = None,
@@ -272,7 +272,7 @@ class LocalizationDispatcher:
             sample_rate_hz=sample_rate_hz,
             temperature_c=temperature_c,
             humidity_fraction=humidity_fraction,
-            sensor_weights=sensor_weights,
+            sensor_timing_uncertainty_seconds=sensor_timing_uncertainty_seconds,
             sensor_node_ids=sensor_node_ids,
             sensor_gain_offsets_db=sensor_gain_offsets_db,
             half_space=half_space,
@@ -298,7 +298,7 @@ class LocalizationDispatcher:
         sample_rate_hz: int,
         temperature_c: float,
         humidity_fraction: float,
-        sensor_weights: dict[str, float] | None = None,
+        sensor_timing_uncertainty_seconds: dict[str, float] | None = None,
         sensor_node_ids: dict[str, str] | None = None,
         sensor_gain_offsets_db: dict[str, float] | None = None,
         half_space: str | None = None,
@@ -310,7 +310,7 @@ class LocalizationDispatcher:
             sample_rate_hz=sample_rate_hz,
             temperature_c=temperature_c,
             humidity_fraction=humidity_fraction,
-            sensor_weights=sensor_weights,
+            sensor_timing_uncertainty_seconds=sensor_timing_uncertainty_seconds,
             sensor_node_ids=sensor_node_ids,
             sensor_gain_offsets_db=sensor_gain_offsets_db,
             half_space=half_space,
@@ -331,7 +331,7 @@ class LocalizationDispatcher:
                     sample_rate_hz=sample_rate_hz,
                     temperature_c=temperature_c,
                     humidity_fraction=humidity_fraction,
-                    sensor_weights=sensor_weights,
+                    sensor_timing_uncertainty_seconds=sensor_timing_uncertainty_seconds,
                     sensor_node_ids=sensor_node_ids,
                     sensor_gain_offsets_db=sensor_gain_offsets_db,
                     half_space=half_space,
@@ -366,7 +366,7 @@ class LocalizationDispatcher:
         sample_rate_hz: int,
         temperature_c: float,
         humidity_fraction: float,
-        sensor_weights: dict[str, float] | None = None,
+        sensor_timing_uncertainty_seconds: dict[str, float] | None = None,
         sensor_node_ids: dict[str, str] | None = None,
         sensor_gain_offsets_db: dict[str, float] | None = None,
         half_space: str | None = None,
@@ -383,7 +383,7 @@ class LocalizationDispatcher:
                 sample_rate_hz=sample_rate_hz,
                 temperature_c=temperature_c,
                 humidity_fraction=humidity_fraction,
-                sensor_weights=sensor_weights,
+                sensor_timing_uncertainty_seconds=sensor_timing_uncertainty_seconds,
                 sensor_node_ids=sensor_node_ids,
                 sensor_gain_offsets_db=sensor_gain_offsets_db,
                 half_space=half_space,
@@ -405,7 +405,7 @@ class LocalizationDispatcher:
                 sample_rate_hz=sample_rate_hz,
                 temperature_c=temperature_c,
                 humidity_fraction=humidity_fraction,
-                sensor_weights=sensor_weights,
+                sensor_timing_uncertainty_seconds=sensor_timing_uncertainty_seconds,
                 sensor_node_ids=sensor_node_ids,
                 sensor_gain_offsets_db=sensor_gain_offsets_db,
                 half_space=half_space,
@@ -533,10 +533,10 @@ class LocalizationDispatcher:
             )
         )
 
-    def _localizer_supports_sensor_weights(self, localizer, *, method_name: str = "localize") -> bool:
+    def _localizer_supports_sensor_timing_uncertainty_seconds(self, localizer, *, method_name: str = "localize") -> bool:
         return self._localizer_supports_parameter(
             localizer,
-            parameter_name="sensor_weights",
+            parameter_name="sensor_timing_uncertainty_seconds",
             method_name=method_name,
         )
 
@@ -577,7 +577,7 @@ class LocalizationDispatcher:
             return parameter_name in inspect.signature(method).parameters
         except (TypeError, ValueError):
             return isinstance(localizer, LocalizationEngine) and parameter_name in {
-                "sensor_weights",
+                "sensor_timing_uncertainty_seconds",
                 "sensor_node_ids",
             }
 
@@ -591,23 +591,23 @@ class LocalizationDispatcher:
         sample_rate_hz: int,
         temperature_c: float,
         humidity_fraction: float,
-        sensor_weights: dict[str, float] | None = None,
+        sensor_timing_uncertainty_seconds: dict[str, float] | None = None,
         sensor_node_ids: dict[str, str] | None = None,
         sensor_gain_offsets_db: dict[str, float] | None = None,
         half_space: str | None = None,
     ) -> LocalizationResult:
         """Call a localizer while preserving compatibility with plugin implementations."""
         localization_kwargs: dict[str, object] = {}
-        if sensor_weights is not None:
-            if self._localizer_supports_sensor_weights(localizer):
-                localization_kwargs["sensor_weights"] = sensor_weights
+        if sensor_timing_uncertainty_seconds is not None:
+            if self._localizer_supports_sensor_timing_uncertainty_seconds(localizer):
+                localization_kwargs["sensor_timing_uncertainty_seconds"] = sensor_timing_uncertainty_seconds
             else:
                 logger.warning(
-                    "Localization algorithm %s does not support sensor_weights; falling back to gcc_phat",
+                    "Localization algorithm %s does not support sensor_timing_uncertainty_seconds; falling back to gcc_phat",
                     localizer_name,
                 )
                 raise LocalizationError(
-                    f"Localization algorithm '{localizer_name}' does not support sensor_weights"
+                    f"Localization algorithm '{localizer_name}' does not support sensor_timing_uncertainty_seconds"
                 )
         if (
             sensor_node_ids is not None
@@ -657,11 +657,6 @@ def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Lo
         far_field_default_range_m=cfg.localization_far_field_default_range_m,
         cross_node_max_tau_s=(
             getattr(settings, "localization_cross_node_max_tau_seconds", None)
-            if cross_node_enabled
-            else None
-        ),
-        cross_node_min_sync_weight=(
-            getattr(settings, "localization_cross_node_min_sync_weight", None)
             if cross_node_enabled
             else None
         ),

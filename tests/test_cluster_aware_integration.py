@@ -12,6 +12,7 @@ from minimappr.core.cluster_registry import ClusterRegistry
 from minimappr.core.fusion_node import EventCandidate, FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.node_registry import NodeRegistry
+from minimappr.core.pair_timing_uncertainty import NodeClockEvidence
 from minimappr.core.tracking import TrackManager
 from minimappr.core.zones import ZoneMatcher
 from minimappr.models import ClusterSpec, GeoPoint, LocalizationResult, NodeSpec, NodeType, SyncGrade, TimeQuality
@@ -29,7 +30,7 @@ class _CapturingLocalizer:
     def __init__(self) -> None:
         self.calls = 0
         self.sensor_ids: list[str] = []
-        self.sensor_weights: dict[str, float] | None = None
+        self.sensor_timing_uncertainty_seconds: dict[str, float] | None = None
 
     def localize(
         self,
@@ -38,12 +39,12 @@ class _CapturingLocalizer:
         sample_rate_hz: int,
         temperature_c: float,
         humidity_fraction: float,
-        sensor_weights: dict[str, float] | None = None,
+        sensor_timing_uncertainty_seconds: dict[str, float] | None = None,
     ) -> LocalizationResult:
         del sensor_windows, sample_rate_hz, temperature_c, humidity_fraction
         self.calls += 1
         self.sensor_ids = sorted(sensor_positions.keys())
-        self.sensor_weights = sensor_weights
+        self.sensor_timing_uncertainty_seconds = sensor_timing_uncertainty_seconds
         return LocalizationResult(
             position_m=(1.0, 1.0, 2.0),
             confidence=0.8,
@@ -139,8 +140,8 @@ async def test_cluster_aware_localization_uses_cluster_sensor_scope(tmp_path: Pa
         for node_id, position in nodes.items():
             await registry.upsert(_single_mic_node(node_id, position), last_seen_ns=START_TIME_NS)
         for node_id in ("n0", "n1", "n2"):
-            await registry.update_sensor_sync_grade(f"{node_id}:ch0", SyncGrade.GPS_PPS)
-        await registry.update_sensor_sync_grade("n3:ch0", SyncGrade.NTP)
+            await registry.record_node_clock_evidence(node_id, NodeClockEvidence(TimeQuality.GPS_LOCKED.value))
+        await registry.record_node_clock_evidence("n3", NodeClockEvidence(TimeQuality.NTP_DISCIPLINED.value))
 
         await cluster_registry.upsert(ClusterSpec(
             id="square",
@@ -174,11 +175,13 @@ async def test_cluster_aware_localization_uses_cluster_sensor_scope(tmp_path: Pa
         assert localizer.calls == 1
         assert localizer.sensor_ids == ["n0:ch0", "n1:ch0", "n2:ch0", "n3:ch0"]
         assert localized.selected_sensor_ids == ["n0:ch0", "n1:ch0", "n2:ch0", "n3:ch0"]
-        assert localizer.sensor_weights == {
-            "n0:ch0": pytest.approx(1.0),
-            "n1:ch0": pytest.approx(1.0),
-            "n2:ch0": pytest.approx(1.0),
-            "n3:ch0": pytest.approx(0.25),
+        # Per-node clock 1σ from the class defaults; the NTP node is kept, with
+        # a wider uncertainty, never dropped (P9).
+        assert localizer.sensor_timing_uncertainty_seconds == {
+            "n0:ch0": pytest.approx(1.0e-6),
+            "n1:ch0": pytest.approx(1.0e-6),
+            "n2:ch0": pytest.approx(1.0e-6),
+            "n3:ch0": pytest.approx(2.0e-3),
         }
     finally:
         await storage.close()

@@ -242,7 +242,7 @@ def test_large_cluster_limits_pair_correlations_before_measurement() -> None:
         sound_speed_mps=343.2,
         max_tau_s=0.1,
         interpolation_factor=4,
-        sensor_weights=None,
+        sensor_timing_uncertainty_seconds=None,
         gcc_phat_function=counting_gcc_phat,
     )
 
@@ -379,7 +379,7 @@ def test_bearing_observed_obs_floor_rescues_compact_range_refined_confidence() -
         sound_speed_mps=sound_speed,
         max_tau_s=0.02,
         interpolation_factor=4,
-        sensor_weights=None,
+        sensor_timing_uncertainty_seconds=None,
         gcc_phat_function=gcc_phat,
     )
     reference_sensor, reference_tdoa_s = reference_tdoas(

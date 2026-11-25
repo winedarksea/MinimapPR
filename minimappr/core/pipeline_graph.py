@@ -346,7 +346,6 @@ def build_pipeline_graph(
             params=[
                 _param("Max τ", float(settings.localization_cross_node_max_tau_seconds), "localization_cross_node_max_tau_seconds", suffix=" s"),
                 _param("Max baseline", float(settings.localization_cross_node_max_baseline_m), "localization_cross_node_max_baseline_m", suffix=" m"),
-                _param("Min sync weight", float(settings.localization_cross_node_min_sync_weight), "localization_cross_node_min_sync_weight"),
             ],
             status=_tdoa_status(metrics, fusion_available),
             link="/settings/config#localization",
@@ -1227,14 +1226,11 @@ def _tdoa_status(metrics: dict, fusion_available: bool) -> PipelineStageStatus:
     if not fusion_available:
         return PipelineStageStatus(health="unknown")
     measured = int(metrics.get("localization_cross_node_pairs_measured_count") or 0)
-    rejected = int(metrics.get("localization_cross_node_pairs_rejected_sync_count") or 0)
-    health = "warn" if rejected > 0 and measured == 0 else "ok"
     return PipelineStageStatus(
-        health=health,
+        health="ok",
         summary=(f"{measured} pairs measured" if measured else "configured; no pairs measured yet"),
         metrics=[
             _param("Pairs measured", measured),
-            _param("Rejected (sync)", rejected),
             _param("Last pair count", int(metrics.get("last_cross_node_pair_count") or 0)),
         ],
     )
