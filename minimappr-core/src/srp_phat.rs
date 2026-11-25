@@ -3,9 +3,7 @@ use std::cmp::Ordering;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    gcc_phat::{
-        dominant_frequency_hz, pair_max_tau_s, phat_correlation, GccPhatCorrelation, PairTdoa,
-    },
+    gcc_phat::{dominant_frequency_hz, pair_max_tau_s, GccPhatCorrelation, PairTdoa},
     range_projection::{
         confidence_cap_for_mode, range_observability_cap_for_mode, RANGE_ASYMPTOTIC,
         RANGE_BEARING_PROJECTED, RANGE_BOUNDARY, RANGE_REFINED,
@@ -14,8 +12,11 @@ use crate::{
 
 #[path = "srp_phat_clock_covariance.rs"]
 mod srp_phat_clock_covariance;
+#[path = "srp_phat_pair_spectra.rs"]
+mod srp_phat_pair_spectra;
 use srp_phat_clock_covariance::clock_offset_position_covariance_m2;
 pub use srp_phat_clock_covariance::ChannelClockOffsets;
+use srp_phat_pair_spectra::{pair_phat_correlation, FullWindowSpectra};
 
 const EPSILON: f32 = 1e-9;
 const FAR_FIELD_RANGE_CONVERGENCE_TOLERANCE_M: f32 = 0.05;
@@ -162,6 +163,7 @@ pub struct SrpPhatLocalization {
     pub dominant_frequency_hz: Option<f32>,
 }
 
+#[derive(Clone, Debug)]
 pub struct SrpPhatEvaluation {
     pub localization: SrpPhatLocalization,
     pub pair_tdoas: Vec<PairTdoa>,
@@ -548,6 +550,7 @@ fn build_admitted_pair_observations(
     admitted_pair_filter: Option<AdmittedChannelPairFilter<'_>>,
 ) -> Vec<PairObservation> {
     let mut pairs = Vec::new();
+    let mut full_window_spectra = FullWindowSpectra::new(windows.len());
     for (left_index, &ch_a) in active_channels.iter().enumerate() {
         for &ch_b in &active_channels[left_index + 1..] {
             if admitted_pair_filter.is_some_and(|admits_pair| !admits_pair(ch_a, ch_b)) {
@@ -559,9 +562,11 @@ fn build_admitted_pair_observations(
                 sample_rate_hz,
                 sound_speed_mps,
             );
-            let correlation = phat_correlation(
-                &windows[ch_a],
-                &windows[ch_b],
+            let correlation = pair_phat_correlation(
+                windows,
+                &mut full_window_spectra,
+                ch_a,
+                ch_b,
                 sample_rate_hz,
                 max_tau_s,
                 Some(localization_band_hz),

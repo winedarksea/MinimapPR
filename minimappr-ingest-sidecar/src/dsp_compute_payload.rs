@@ -53,6 +53,10 @@ pub(crate) struct ComputePayload {
     pub(crate) solve_id: String,
     /// Why this payload solves (or `not_attempted`).
     pub(crate) attempt_kind: SolveAttemptKind,
+    /// The SRP evaluation of `solve_id`, shared by an event-triggered solve
+    /// and every covering render that repeats it (`dsp_covered_event_solve`);
+    /// `None` for a solve no other payload repeats.
+    pub(crate) shared_event_solve: Option<SharedEventSolveEvaluation>,
     /// Pairs SRP/covariance/render may use and their timing uncertainty (R7).
     pub(crate) pair_admission: SolvePairAdmission,
     /// Clock evidence of every layout node, snapshotted at trigger; a parked

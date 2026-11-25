@@ -24,6 +24,7 @@ async fn a_scheduled_render_repeats_the_event_triggered_solve_it_covers() {
         ..race_config(true)
     })
     .await;
+    crate::actors::dsp_compute::COMPUTED_SRP_SOLVE_IDS.with(|ids| ids.borrow_mut().clear());
     for frame_index in 0..FRAMES_PER_RUN {
         harness.advance_clock_ms(FIXTURE_FRAME_DURATION_NS / 1_000_000);
         for node in [&planar, &point] {
@@ -69,10 +70,29 @@ async fn a_scheduled_render_repeats_the_event_triggered_solve_it_covers() {
             render_provenance.window_center_time_ns,
             event_provenance.window_center_time_ns
         );
+        let render_localization = render.localization.as_ref().unwrap();
+        let event_localization = event_solve.localization.as_ref().unwrap();
         assert_eq!(
-            render.localization.as_ref().unwrap().position_m,
-            event_solve.localization.as_ref().unwrap().position_m,
-            "the render re-runs the same solve"
+            render_localization.position_m, event_localization.position_m,
+            "the render reports the same solve"
+        );
+        assert_eq!(
+            render_localization.position_covariance_m2,
+            event_localization.position_covariance_m2
+        );
+        assert_eq!(
+            serde_json::to_value(&render_localization.pair_tdoas).unwrap(),
+            serde_json::to_value(&event_localization.pair_tdoas).unwrap()
+        );
+        let times_solved = crate::actors::dsp_compute::COMPUTED_SRP_SOLVE_IDS.with(|ids| {
+            ids.borrow()
+                .iter()
+                .filter(|solve_id| **solve_id == render_provenance.solve_id)
+                .count()
+        });
+        assert_eq!(
+            times_solved, 1,
+            "a covering render reuses its event's SRP evaluation instead of re-solving"
         );
     }
 }

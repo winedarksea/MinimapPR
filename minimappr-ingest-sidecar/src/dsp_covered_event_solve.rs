@@ -26,8 +26,22 @@
 //! boundary (or later), so a covering render dispatched in the meantime would
 //! find no event and solve its own trailing window. Such a render is held
 //! until the parked event is dispatched, then takes it over as above.
+//!
+//! A repeated solve has exactly the inputs of the one it repeats, so its SRP
+//! evaluation is computed once and shared (`SharedEventSolveEvaluation`):
+//! whichever payload reaches compute first solves, the others reuse its
+//! result (waiting for it while it is still running). Re-solving instead
+//! ran a full multi-node SRP per covering render, the dominant compute cost
+//! of a multi-node cluster.
+
+use std::sync::OnceLock;
 
 use super::*;
+use crate::srp_phat::SrpPhatEvaluation;
+
+/// One solve's SRP evaluation, computed by the first payload of that solve to
+/// reach compute and reused by the rest.
+pub(crate) type SharedEventSolveEvaluation = Arc<OnceLock<SrpPhatEvaluation>>;
 
 /// The inputs of the latest event-triggered solve on one buffer.
 struct RecentEventTriggerSolve {
@@ -44,6 +58,7 @@ struct RecentEventTriggerSolve {
     /// The rate the event's windows are sampled at; lags are counted in it.
     sample_rate_hz: u32,
     sound_speed_mps: f32,
+    evaluation: SharedEventSolveEvaluation,
 }
 
 /// One entry per buffer key, dropped with the buffer.
@@ -93,7 +108,11 @@ fn remembered_solve_key(payload: &ComputePayload) -> String {
     payload.sensor_layout.dispatch_gate_key(&payload.stream_key)
 }
 
-fn remembered_solve_of(payload: &ComputePayload) -> RecentEventTriggerSolve {
+/// Remembers `payload`'s solve for later renders to repeat, sharing its SRP
+/// evaluation with them.
+fn remembered_solve_of(payload: &mut ComputePayload) -> RecentEventTriggerSolve {
+    let evaluation = SharedEventSolveEvaluation::default();
+    payload.shared_event_solve = Some(evaluation.clone());
     RecentEventTriggerSolve {
         solve_id: payload.solve_id.clone(),
         attempt_kind: payload.attempt_kind,
@@ -107,6 +126,7 @@ fn remembered_solve_of(payload: &ComputePayload) -> RecentEventTriggerSolve {
         node_clock_assessments: payload.node_clock_assessments.clone(),
         sample_rate_hz: payload.sr,
         sound_speed_mps: payload.effective_sound_speed_mps,
+        evaluation,
     }
 }
 
@@ -186,6 +206,7 @@ impl RecentEventTriggerSolves {
         payload.pair_admission = event.pair_admission.clone();
         payload.node_clock_assessments = event.node_clock_assessments.clone();
         payload.effective_sound_speed_mps = event.sound_speed_mps;
+        payload.shared_event_solve = Some(event.evaluation.clone());
     }
 
     /// Held renders are kept: the batch boundary releases them once their

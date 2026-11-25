@@ -62,46 +62,78 @@ pub(crate) fn phat_correlation(
     band_hz: Option<[f32; 2]>,
     interp_factor: usize,
 ) -> GccPhatCorrelation {
-    const EPSILON: f32 = 1e-9;
-
     let n = ch1.len().min(ch2.len());
     if n == 0 || sample_rate_hz == 0 {
-        return GccPhatCorrelation {
-            lags_seconds: vec![0.0],
-            magnitudes: vec![0.0],
-            tdoa: TdoaResult {
-                delay_samples: 0.0,
-                lag_seconds: 0.0,
-                confidence: 0.0,
-                peak_value: 0.0,
-            },
-        };
+        return empty_phat_correlation();
     }
+    let fft_len = phat_fft_len(n);
+    let x1 = phat_forward_spectrum(&ch1[..n], fft_len);
+    let x2 = phat_forward_spectrum(&ch2[..n], fft_len);
+    phat_correlation_from_spectra(
+        &x1,
+        &x2,
+        fft_len,
+        sample_rate_hz,
+        max_tau_s,
+        band_hz,
+        interp_factor,
+    )
+}
 
-    let fft_len = next_pow2(2 * n.max(1));
-
-    thread_local! {
-        static PLANNER: std::cell::RefCell<FftPlanner<f32>> = std::cell::RefCell::new(FftPlanner::new());
+/// The correlation of an empty pair (no samples or no sample rate).
+pub(crate) fn empty_phat_correlation() -> GccPhatCorrelation {
+    GccPhatCorrelation {
+        lags_seconds: vec![0.0],
+        magnitudes: vec![0.0],
+        tdoa: TdoaResult {
+            delay_samples: 0.0,
+            lag_seconds: 0.0,
+            confidence: 0.0,
+            peak_value: 0.0,
+        },
     }
+}
 
-    let fft = PLANNER.with(|planner| {
-        let mut p = planner.borrow_mut();
-        p.plan_fft_forward(fft_len)
-    });
+/// FFT length for a pair of `n`-sample windows: zero-padded to at least
+/// twice the window so the circular correlation does not wrap.
+pub(crate) fn phat_fft_len(n: usize) -> usize {
+    next_pow2(2 * n.max(1))
+}
 
-    let mut x1: Vec<Complex32> = ch1[..n]
+thread_local! {
+    static PHAT_PLANNER: std::cell::RefCell<FftPlanner<f32>> =
+        std::cell::RefCell::new(FftPlanner::new());
+}
+
+/// Forward spectrum of one channel, zero-padded to `fft_len`. A channel's
+/// spectrum depends only on its own samples, so a multi-pair solve computes
+/// it once per channel instead of once per pair it joins.
+pub(crate) fn phat_forward_spectrum(samples: &[f32], fft_len: usize) -> Vec<Complex32> {
+    let fft = PHAT_PLANNER.with(|planner| planner.borrow_mut().plan_fft_forward(fft_len));
+    let mut spectrum: Vec<Complex32> = samples
         .iter()
         .map(|&sample| Complex32::new(sample, 0.0))
-        .chain(std::iter::repeat_n(Complex32::new(0.0, 0.0), fft_len - n))
+        .chain(std::iter::repeat_n(
+            Complex32::new(0.0, 0.0),
+            fft_len - samples.len(),
+        ))
         .collect();
-    let mut x2: Vec<Complex32> = ch2[..n]
-        .iter()
-        .map(|&sample| Complex32::new(sample, 0.0))
-        .chain(std::iter::repeat_n(Complex32::new(0.0, 0.0), fft_len - n))
-        .collect();
+    fft.process(&mut spectrum);
+    spectrum
+}
 
-    fft.process(&mut x1);
-    fft.process(&mut x2);
+/// GCC-PHAT of two forward spectra from [`phat_forward_spectrum`] at the
+/// same `fft_len`.
+pub(crate) fn phat_correlation_from_spectra(
+    x1: &[Complex32],
+    x2: &[Complex32],
+    fft_len: usize,
+    sample_rate_hz: u32,
+    max_tau_s: f32,
+    band_hz: Option<[f32; 2]>,
+    interp_factor: usize,
+) -> GccPhatCorrelation {
+    const EPSILON: f32 = 1e-9;
 
     let effective_band = normalize_band_hz(band_hz, sample_rate_hz);
     let cross_spectrum: Vec<Complex32> = x1
@@ -125,7 +157,8 @@ pub(crate) fn phat_correlation(
     let interp_factor = interp_factor.max(1);
     let upsampled_fft_len = fft_len.saturating_mul(interp_factor);
     let mut cross_correlation = zero_pad_hermitian_spectrum(&cross_spectrum, upsampled_fft_len);
-    let ifft = PLANNER.with(|planner| planner.borrow_mut().plan_fft_inverse(upsampled_fft_len));
+    let ifft =
+        PHAT_PLANNER.with(|planner| planner.borrow_mut().plan_fft_inverse(upsampled_fft_len));
     ifft.process(&mut cross_correlation);
 
     let scale = 1.0 / upsampled_fft_len as f32;
@@ -182,7 +215,7 @@ pub(crate) fn phat_correlation(
     let parabolic_tau_s = delay_samples / sample_rate_hz as f32;
     if parabolic_tau_s.abs() <= PHASE_SLOPE_MAX_TAU_S {
         if let Some(phase_tau_s) =
-            phase_slope_tau(&x1, &x2, fft_len, sample_rate_hz, effective_band, max_tau_s)
+            phase_slope_tau(x1, x2, fft_len, sample_rate_hz, effective_band, max_tau_s)
         {
             if (phase_tau_s - parabolic_tau_s).abs() < 1.0 / sample_rate_hz as f32 {
                 delay_samples = phase_tau_s * sample_rate_hz as f32;
