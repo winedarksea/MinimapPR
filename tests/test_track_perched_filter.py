@@ -1,4 +1,8 @@
-"""Perched random-walk filter + relocation gate (Field Mode W2-tracker, S3)."""
+"""Perched random-walk filter + relocation gate (Field Mode W2-tracker, S3).
+
+Since localization overhaul milestone 3 this is the ``stationary_hold`` mode,
+the shipped default for wildlife, so plain ``Settings()`` exercises it.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +16,7 @@ from minimappr.core.track_filters_perched import (
     PerchedRandomWalkTrackFilter,
 )
 from minimappr.core.tracking import TrackManager
+from minimappr.core.tracking_mode_config import TrackingMode, TrackingModeConfig, tracking_mode_by_category_with
 from minimappr.models import TrackState
 
 T0 = 1_700_000_000_000_000_000
@@ -69,7 +74,7 @@ def test_routing_filter_keeps_constant_velocity_for_other_categories():
                            initial_position_variance=4.0, initial_velocity_variance=16.0)
     routing = MotionModelRoutingTrackFilter(
         constant_velocity_filter=cv, perched_filter=_perched(),
-        perched_label_categories=frozenset({"wildlife"}),
+        tracking_modes=TrackingModeConfig.shipped_defaults(),
     )
     routing.initialize_track("bird", (0.0, 0.0, 0.0))
     routing.set_track_motion_category("bird", "wildlife", (0.0, 0.0, 0.0))
@@ -96,7 +101,7 @@ async def test_perched_track_survives_silence_without_drifting():
     """A bird singing 4 bouts 12 s apart with 1 m jitter: one track, no drift."""
     positions = [(10.0, 5.0, 2.0), (11.0, 5.5, 2.0), (9.3, 4.4, 2.0), (10.6, 5.2, 2.0)]
     gaps = [0.0, 12.0, 12.0, 12.0]
-    manager = TrackManager(Settings(tracking_perched_filter_enabled=True))
+    manager = TrackManager(Settings())
     ids = await _intermittent_bird(manager, positions, gaps)
     assert len(set(ids)) == 1
     track = (await manager.snapshot())[0]
@@ -107,7 +112,7 @@ async def test_perched_track_survives_silence_without_drifting():
 async def test_relocation_gate_keeps_identity_on_a_15_m_hop():
     positions = [(10.0, 5.0, 2.0), (10.5, 5.0, 2.0), (25.0, 5.0, 2.0), (25.4, 5.3, 2.0)]
     gaps = [0.0, 6.0, 8.0, 6.0]
-    flag_on = TrackManager(Settings(tracking_perched_filter_enabled=True))
+    flag_on = TrackManager(Settings())
     ids_on = await _intermittent_bird(flag_on, positions, gaps)
     assert len(set(ids_on)) == 1
     track = (await flag_on.snapshot())[0]
@@ -117,7 +122,9 @@ async def test_relocation_gate_keeps_identity_on_a_15_m_hop():
 
     # Legacy CV Kalman: the wide covariance gate keeps the id, but the hop is
     # read as velocity, which then coasts the bird away during the next silence.
-    flag_off = TrackManager(Settings())
+    flag_off = TrackManager(
+        Settings(tracking_mode_by_category=tracking_mode_by_category_with("wildlife", TrackingMode.CONTINUOUS_MOTION))
+    )
     await _intermittent_bird(flag_off, positions[:3], gaps[:3])
     legacy = (await flag_off.snapshot())[0]
     assert abs(legacy.velocity_mps[0]) > 0.5
@@ -127,13 +134,13 @@ async def test_relocation_gate_keeps_identity_on_a_15_m_hop():
 async def test_relocation_refused_when_jump_follows_immediately():
     """Two birds of one species calling 15 m apart within a second are two birds."""
     positions = [(10.0, 5.0, 2.0), (25.0, 5.0, 2.0)]
-    manager = TrackManager(Settings(tracking_perched_filter_enabled=True))
+    manager = TrackManager(Settings())
     ids = await _intermittent_bird(manager, positions, [0.0, 0.5])
     assert len(set(ids)) == 2
 
 
 async def test_relocation_refused_when_another_same_species_track_is_nearer():
-    manager = TrackManager(Settings(tracking_perched_filter_enabled=True))
+    manager = TrackManager(Settings())
     a = await manager.update(timestamp_ns=T0, position_m=(0.0, 0.0, 2.0), label="robin",
                              label_category="wildlife", confidence=0.7)
     b = await manager.update(timestamp_ns=T0 + SECOND, position_m=(40.0, 0.0, 2.0), label="robin",
@@ -145,7 +152,7 @@ async def test_relocation_refused_when_another_same_species_track_is_nearer():
 
 
 async def test_relocation_requires_matching_species():
-    manager = TrackManager(Settings(tracking_perched_filter_enabled=True))
+    manager = TrackManager(Settings())
     first = await manager.update(timestamp_ns=T0, position_m=(0.0, 0.0, 2.0), label="robin",
                                  label_category="wildlife", confidence=0.7)
     other = await manager.update(timestamp_ns=T0 + 10 * SECOND, position_m=(15.0, 0.0, 2.0),
@@ -153,8 +160,8 @@ async def test_relocation_requires_matching_species():
     assert other.id != first.id
 
 
-async def test_drone_tracks_keep_constant_velocity_when_flag_on():
-    manager = TrackManager(Settings(tracking_perched_filter_enabled=True))
+async def test_drone_tracks_keep_constant_velocity_while_wildlife_holds_station():
+    manager = TrackManager(Settings())
     track = None
     for step in range(5):
         track = await manager.update(timestamp_ns=T0 + step * SECOND, position_m=(3.0 * step, 0.0, 20.0),
@@ -164,7 +171,7 @@ async def test_drone_tracks_keep_constant_velocity_when_flag_on():
 
 async def test_flock_hop_back_to_ghost_perch_reverts_relocation():
     """Bird A sings, same-species bird B sings 20 m away, then A again: two tracks."""
-    manager = TrackManager(Settings(tracking_perched_filter_enabled=True))
+    manager = TrackManager(Settings())
     a1 = await manager.update(timestamp_ns=T0, position_m=(2.0, 10.0, 2.0), label="robin",
                               label_category="wildlife", confidence=0.7)
     b1 = await manager.update(timestamp_ns=T0 + 5 * SECOND, position_m=(22.0, 12.0, 2.0), label="robin",
@@ -203,7 +210,7 @@ def test_routing_filter_soft_update_only_moves_perched_tracks():
                            initial_position_variance=4.0, initial_velocity_variance=16.0)
     routing = MotionModelRoutingTrackFilter(
         constant_velocity_filter=cv, perched_filter=_perched(),
-        perched_label_categories=frozenset({"wildlife"}),
+        tracking_modes=TrackingModeConfig.shipped_defaults(),
     )
     routing.initialize_track("bird", (0.0, 0.0, 0.0))
     routing.set_track_motion_category("bird", "wildlife", (0.0, 0.0, 0.0))
@@ -214,7 +221,7 @@ def test_routing_filter_soft_update_only_moves_perched_tracks():
 
 
 async def test_ghost_of_dropped_track_is_not_reverted():
-    manager = TrackManager(Settings(tracking_perched_filter_enabled=True))
+    manager = TrackManager(Settings())
     ids = await _intermittent_bird(manager, [(10.0, 5.0, 2.0), (25.0, 5.0, 2.0)], [0.0, 8.0])
     assert len(set(ids)) == 1
     track = (await manager.snapshot())[0]

@@ -11,10 +11,10 @@ import pytest
 
 from minimappr.sim.entity_scenario_catalog import ENTITY_SCENARIOS
 from minimappr.sim.tracker_detection_scenarios import score_tracker_scenario
-from minimappr.sim.tracker_scenario_catalog import ALL_TRACKER_FLAGS_ON, TRACKER_SCENARIOS
+from minimappr.sim.tracker_scenario_catalog import ALL_TRACKER_FLAGS_ON, LEGACY_TRACKER_SETTINGS, TRACKER_SCENARIOS
 
 SEEDS = (0, 1, 2)
-TRACKER_CONFIGURATIONS = {"off": {}, "all-on": ALL_TRACKER_FLAGS_ON}
+TRACKER_CONFIGURATIONS = {"off": LEGACY_TRACKER_SETTINGS, "all-on": ALL_TRACKER_FLAGS_ON}
 
 
 def _mean(values) -> float:

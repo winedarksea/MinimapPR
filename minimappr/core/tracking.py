@@ -37,6 +37,7 @@ from minimappr.core.track_associators import (
 from minimappr.core.track_field_mode_extensions import FieldModeTrackExtensions
 from minimappr.core.track_filters import KalmanTrackFilter, LinearTrackFilter
 from minimappr.core.tracking_field_mode_methods import TrackManagerFieldModeMethods
+from minimappr.core.tracking_mode_methods import TrackManagerTrackingModeMethods
 from minimappr.core.tracking_position_observation_methods import TrackManagerPositionObservationMethods
 from minimappr.interfaces import AssociationContext, TrackAssociator, TrackFilter
 from minimappr.models import LabelId, TrackState, TrackStatus
@@ -82,7 +83,9 @@ class _DormantRecord:
     capability_tier: str = "full_3d"
 
 
-class TrackManager(TrackManagerPositionObservationMethods, TrackManagerFieldModeMethods):
+class TrackManager(
+    TrackManagerPositionObservationMethods, TrackManagerFieldModeMethods, TrackManagerTrackingModeMethods
+):
     CONFIRM_THRESHOLD: int = 2  # detections needed to confirm a track
     _MAX_CONTRIBUTOR_NODE_IDS: int = 16  # bound on the per-track contributor set
 
@@ -249,9 +252,12 @@ class TrackManager(TrackManagerPositionObservationMethods, TrackManagerFieldMode
         classifier_scores: dict[str, float] | None = None,
         species_evidence: dict[str, float] | None = None,
         below_display_threshold: bool = False,
-    ) -> TrackState:
+    ) -> TrackState | None:
+        """Associate one fix; ``None`` when its category's tracking mode is ``none``."""
         async with self._lock:
             self._age_tracks(timestamp_ns)
+            if not self.tracks_category(label_category):
+                return None
             evidence = self._field_mode.detection_evidence(
                 label=label,
                 confidence=confidence,
@@ -434,9 +440,10 @@ class TrackManager(TrackManagerPositionObservationMethods, TrackManagerFieldMode
             best_track.label_id = label_id
             best_track.label = label
             best_track.label_category = label_category
-            if category_changed:
-                self._apply_motion_model(matched_id, label_category, best_track.position_m)
-                self._apply_process_noise(matched_id, label_category)
+            # An abstention (``unknown``) on a labelled track keeps its dynamics:
+            # one unclassified fix must not flip a perched bird to constant velocity.
+            if category_changed and _real_category(label_category) is not None:
+                self.apply_label_category_tracking_mode(matched_id, label_category)
             best_track.iff_category = (
                 iff_category if iff_category in {"friendly", "unknown", "hostile"} else "unknown"
             )

@@ -15,14 +15,27 @@ from minimappr.sim.graded_species_oracle import (
 )
 
 ALL_FLAGS = {flag for flags in gate.STREAM_FLAGS.values() for flag in flags}
+BOOLEAN_FLAGS = {flag for flags in gate.STREAM_FLAGS.values() for flag, value in flags.items() if isinstance(value, bool)}
+
+
+def _wildlife_mode(flags: dict) -> str:
+    return flags["tracking_mode_by_category"]["wildlife"]
 
 
 def test_configuration_flags_set_every_stream_flag_explicitly() -> None:
-    assert gate.configuration_flags(gate.BASELINE) == {flag: False for flag in ALL_FLAGS}
-    assert gate.configuration_flags(gate.ALL_ON) == {flag: True for flag in ALL_FLAGS}
+    baseline = gate.configuration_flags(gate.BASELINE)
+    all_on = gate.configuration_flags(gate.ALL_ON)
+    assert set(baseline) == set(all_on) == ALL_FLAGS
+    assert all(baseline[flag] is False and all_on[flag] is True for flag in BOOLEAN_FLAGS)
+    # S3 is a tracking mode: baseline keeps the pre-milestone-3 wildlife dynamics.
+    assert _wildlife_mode(baseline) == "continuous_motion"
+    assert _wildlife_mode(all_on) == "stationary_hold"
+    assert _wildlife_mode(gate.configuration_flags("only:S3_perched_filter")) == "stationary_hold"
+    assert _wildlife_mode(gate.configuration_flags("all_on-minus:S3_perched_filter")) == "continuous_motion"
+    assert gate.configuration_flags(gate.SHIPPED_DEFAULTS) == {}
     alone = gate.configuration_flags("only:S5_attribution")
     # Attribution needs onset clustering (config validation).
-    assert {f for f, on in alone.items() if on} == {"onset_attribution_enabled", "localization_onset_clustering_enabled"}
+    assert {f for f in BOOLEAN_FLAGS if alone[f]} == {"onset_attribution_enabled", "localization_onset_clustering_enabled"}
     minus_onset = gate.configuration_flags("all_on-minus:S2_onset_clustering")
     assert not minus_onset["localization_onset_clustering_enabled"] and not minus_onset["onset_attribution_enabled"]
     assert minus_onset["entity_reporting_enabled"]
@@ -31,7 +44,7 @@ def test_configuration_flags_set_every_stream_flag_explicitly() -> None:
 
 
 def test_every_gate_configuration_builds_valid_settings() -> None:
-    for name in gate.all_configuration_names():
+    for name in [*gate.all_configuration_names(), gate.SHIPPED_DEFAULTS]:
         Settings(**gate.GATE_COMMON_OVERRIDES, **gate.configuration_flags(name))
 
 

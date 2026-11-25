@@ -13,6 +13,8 @@ import pytest
 from minimappr.sim.tracker_detection_scenarios import score_tracker_scenario
 from minimappr.sim.tracker_scenario_catalog import (
     ALL_TRACKER_FLAGS_ON,
+    LEGACY_TRACKER_SETTINGS,
+    WILDLIFE_STATIONARY_HOLD,
     flock_same_species,
     intermittent_perched_robin,
     robin_hops_15m,
@@ -49,7 +51,7 @@ async def test_all_flags_on_full_recall_no_duplicates_no_swaps(build):
     "build", [intermittent_perched_robin, two_species_alternating, two_species_overlapping, weak_fix_weak_id]
 )
 async def test_flags_raise_recall_over_legacy(build):
-    legacy = await _scores(build, {})
+    legacy = await _scores(build, LEGACY_TRACKER_SETTINGS)
     flagged = await _scores(build, ALL_TRACKER_FLAGS_ON)
     for before, after in zip(legacy, flagged):
         assert after.metrics.localized_and_classified_recall > before.metrics.localized_and_classified_recall
@@ -58,9 +60,9 @@ async def test_flags_raise_recall_over_legacy(build):
 
 async def test_legacy_two_species_fragments_and_mixes_individuals():
     """Pins the failure the perched filter fixes (CV coasting over 12 m)."""
-    legacy = await _scores(two_species_alternating, {})
+    legacy = await _scores(two_species_alternating, LEGACY_TRACKER_SETTINGS)
     assert all(r.metrics.duplicate_entities > 0 for r in legacy)
-    perched = await _scores(two_species_alternating, {"tracking_perched_filter_enabled": True})
+    perched = await _scores(two_species_alternating, {**LEGACY_TRACKER_SETTINGS, **WILDLIFE_STATIONARY_HOLD})
     assert all(r.metrics.duplicate_entities == 0 for r in perched)
 
 
@@ -69,5 +71,5 @@ async def test_flock_costs_at_most_one_relocation_mistake():
         assert result.distinct_visible_tracks == 3
         assert result.metrics.duplicate_entities <= 1
         assert result.metrics.entities_spanning_multiple_individuals <= 1
-    legacy = await _scores(flock_same_species, {})
+    legacy = await _scores(flock_same_species, LEGACY_TRACKER_SETTINGS)
     assert all(r.metrics.duplicate_entities > 1 for r in legacy)

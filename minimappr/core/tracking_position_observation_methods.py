@@ -1,8 +1,8 @@
 """One-observation-per-solve methods of ``TrackManager`` (plan P5).
 
 Mixed into ``TrackManager``; relies on its ``_lock``, ``_tracks``, ``_filter``,
-``_associator``, ``_field_mode``, ``_fingerprints``, ``_id_counter`` and helper
-methods. Split from ``update`` because a solve reaches the tracker in two
+``_associator``, ``_field_mode``, ``_fingerprints``, ``_id_counter``, helper
+methods and P4's ``apply_label_category_tracking_mode``. Split from ``update`` because a solve reaches the tracker in two
 steps:
 
 1. ``apply_position_observation``: the position, at the solve's first
@@ -235,12 +235,14 @@ class TrackManagerPositionObservationMethods:
         *,
         observed_track_id: str,
         classified_update_kwargs: dict[str, Any],
-    ) -> TrackState:
+    ) -> TrackState | None:
         """Label the track a solve's position already updated.
 
         ``classified_update_kwargs`` are ``TrackManager.update`` keywords for this
         solve (position included, used only when the label-aware update must be
-        re-run; see the module docstring).
+        re-run; see the module docstring). ``None`` when the label's category is
+        not tracked (tracking mode ``none``): the track is ended, as ``update``
+        would never have started it.
         """
         async with self._lock:
             track = self._tracks.get(observed_track_id)
@@ -250,14 +252,14 @@ class TrackManagerPositionObservationMethods:
             ):
                 attachable = False
             if attachable:
-                self._apply_classification_to_track(track, classified_update_kwargs)
-                return track
+                return self._apply_classification_to_track(track, classified_update_kwargs)
         return await self.update_with_classification(**classified_update_kwargs)
 
-    async def update_with_classification(self, **classified_update_kwargs: Any) -> TrackState:
+    async def update_with_classification(self, **classified_update_kwargs: Any) -> TrackState | None:
         """The label-aware ``update``; whichever track it lands on is classified now."""
         track = await self.update(**classified_update_kwargs)
-        self._unclassified_track_ids.discard(track.id)
+        if track is not None:
+            self._unclassified_track_ids.discard(track.id)
         return track
 
     def _classification_contradicts_track(self, track: TrackState, label_category: str | None) -> bool:
@@ -268,8 +270,8 @@ class TrackManagerPositionObservationMethods:
         detection_category = _informative_label_category(label_category)
         return track_category is not None and detection_category is not None and track_category != detection_category
 
-    def _apply_classification_to_track(self, track: TrackState, update_kwargs: dict[str, Any]) -> None:
-        """The label half of ``TrackManager.update`` for an already-matched track."""
+    def _apply_classification_to_track(self, track: TrackState, update_kwargs: dict[str, Any]) -> TrackState | None:
+        """The label half of ``TrackManager.update`` for an already-matched track; caller holds the lock."""
         label = update_kwargs["label"]
         confidence = float(update_kwargs["confidence"])
         label_category = update_kwargs.get("label_category", UNCLASSIFIED_TRACK_CATEGORY)
@@ -287,9 +289,11 @@ class TrackManagerPositionObservationMethods:
         track.label_id = update_kwargs.get("label_id")
         track.label = label
         track.label_category = label_category
-        if category_changed:
-            self._apply_motion_model(track.id, label_category, track.position_m)
-            self._apply_process_noise(track.id, label_category)
+        # Same rule as ``update``: an abstention keeps the track's dynamics.
+        if category_changed and _informative_label_category(label_category) is not None:
+            if not self.apply_label_category_tracking_mode(track.id, label_category):
+                self._unclassified_track_ids.discard(track.id)
+                return None
         track.iff_category = iff_category if iff_category in _VALID_IFF_CATEGORIES else "unknown"
         if self._field_mode.belief_applies(label_category):
             self._field_mode.apply_belief(track, evidence, display_level=not below_display_threshold)
@@ -308,3 +312,4 @@ class TrackManagerPositionObservationMethods:
         )
         self._update_fingerprint(track.id, classifier_scores)
         self._unclassified_track_ids.discard(track.id)
+        return track

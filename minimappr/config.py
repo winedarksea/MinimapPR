@@ -463,10 +463,11 @@ class TrackingConfig:
     dormant_confidence_half_life_seconds: float = 300.0
     dormant_max_records: int = 64
     # --- Field Mode W2-tracker ---
-    # Perched random-walk filter for these label categories (birds sit, then hop);
-    # other categories keep the 6D constant-velocity Kalman.
-    tracking_perched_filter_enabled: bool = False
-    tracking_perched_label_categories: str = "wildlife"
+    # Which categories hold station (perched random-walk filter: birds sit, then
+    # hop), keep moving (6D constant-velocity Kalman) or are not tracked. Values
+    # and defaults: core/tracking_mode_config.py. The tracking_perched_* keys
+    # below tune the stationary_hold mode.
+    tracking_mode_by_category: dict = field(default_factory=overhaul_defaults.default_tracking_mode_by_category)
     tracking_perched_position_diffusion_m2_per_second: float = 0.05
     # A fix this far from the perch restarts the filter there instead of
     # averaging two perches. Relocation gate: a same-species hop up to
@@ -1510,10 +1511,9 @@ class Settings:
     dormant_confidence_half_life_seconds: float = 300.0
     dormant_max_records: int = 64
     # --- Field Mode W2-tracker ---
-    # Perched random-walk filter for these label categories (birds sit, then hop);
-    # other categories keep the 6D constant-velocity Kalman.
-    tracking_perched_filter_enabled: bool = False
-    tracking_perched_label_categories: str = "wildlife"
+    # stationary_hold tuning (perched random-walk filter: birds sit, then hop).
+    # Which categories use it: tracking_mode_by_category (localization overhaul
+    # block below; core/tracking_mode_config.py).
     tracking_perched_position_diffusion_m2_per_second: float = 0.05
     # A fix this far from the perch restarts the filter there instead of
     # averaging two perches. Relocation gate: a same-species hop up to
@@ -1566,7 +1566,7 @@ class Settings:
     # Direction known -> Pinpointed) replacing the bucketed ReportingFusionPolicy
     # for entity_reporting_label_categories, plus a rules grace window for
     # unlocalized entities. Knob meanings: core/entity_reporting_config.py.
-    entity_reporting_enabled: bool = False
+    entity_reporting_enabled: bool = True
     entity_reporting_label_categories: str = "wildlife"
     entity_absorption_window_seconds: float = 60.0
     entity_absorption_max_fix_distance_m: float = 12.0
@@ -3178,8 +3178,6 @@ class Settings:
             track_drop_multiplier=_env_float("MINIMAPPR_TRACK_DROP_MULTIPLIER", 3.0),
             track_reap_multiplier=_env_float("MINIMAPPR_TRACK_REAP_MULTIPLIER", 5.0),
             # --- Field Mode W2-tracker ---
-            tracking_perched_filter_enabled=_env_bool("MINIMAPPR_TRACKING_PERCHED_FILTER_ENABLED", False),
-            tracking_perched_label_categories=_env_str("MINIMAPPR_TRACKING_PERCHED_LABEL_CATEGORIES", "wildlife"),
             tracking_perched_position_diffusion_m2_per_second=_env_float("MINIMAPPR_TRACKING_PERCHED_POSITION_DIFFUSION_M2_PER_SECOND", 0.05),
             tracking_perched_relocation_snap_distance_m=_env_float("MINIMAPPR_TRACKING_PERCHED_RELOCATION_SNAP_DISTANCE_M", 6.0),
             tracking_perched_relocation_gate_max_m=_env_float("MINIMAPPR_TRACKING_PERCHED_RELOCATION_GATE_MAX_M", 30.0),
@@ -3221,7 +3219,7 @@ class Settings:
             ),
             # --- end Field Mode W3-birdnet-cutover ---
             # --- Field Mode W3-entity ---
-            entity_reporting_enabled=_env_bool("MINIMAPPR_ENTITY_REPORTING_ENABLED", False),
+            entity_reporting_enabled=_env_bool("MINIMAPPR_ENTITY_REPORTING_ENABLED", True),
             entity_reporting_label_categories=_env_str("MINIMAPPR_ENTITY_REPORTING_LABEL_CATEGORIES", "wildlife"),
             entity_absorption_window_seconds=_env_float("MINIMAPPR_ENTITY_ABSORPTION_WINDOW_SECONDS", 60.0),
             entity_absorption_max_fix_distance_m=_env_float("MINIMAPPR_ENTITY_ABSORPTION_MAX_FIX_DISTANCE_M", 12.0),
@@ -3620,8 +3618,7 @@ class Settings:
             dormant_confidence_half_life_seconds=self.dormant_confidence_half_life_seconds,
             dormant_max_records=self.dormant_max_records,
             # --- Field Mode W2-tracker ---
-            tracking_perched_filter_enabled=self.tracking_perched_filter_enabled,
-            tracking_perched_label_categories=self.tracking_perched_label_categories,
+            tracking_mode_by_category=dict(self.tracking_mode_by_category),
             tracking_perched_position_diffusion_m2_per_second=self.tracking_perched_position_diffusion_m2_per_second,
             tracking_perched_relocation_snap_distance_m=self.tracking_perched_relocation_snap_distance_m,
             tracking_perched_relocation_gate_max_m=self.tracking_perched_relocation_gate_max_m,

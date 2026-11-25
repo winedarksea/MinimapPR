@@ -2,14 +2,18 @@
 
 Kept out of ``tracking.py`` so the manager only calls a handful of hooks:
 
+- per-category tracking modes (``core/tracking_mode_config.py``): the
+  ``stationary_hold`` dynamics (perched filter, relocation gate, concurrent-perch
+  guard) for the categories that use it, wildlife by default;
 - species belief (per-track capped log-odds) replacing the single-label
   overwrite, plus the display threshold that hides tentative tracks;
 - the perched relocation gate (a 10-30 m hop with a matching species and no
   nearer same-species track is the same bird on a new perch);
 - partial-constraint binding of unpositioned detections to recent tracks.
 
-Every behaviour is off unless its ``TrackingConfig`` flag is set, in which case
-the manager behaves exactly as before.
+Species belief and partial binding stay off unless their ``TrackingConfig``
+flags are set. With no category in ``stationary_hold`` the manager runs the
+constant-velocity filter for every track.
 """
 
 from __future__ import annotations
@@ -45,6 +49,7 @@ from minimappr.core.track_species_belief import (
     SpeciesLogOddsBelief,
     species_evidence_from_detection,
 )
+from minimappr.core.tracking_mode_config import TrackingMode, TrackingModeConfig
 from minimappr.interfaces import TrackFilter
 from minimappr.models import TrackState, TrackStatus
 
@@ -65,13 +70,11 @@ class FieldModeTrackExtensions:
     """Species belief, relocation gate and partial binding for one TrackManager."""
 
     def __init__(self, cfg) -> None:
-        self.perched_filter_enabled = bool(getattr(cfg, "tracking_perched_filter_enabled", False))
+        self.tracking_modes = TrackingModeConfig.from_mapping(getattr(cfg, "tracking_mode_by_category", None))
+        self.stationary_hold_enabled = self.tracking_modes.any_category_uses(TrackingMode.STATIONARY_HOLD)
         self.species_log_odds_enabled = bool(getattr(cfg, "tracking_species_log_odds_enabled", False))
         self.partial_binding_enabled = bool(
             getattr(cfg, "tracking_partial_constraint_binding_enabled", False)
-        )
-        self._perched_label_categories = parse_label_category_set(
-            getattr(cfg, "tracking_perched_label_categories", "wildlife")
         )
         self._belief_label_categories = parse_label_category_set(
             getattr(cfg, "tracking_species_log_odds_label_categories", "wildlife")
@@ -120,7 +123,7 @@ class FieldModeTrackExtensions:
             ),
         )
         self._concurrent_perch_guard = ConcurrentPerchGuardConfig(
-            enabled=self.perched_filter_enabled
+            enabled=self.stationary_hold_enabled
             and bool(getattr(cfg, "tracking_perched_concurrent_perch_guard_enabled", True)),
             snap_distance_m=float(getattr(cfg, "tracking_perched_relocation_snap_distance_m", 6.0)),
             min_silence_seconds=float(getattr(cfg, "tracking_perched_relocation_min_silence_seconds", 2.0)),
@@ -140,8 +143,8 @@ class FieldModeTrackExtensions:
     # -- filter construction --------------------------------------------------
 
     def wrap_filter(self, constant_velocity_filter: TrackFilter, cfg) -> TrackFilter:
-        """Route perched categories to the random-walk filter when flagged."""
-        if not self.perched_filter_enabled:
+        """Route ``stationary_hold`` categories to the random-walk filter."""
+        if not self.stationary_hold_enabled:
             return constant_velocity_filter
         perched = PerchedRandomWalkTrackFilter(
             position_diffusion_m2_per_second=float(
@@ -156,7 +159,7 @@ class FieldModeTrackExtensions:
         return MotionModelRoutingTrackFilter(
             constant_velocity_filter=constant_velocity_filter,
             perched_filter=perched,
-            perched_label_categories=self._perched_label_categories,
+            tracking_modes=self.tracking_modes,
         )
 
     # -- species belief ---------------------------------------------------------
@@ -175,8 +178,8 @@ class FieldModeTrackExtensions:
         species_evidence: dict[str, float] | None,
         winner_member: str | None = None,
     ) -> dict[str, float]:
-        if not (self.species_log_odds_enabled or self.perched_filter_enabled or self.partial_binding_enabled):
-            # Nothing consumes evidence with every flag off; skip the work.
+        if not (self.species_log_odds_enabled or self.stationary_hold_enabled or self.partial_binding_enabled):
+            # Nothing consumes evidence; skip the work.
             return {}
         if species_evidence is not None:
             return dict(species_evidence)
@@ -290,7 +293,7 @@ class FieldModeTrackExtensions:
         tracks: Iterable[TrackState],
         track_filter: TrackFilter,
     ) -> str | None:
-        if not self.perched_filter_enabled or not isinstance(track_filter, MotionModelRoutingTrackFilter):
+        if not self.stationary_hold_enabled or not isinstance(track_filter, MotionModelRoutingTrackFilter):
             return None
         if not track_filter.category_is_perched(label_category) or not evidence:
             return None
@@ -311,9 +314,9 @@ class FieldModeTrackExtensions:
         label_category: str,
         evidence: dict[str, float],
     ) -> RelocationGhost | None:
-        if not self.perched_filter_enabled or not evidence:
+        if not self.stationary_hold_enabled or not evidence:
             return None
-        if _normalised_label(label_category) not in self._perched_label_categories:
+        if not self.tracking_modes.holds_station(label_category):
             return None
         return self.relocation_gate.find_ghost_hit(
             timestamp_ns=timestamp_ns,

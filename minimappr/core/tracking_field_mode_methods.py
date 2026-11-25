@@ -46,7 +46,7 @@ class TrackManagerFieldModeMethods:
         On a bind the track's species belief and recency update and its position
         gets a soft nudge toward the constraint (see ``track_partial_binding``).
         """
-        if not self._field_mode.partial_binding_enabled:
+        if not self._field_mode.partial_binding_enabled or not self.tracks_category(label_category):
             return None
         async with self._lock:
             self._age_tracks(timestamp_ns)

@@ -1,5 +1,6 @@
 //! Configuration of the perched wildlife tracker. Defaults are the server's
-//! (`TrackingConfig` with the S3 flags on and the wildlife stale time).
+//! (`TrackingConfig` with wildlife in `stationary_hold`, species log-odds on,
+//! and the wildlife stale time).
 
 use super::nearest_neighbor_association::NearestNeighborAssociationConfig;
 use super::perched_concurrency::ConcurrentPerchGuardConfig;

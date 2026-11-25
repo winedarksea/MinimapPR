@@ -18,6 +18,12 @@ Scoring choices (``docs/field_mode_progress/server_track_gate.md``):
   whose track is not visible are dropped (they are persisted for belief only),
   and with entity reporting each row carries its entity id (entities are memory
   only; the DB row does not store it).
+
+Each configuration sets every stream explicitly. Since localization overhaul
+milestone 3, S3 is the ``stationary_hold`` tracking mode and the wildlife
+default, and S6 defaults on; ``baseline`` still turns every stream off, so its
+wildlife run ``continuous_motion`` without entities (pre-milestone-3 behaviour,
+comparable with older matrices). ``shipped_defaults`` overrides nothing.
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ from minimappr.classifiers.factory import create_context_classifier
 from minimappr.classifiers.routing import CONTEXT_DETECTION_TRIGGER, ContextSpec, apply_settings, default_routing
 from minimappr.config import Settings
 from minimappr.core import onset_srp_localization_stage
+from minimappr.core.tracking_mode_config import TrackingMode, tracking_mode_by_category_with
 from minimappr.sim import sim_scenario_scoring as scoring
 from minimappr.sim.fixture_audio_scenarios import (
     build_species_gate_scenario,
@@ -45,11 +52,14 @@ from minimappr.sim.fixture_audio_scenarios import (
 from minimappr.sim.graded_species_oracle import ABSTENTION_LABEL, build_graded_oracle_for_settings
 from minimappr.sim.replay import build_fusion_for_bundle, evaluate_bundle, replay_bundle
 
-# Stream -> flags it turns on. S5 attribution requires onset clustering (config
-# validation), so its "alone" row carries S2 as well.
-STREAM_FLAGS: dict[str, dict[str, bool]] = {
+# Stream -> settings that turn it on. S5 attribution requires onset clustering
+# (config validation), so its "alone" row carries S2 as well. The name
+# S3_perched_filter is kept so matrices from before the mode setting compare.
+STREAM_FLAGS: dict[str, dict[str, Any]] = {
     "S2_onset_clustering": {"localization_onset_clustering_enabled": True},
-    "S3_perched_filter": {"tracking_perched_filter_enabled": True},
+    "S3_perched_filter": {
+        "tracking_mode_by_category": tracking_mode_by_category_with("wildlife", TrackingMode.STATIONARY_HOLD)
+    },
     "S3_species_log_odds": {"tracking_species_log_odds_enabled": True},
     "S4_partial_binding": {"tracking_partial_constraint_binding_enabled": True},
     "S4_two_threshold": {"birdnet_two_threshold_enabled": True},
@@ -57,8 +67,15 @@ STREAM_FLAGS: dict[str, dict[str, bool]] = {
     "S5_relative_trigger": {"trigger_noise_floor_relative_enabled": True},
     "S6_entity_reporting": {"entity_reporting_enabled": True},
 }
+# Stream -> settings that turn it off, where that is not every flag False.
+STREAM_OFF_SETTINGS: dict[str, dict[str, Any]] = {
+    "S3_perched_filter": {
+        "tracking_mode_by_category": tracking_mode_by_category_with("wildlife", TrackingMode.CONTINUOUS_MOTION)
+    },
+}
 STREAM_PREREQUISITES: dict[str, tuple[str, ...]] = {"S5_attribution": ("S2_onset_clustering",)}
 BASELINE = "baseline"
+SHIPPED_DEFAULTS = "shipped_defaults"
 ALL_ON = "all_on"
 ALONE_PREFIX = "only:"
 LEAVE_ONE_OUT_PREFIX = "all_on-minus:"
@@ -118,9 +135,18 @@ ENTITY_KEYS = (
 )
 
 
-def configuration_flags(name: str) -> dict[str, bool]:
-    """Flag overrides for a named configuration (every stream flag set explicitly)."""
+def stream_settings(stream: str, *, enabled: bool) -> dict[str, Any]:
+    if enabled:
+        return dict(STREAM_FLAGS[stream])
+    return dict(STREAM_OFF_SETTINGS.get(stream) or {flag: False for flag in STREAM_FLAGS[stream]})
+
+
+def configuration_flags(name: str) -> dict[str, Any]:
+    """Settings overrides for a named configuration (every stream set explicitly,
+    except ``shipped_defaults``, which overrides nothing)."""
     enabled: set[str]
+    if name == SHIPPED_DEFAULTS:
+        return {}
     if name == BASELINE:
         enabled = set()
     elif name == ALL_ON:
@@ -137,9 +163,9 @@ def configuration_flags(name: str) -> dict[str, bool]:
         raise ValueError(f"unknown configuration {name!r}")
     if any(s not in STREAM_FLAGS for s in enabled):
         raise ValueError(f"unknown stream in configuration {name!r}")
-    flags = {flag: False for stream_flags in STREAM_FLAGS.values() for flag in stream_flags}
-    for stream in enabled:
-        flags.update(STREAM_FLAGS[stream])
+    flags: dict[str, Any] = {}
+    for stream in STREAM_FLAGS:
+        flags.update(stream_settings(stream, enabled=stream in enabled))
     return flags
 
 

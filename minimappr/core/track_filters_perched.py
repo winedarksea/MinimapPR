@@ -13,8 +13,10 @@ in would smear the track halfway between perches, so the filter re-initialises
 at the new fix instead (velocity stays zero either way).
 
 ``MotionModelRoutingTrackFilter`` routes each track to this filter or to the
-existing constant-velocity filter by label category, so drones and vehicles
-keep the 6D model while wildlife tracks are perched.
+existing constant-velocity filter by its label category's tracking mode
+(``core/tracking_mode_config.py``): ``stationary_hold`` categories (wildlife by
+default) are perched, ``continuous_motion`` ones (drones, vehicles) keep the 6D
+model.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from minimappr.core.tracking_mode_config import TrackingModeConfig
 from minimappr.interfaces import TrackFilter
 from minimappr.models import TrackState
 
@@ -188,9 +191,9 @@ class PerchedRandomWalkTrackFilter:
 class MotionModelRoutingTrackFilter:
     """Routes each track to the perched or the constant-velocity filter.
 
-    The route is chosen per track from its label category (see
+    The route is chosen per track from its label category's tracking mode (see
     ``set_track_motion_category``) and defaults to constant velocity, so a
-    track whose category is unknown behaves exactly as before.
+    track without a label moves like any ``continuous_motion`` track.
     """
 
     def __init__(
@@ -198,11 +201,11 @@ class MotionModelRoutingTrackFilter:
         *,
         constant_velocity_filter: TrackFilter,
         perched_filter: PerchedRandomWalkTrackFilter,
-        perched_label_categories: frozenset[str],
+        tracking_modes: TrackingModeConfig,
     ) -> None:
         self._constant_velocity_filter = constant_velocity_filter
         self._perched_filter = perched_filter
-        self._perched_label_categories = perched_label_categories
+        self._tracking_modes = tracking_modes
         self._perched_track_ids: set[str] = set()
 
     @property
@@ -213,7 +216,7 @@ class MotionModelRoutingTrackFilter:
         return track_id in self._perched_track_ids
 
     def category_is_perched(self, label_category: str) -> bool:
-        return (label_category or "").strip().lower() in self._perched_label_categories
+        return self._tracking_modes.holds_station(label_category)
 
     def set_track_motion_category(
         self, track_id: str, label_category: str, position_m: tuple[float, float, float]

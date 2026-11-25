@@ -199,11 +199,12 @@ class PositionObservationPipeline:
         *,
         solve_id: str | None,
         classified_update_kwargs: dict[str, Any],
-    ) -> "TrackState":
+    ) -> "TrackState | None":
         """The track a classified solve belongs to, its position applied exactly once.
 
         ``classified_update_kwargs`` are the ``TrackManager.update`` keywords the
-        classified-detection path used before P5.
+        classified-detection path used before P5. ``None`` when the label's
+        category is not tracked (tracking mode ``none``).
         """
         tracker = self._tracker_provider()
         entry = self._ledger.get(solve_id) if solve_id is not None else None
@@ -226,13 +227,14 @@ class PositionObservationPipeline:
             else:
                 track = await tracker.update_with_classification(**classified_update_kwargs)
                 metrics.position_observation_classified_updates += 1
-            # Any later classification of this solve (a covering render) attaches only its label.
-            entry.state = SolveLedgerState.APPLIED
-            entry.track_id = track.id
+            if track is not None:
+                # Any later classification of this solve (a covering render) attaches only its label.
+                entry.state = SolveLedgerState.APPLIED
+                entry.track_id = track.id
             return track
 
     @staticmethod
-    async def _classified_update(tracker: Any, classified_update_kwargs: dict[str, Any]) -> "TrackState":
+    async def _classified_update(tracker: Any, classified_update_kwargs: dict[str, Any]) -> "TrackState | None":
         if isinstance(tracker, TrackManagerPositionObservationMethods):
             return await tracker.update_with_classification(**classified_update_kwargs)
         return await tracker.update(**classified_update_kwargs)

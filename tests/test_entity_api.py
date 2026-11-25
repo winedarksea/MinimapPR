@@ -24,7 +24,7 @@ def _configure_env(monkeypatch, tmp_path: Path, *, entity_enabled: bool) -> None
     monkeypatch.setenv("MINIMAPPR_ENTITY_NOTIFICATION_GRACE_SECONDS", "0")
 
 
-def test_entities_endpoint_disabled_by_default(monkeypatch, tmp_path: Path) -> None:
+def test_entities_endpoint_disabled_when_flag_off(monkeypatch, tmp_path: Path) -> None:
     _configure_env(monkeypatch, tmp_path, entity_enabled=False)
     with TestClient(app) as client:
         body = client.get("/api/v1/entities").json()

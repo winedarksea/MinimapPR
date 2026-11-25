@@ -1,7 +1,9 @@
 //! Server-track wildlife tracking ported from the Python reference (S3 gate
 //! verdict "PASS: port"): the perched random-walk filter, the relocation gate
 //! with ghost revert and its concurrency guard, capped species log-odds and
-//! the species association gate, composed into [`perched_tracker`].
+//! the species association gate, composed into [`perched_tracker`]: the
+//! `stationary_hold` dynamics of the per-category [`tracking_mode`] setting
+//! (wildlife's default).
 //!
 //! Sans-IO and allocation-light: time is the caller's nanoseconds, no clocks,
 //! threads or randomness. Python↔Rust parity: `tests/test_wildlife_tracking_cross_language_parity.py`.
@@ -15,6 +17,7 @@ pub mod perched_tracker;
 pub mod species_association_gate;
 pub mod species_log_odds;
 pub mod tracker_config;
+pub mod tracking_mode;
 pub mod wildlife_track;
 
 pub type TrackId = u64;
