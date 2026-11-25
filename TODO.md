@@ -266,10 +266,7 @@ Branch `localization-core-overhaul`, not merged to main and not deployed. All fi
 
 Contract: `docs/localization_solve_contract.md`; tracking: `docs/tracking.md`; capture: `docs/field_capture_protocol.md`; bake-off: `docs/point_network_bakeoff.md`.
 
-- [ ] **Clock steps and drift (owner decision)** — buffer timelines are anchored at the first packet and never re-anchored below `max_buffer_seconds`.
-  - At about 20 ppm drift a node passes the 10 ms residual hard limit after about 8 min and loses its cross-node pairs until its stream goes stale.
-  - A single 10 ms–buffer-length timestamp step (for example an SNTP re-sync) does the same.
-  - Recommendation: re-anchor a node's timeline when a step is detected, or once the residual passes a fraction of the limit.
+- [x] **Clock steps and drift (owner decision)** — done on branch `loc/clock-reanchor`: a confirmed step re-anchors the node's buffer timeline and drift past half the 10 ms limit is slewed (origin shift only, no audio dropped; both ingest paths; `docs/localization_solve_contract.md` section 7, timeline discipline).
 - [ ] **Kilometre-range cross-node events need settings** — `localization_coverage_total_cap_seconds` ≥ 3 s, and a trigger cooldown longer than the cross-node lag. The default 1 s cap limits the event span to about 340 m.
 - [ ] **GCC-PHAT front end loses point-network calls** (E8):
   - the 50–3430 Hz band discards most of a 3.4–7 kHz call;

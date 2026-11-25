@@ -136,9 +136,11 @@ async fn a_21_ms_step_inside_one_binary_upload_reaches_node_timing() {
         timing.last_timestamp_step_ns,
         Some(IN_UPLOAD_STEP_NS as i64)
     );
-    // The buffer anchored at the upload's first packet, so the stepped frames
-    // sit 21 ms off their packet times.
-    assert_eq!(timing.timeline_residual_ns, Some(IN_UPLOAD_STEP_NS as i64));
+    // Frames 20..22 confirm the step and the node's timeline re-anchors on
+    // it, so the stepped frames sit on their packet times again; the step
+    // penalty still carries the step's size into the uncertainty.
+    assert_eq!(timing.timeline_step_reanchor_count, 1);
+    assert_eq!(timing.timeline_residual_ns, Some(0));
     let expected_uncertainty_s = IN_UPLOAD_STEP_NS as f64 / 1e9;
     assert!((timing.clock_offset_std_s.unwrap() - expected_uncertainty_s).abs() < 1e-12);
     for sensor in provenance
@@ -152,7 +154,7 @@ async fn a_21_ms_step_inside_one_binary_upload_reaches_node_timing() {
 }
 
 /// Shifts every frame of a store-forward manifest's payload by `offset_ns`.
-fn shift_packet_time(manifest: &mut DspManifest, offset_ns: u64) {
+pub(super) fn shift_packet_time(manifest: &mut DspManifest, offset_ns: u64) {
     let raw_payload = manifest.raw_payload.as_ref().expect("in-memory payload");
     let mut payload: serde_json::Value = serde_json::from_slice(raw_payload).unwrap();
     for buffered in payload["buffered_frames"].as_array_mut().unwrap() {
@@ -218,7 +220,16 @@ async fn a_parked_solve_publishes_the_clock_snapshot_it_triggered_with() {
 async fn a_residual_over_the_hard_limit_drops_only_that_nodes_cross_node_pairs() {
     const STEP_FRAME: usize = 10;
     const FRAME_COUNT: usize = 40;
-    let mut harness = RaceHarness::new(race_config(true)).await;
+    // The gate itself, with the timeline discipline off (on, the step would
+    // be re-anchored: `dsp_worker_timeline_discipline_tests.rs`).
+    let mut config = race_config(true);
+    config
+        .localization_solve
+        .localization_timeline_step_reanchor_enabled = false;
+    config
+        .localization_solve
+        .localization_timeline_drift_slew_fraction = 0.0;
+    let mut harness = RaceHarness::new(config).await;
     // Coverage wait on, so each solve waits for node b's same frame.
     // Node b's clock steps 21 ms at frame 10; its buffer stays anchored at its
     // first packet, so the residual (21 ms) stays over the 10 ms hard limit.

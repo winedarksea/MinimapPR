@@ -42,6 +42,7 @@ from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.tracking import TrackManager
 from minimappr.core.zones import ZoneMatcher
 from minimappr.core.audio_buffer import MultiSensorBuffer
+from minimappr.core.timeline_discipline import TimelineDisciplinePolicy
 from minimappr.models import GeoPoint, TrackState
 from minimappr.storage.db import Storage
 
@@ -242,7 +243,10 @@ def _build_combined_runtime_core_services(
 ) -> _CombinedRuntimeCoreServices:
     registry = NodeRegistry()
     cluster_registry = ClusterRegistry()
-    audio_buffer = MultiSensorBuffer(max_duration_seconds=localization_cfg.max_sensor_buffer_seconds)
+    audio_buffer = MultiSensorBuffer(
+        max_duration_seconds=localization_cfg.max_sensor_buffer_seconds,
+        timeline_discipline_policy=TimelineDisciplinePolicy.from_settings(settings),
+    )
     localizer = build_localizer_from_settings(localization_cfg)
     classifier = classifier_factory(settings)
     tracker = TrackManager(tracking_cfg)

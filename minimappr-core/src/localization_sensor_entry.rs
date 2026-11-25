@@ -222,6 +222,13 @@ pub struct NodeTimingEvidence {
     /// Signed size of the most recent detected timestamp step; null if none.
     pub last_timestamp_step_ns: Option<i64>,
     pub timestamp_step_count: u64,
+    /// Confirmed steps the node's buffer timeline was re-anchored on (absent
+    /// in manifests from before the timeline discipline: 0).
+    #[serde(default)]
+    pub timeline_step_reanchor_count: u64,
+    /// Drift slews of the node's buffer timeline origin (absent: 0).
+    #[serde(default)]
+    pub timeline_drift_slew_count: u64,
 }
 
 /// `localization.solve_provenance`.
@@ -425,7 +432,9 @@ mod tests {
                     "clock_offset_std_s": 1e-6,
                     "timeline_residual_ns": 1200,
                     "last_timestamp_step_ns": null,
-                    "timestamp_step_count": 0
+                    "timestamp_step_count": 0,
+                    "timeline_step_reanchor_count": 0,
+                    "timeline_drift_slew_count": 0
                 },
                 {
                     "node_id": "point-b",
@@ -433,7 +442,9 @@ mod tests {
                     "clock_offset_std_s": 0.002,
                     "timeline_residual_ns": 15000000,
                     "last_timestamp_step_ns": -21000000,
-                    "timestamp_step_count": 1
+                    "timestamp_step_count": 1,
+                    "timeline_step_reanchor_count": 0,
+                    "timeline_drift_slew_count": 2
                 }
             ],
             "window_center_time_ns": 1764000000016000000_i64,
@@ -447,6 +458,17 @@ mod tests {
         let example = contract_doc_solve_provenance_example();
         let parsed: SolveProvenance = serde_json::from_value(example.clone()).unwrap();
         assert_eq!(serde_json::to_value(&parsed).unwrap(), example);
+    }
+
+    #[test]
+    fn node_timing_without_timeline_correction_counts_reads_as_zero() {
+        let legacy: NodeTimingEvidence = serde_json::from_value(serde_json::json!({
+            "node_id": "planar-a", "time_quality": "gps_locked", "clock_offset_std_s": 1e-6,
+            "timeline_residual_ns": 1200, "last_timestamp_step_ns": null, "timestamp_step_count": 0
+        }))
+        .unwrap();
+        assert_eq!(legacy.timeline_step_reanchor_count, 0);
+        assert_eq!(legacy.timeline_drift_slew_count, 0);
     }
 
     #[test]

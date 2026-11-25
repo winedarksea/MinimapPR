@@ -39,6 +39,16 @@ pub struct LocalizationSolveConfig {
     pub localization_clock_unknown_uncertainty_seconds: f64,
     pub localization_timestamp_step_threshold_seconds: f64,
     pub localization_timestamp_step_recovery_holdoff_seconds: f64,
+    /// Re-anchor a node's buffer timeline on a confirmed timestamp step
+    /// (`minimappr_core::timeline_discipline`); off keeps the pre-2026-11-25
+    /// behaviour (residual stays, the hard-limit gate drops the node's pairs).
+    pub localization_timeline_step_reanchor_enabled: bool,
+    /// Frames on the stepped clock (flagged frame included) before re-anchoring;
+    /// a frame back on the old timeline first cancels it as jitter.
+    pub localization_timestamp_step_confirm_frames: usize,
+    /// Drift slew once the windowed residual passes this fraction of
+    /// `localization_cross_node_max_timeline_residual_seconds`; 0 disables.
+    pub localization_timeline_drift_slew_fraction: f64,
     pub localization_trigger_noise_floor_relative_enabled: bool,
     pub localization_trigger_noise_floor_relative_db: f32,
     /// Reference-channel RMS floor relative to the node's tracked noise floor.
@@ -66,6 +76,9 @@ impl Default for LocalizationSolveConfig {
             localization_clock_unknown_uncertainty_seconds: 0.005,
             localization_timestamp_step_threshold_seconds: 0.002,
             localization_timestamp_step_recovery_holdoff_seconds: 30.0,
+            localization_timeline_step_reanchor_enabled: true,
+            localization_timestamp_step_confirm_frames: 3,
+            localization_timeline_drift_slew_fraction: 0.5,
             localization_trigger_noise_floor_relative_enabled: true,
             localization_trigger_noise_floor_relative_db: 8.0,
             localization_solver_floor_relative_db: 3.0,
@@ -150,6 +163,28 @@ pub struct LocalizationSolveArgs {
 
     #[arg(
         long,
+        env = "MINIMAPPR_LOCALIZATION_TIMELINE_STEP_REANCHOR_ENABLED",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    localization_timeline_step_reanchor_enabled: bool,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_TIMESTAMP_STEP_CONFIRM_FRAMES",
+        default_value_t = 3
+    )]
+    localization_timestamp_step_confirm_frames: usize,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_TIMELINE_DRIFT_SLEW_FRACTION",
+        default_value_t = 0.5
+    )]
+    localization_timeline_drift_slew_fraction: f64,
+
+    #[arg(
+        long,
         env = "MINIMAPPR_LOCALIZATION_TRIGGER_NOISE_FLOOR_RELATIVE_ENABLED",
         default_value_t = true,
         action = clap::ArgAction::Set
@@ -203,6 +238,12 @@ impl LocalizationSolveArgs {
                 .localization_timestamp_step_threshold_seconds,
             localization_timestamp_step_recovery_holdoff_seconds: self
                 .localization_timestamp_step_recovery_holdoff_seconds,
+            localization_timeline_step_reanchor_enabled: self
+                .localization_timeline_step_reanchor_enabled,
+            localization_timestamp_step_confirm_frames: self
+                .localization_timestamp_step_confirm_frames,
+            localization_timeline_drift_slew_fraction: self
+                .localization_timeline_drift_slew_fraction,
             localization_trigger_noise_floor_relative_enabled: self
                 .localization_trigger_noise_floor_relative_enabled,
             localization_trigger_noise_floor_relative_db: self

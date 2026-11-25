@@ -71,6 +71,8 @@ fn assessment(
         last_timestamp_step_ns: None,
         timestamp_step_count: 0,
         residual_over_hard_limit,
+        timeline_step_reanchor_count: 0,
+        timeline_drift_slew_count: 0,
     }
 }
 

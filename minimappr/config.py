@@ -1814,6 +1814,15 @@ class Settings:
     localization_timestamp_step_recovery_holdoff_seconds: float = (
         overhaul_defaults.DEFAULT_LOCALIZATION_TIMESTAMP_STEP_RECOVERY_HOLDOFF_SECONDS
     )
+    localization_timeline_step_reanchor_enabled: bool = (
+        overhaul_defaults.DEFAULT_LOCALIZATION_TIMELINE_STEP_REANCHOR_ENABLED
+    )
+    localization_timestamp_step_confirm_frames: int = (
+        overhaul_defaults.DEFAULT_LOCALIZATION_TIMESTAMP_STEP_CONFIRM_FRAMES
+    )
+    localization_timeline_drift_slew_fraction: float = (
+        overhaul_defaults.DEFAULT_LOCALIZATION_TIMELINE_DRIFT_SLEW_FRACTION
+    )
     localization_trigger_noise_floor_relative_enabled: bool = (
         overhaul_defaults.DEFAULT_LOCALIZATION_TRIGGER_NOISE_FLOOR_RELATIVE_ENABLED
     )
@@ -3447,6 +3456,18 @@ class Settings:
             localization_timestamp_step_recovery_holdoff_seconds=_env_float(
                 "MINIMAPPR_LOCALIZATION_TIMESTAMP_STEP_RECOVERY_HOLDOFF_SECONDS",
                 overhaul_defaults.DEFAULT_LOCALIZATION_TIMESTAMP_STEP_RECOVERY_HOLDOFF_SECONDS,
+            ),
+            localization_timeline_step_reanchor_enabled=_env_bool(
+                "MINIMAPPR_LOCALIZATION_TIMELINE_STEP_REANCHOR_ENABLED",
+                overhaul_defaults.DEFAULT_LOCALIZATION_TIMELINE_STEP_REANCHOR_ENABLED,
+            ),
+            localization_timestamp_step_confirm_frames=_env_int(
+                "MINIMAPPR_LOCALIZATION_TIMESTAMP_STEP_CONFIRM_FRAMES",
+                overhaul_defaults.DEFAULT_LOCALIZATION_TIMESTAMP_STEP_CONFIRM_FRAMES,
+            ),
+            localization_timeline_drift_slew_fraction=_env_float(
+                "MINIMAPPR_LOCALIZATION_TIMELINE_DRIFT_SLEW_FRACTION",
+                overhaul_defaults.DEFAULT_LOCALIZATION_TIMELINE_DRIFT_SLEW_FRACTION,
             ),
             localization_trigger_noise_floor_relative_enabled=_env_bool(
                 "MINIMAPPR_LOCALIZATION_TRIGGER_NOISE_FLOOR_RELATIVE_ENABLED",

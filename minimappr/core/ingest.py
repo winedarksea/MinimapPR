@@ -556,6 +556,7 @@ class IngestProcessor:
                     end_time_ns=buffer_end_time_ns,
                     time_quality=frame.time_quality.value,
                     sequence=frame.sequence,
+                    timeline_on_packet_time=not buffer_uses_receipt_time,
                 )
                 if self._persist_observations_on_ingest:
                     await self._registry.record_observation(

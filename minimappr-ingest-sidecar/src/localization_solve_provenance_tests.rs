@@ -123,6 +123,8 @@ fn node_timing_and_sensor_clock_fields_come_from_the_payload_snapshot() {
                 last_timestamp_step_ns: step,
                 timestamp_step_count: count,
                 residual_over_hard_limit: false,
+                timeline_step_reanchor_count: count,
+                timeline_drift_slew_count: 2 * count,
             },
         )
     };
@@ -161,10 +163,12 @@ fn node_timing_and_sensor_clock_fields_come_from_the_payload_snapshot() {
         wire["node_timing"],
         serde_json::json!([
             {"node_id": "planar-a", "time_quality": "gps_locked", "clock_offset_std_s": 1e-6,
-             "timeline_residual_ns": 1200, "last_timestamp_step_ns": null, "timestamp_step_count": 0},
+             "timeline_residual_ns": 1200, "last_timestamp_step_ns": null, "timestamp_step_count": 0,
+             "timeline_step_reanchor_count": 0, "timeline_drift_slew_count": 0},
             {"node_id": "point-b", "time_quality": "ntp_disciplined", "clock_offset_std_s": 0.021,
              "timeline_residual_ns": 15_000_000, "last_timestamp_step_ns": -21_000_000,
-             "timestamp_step_count": 1}
+             "timestamp_step_count": 1, "timeline_step_reanchor_count": 1,
+             "timeline_drift_slew_count": 2}
         ])
     );
     assert_eq!(wire["sensors"][0]["clock_source"], "gps_locked");

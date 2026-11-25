@@ -137,6 +137,12 @@ pub struct DspWorkerState {
     /// large frame jumps). Mirrors `SensorStreamBuffer.reanchor_count` on the
     /// Python side. Visible degradation signal for long-uptime timeline drift.
     pub total_buffer_reanchors: u64,
+    /// Node timeline step re-anchors / drift slews (origin shifts that keep
+    /// the audio, `timeline_discipline.rs`). Mirror the Python per-sensor
+    /// `timeline_step_reanchor_count` / `timeline_drift_slew_count`, counted
+    /// once per node correction here (once per channel buffer in Python).
+    pub total_timeline_step_reanchors: u64,
+    pub total_timeline_drift_slews: u64,
     /// `compute_manifest_frame` returned None because the requested audio
     /// window fell outside the buffer's coverage. Mirrors the Python
     /// `localization_drops_by_reason["no_window"]` counter — both are the
@@ -527,6 +533,19 @@ impl DspWorker {
         st.total_buffer_reanchors = st.total_buffer_reanchors.saturating_add(count);
     }
 
+    async fn note_buffer_timeline_corrections(&self, corrections: NodeTimelineCorrections) {
+        if corrections.is_empty() {
+            return;
+        }
+        let mut st = self.state.write().await;
+        st.total_timeline_step_reanchors = st
+            .total_timeline_step_reanchors
+            .saturating_add(u64::from(corrections.step_reanchors));
+        st.total_timeline_drift_slews = st
+            .total_timeline_drift_slews
+            .saturating_add(u64::from(corrections.drift_slews));
+    }
+
     /// Evict per-stream entries (buffers, audio state, cadence timestamps) for
     /// streams that have not produced a heartbeat in `stream_inactivity_evict_seconds`.
     /// Mirrors the leases.rs `purge_expired_*` idiom. Called once per minute from
@@ -654,6 +673,9 @@ mod dsp_worker_never_streamed_member_tests;
 #[cfg(test)]
 #[path = "dsp_worker_clock_evidence_tests.rs"]
 mod dsp_worker_clock_evidence_tests;
+#[cfg(test)]
+#[path = "dsp_worker_timeline_discipline_tests.rs"]
+mod dsp_worker_timeline_discipline_tests;
 
 #[cfg(test)]
 #[path = "dsp_worker_test_node_fixtures.rs"]

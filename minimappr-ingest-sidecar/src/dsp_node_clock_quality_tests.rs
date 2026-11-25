@@ -20,6 +20,16 @@ fn config() -> LocalizationSolveConfig {
     LocalizationSolveConfig::default()
 }
 
+/// The gate as it behaves with no timeline discipline: these tests feed a
+/// fixed buffer timeline, which a step re-anchor or drift slew would move.
+fn config_without_timeline_discipline() -> LocalizationSolveConfig {
+    LocalizationSolveConfig {
+        localization_timeline_step_reanchor_enabled: false,
+        localization_timeline_drift_slew_fraction: 0.0,
+        ..LocalizationSolveConfig::default()
+    }
+}
+
 /// One upload of `frame_count` contiguous frames starting at `first_frame`;
 /// `extra_ns(frame)` is added to each frame's nominal packet time.
 struct Upload {
@@ -209,7 +219,7 @@ fn measured_residual_against_the_buffer_timeline_widens_and_is_reported() {
 
 #[test]
 fn residual_over_the_hard_limit_is_flagged_only_when_measured_over_it() {
-    let defaults = config();
+    let defaults = config_without_timeline_discipline();
     let limit_ns =
         (defaults.localization_cross_node_max_timeline_residual_seconds * 1e9).round() as i128;
     let mut tracker = NodeClockQualityTracker::new(&defaults);
@@ -244,8 +254,8 @@ fn residual_over_the_hard_limit_is_flagged_only_when_measured_over_it() {
 }
 
 #[test]
-fn a_step_inside_one_upload_on_an_unmoved_buffer_timeline_stays_over_the_limit() {
-    let mut tracker = NodeClockQualityTracker::new(&config());
+fn with_step_reanchor_off_a_step_on_an_unmoved_buffer_timeline_stays_over_the_limit() {
+    let mut tracker = NodeClockQualityTracker::new(&config_without_timeline_discipline());
     observe(
         &mut tracker,
         &Upload::gps(0, 20),
@@ -468,7 +478,7 @@ fn a_single_late_frame_does_not_flip_the_hard_limit_gate() {
 
 #[test]
 fn the_hard_limit_flag_clears_only_under_the_hysteresis_ratio() {
-    let defaults = config();
+    let defaults = config_without_timeline_discipline();
     let limit_seconds = defaults.localization_cross_node_max_timeline_residual_seconds;
     let clear_seconds =
         limit_seconds * defaults.localization_timeline_residual_over_limit_clear_ratio;

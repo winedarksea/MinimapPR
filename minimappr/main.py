@@ -5586,6 +5586,14 @@ async def get_system_diagnostics(request: Request) -> dict:
                 "total_buffer_reanchors": dsp_status_raw.get(
                     "total_buffer_reanchors", 0
                 ),
+                # Timeline discipline origin shifts (no audio dropped); the
+                # Python mirror is per-sensor in fusion status buffer_state.
+                "total_timeline_step_reanchors": dsp_status_raw.get(
+                    "total_timeline_step_reanchors", 0
+                ),
+                "total_timeline_drift_slews": dsp_status_raw.get(
+                    "total_timeline_drift_slews", 0
+                ),
                 "total_window_underrun_drops": dsp_status_raw.get(
                     "total_window_underrun_drops", 0
                 ),

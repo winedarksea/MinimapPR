@@ -191,17 +191,21 @@ On site:
   disagrees with the sample count by more than
   `localization_timestamp_step_threshold_seconds` (2 ms). The sidecar raises
   the node's uncertainty to the step size until it has stayed clean for
-  `localization_timestamp_step_recovery_holdoff_seconds` (30 s). The validator
-  finds steps in the per-frame table (`timestamp_step_detected`), including a
-  step inside a single upload. A session with a step is still usable; note
-  what caused it.
-- **Drift is measured, not corrected this round.** A buffer timeline is
-  anchored at its first packet and runs at the nominal rate, so crystal drift
-  accumulates as a timeline residual. The validator reports each node's drift
-  in ppm and its largest residual (`node_clock_summary`), and warns when the
-  residual passes the 10 ms limit (`timeline_residual_over_limit`), the point
-  at which the sidecar drops that node's cross-node pairs. Short sessions keep
-  drift small.
+  `localization_timestamp_step_recovery_holdoff_seconds` (30 s), and once
+  `localization_timestamp_step_confirm_frames` (3) frames confirm the step it
+  re-anchors the node's buffer timeline on it (no audio dropped). The
+  validator finds steps in the per-frame table (`timestamp_step_detected`),
+  including a step inside a single upload. A session with a step is still
+  usable; note what caused it.
+- **Drift is slewed live, measured raw here.** A buffer timeline runs at the
+  nominal rate from its anchor, so crystal drift accumulates as a timeline
+  residual; the sidecar slews the anchor once the windowed residual passes
+  `localization_timeline_drift_slew_fraction` (0.5) of the 10 ms limit
+  (`docs/localization_solve_contract.md` section 7). The validator reports
+  each node's raw drift in ppm and its largest uncorrected residual
+  (`node_clock_summary`), and warns when it passes the 10 ms limit
+  (`timeline_residual_over_limit`): the point at which the sidecar would drop
+  that node's cross-node pairs with the timeline discipline off.
 
 ## 6. Sample rates
 

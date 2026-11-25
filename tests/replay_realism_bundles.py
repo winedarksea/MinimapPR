@@ -86,12 +86,34 @@ class ReplayNodePlan:
 
 @dataclass(frozen=True, slots=True)
 class PacketTimestampStep:
-    """From ``first_stepped_frame_index`` on, the node's packet timestamps read
-    ``step_ns`` late; samples stay continuous (no sequence or sample gap)."""
+    """At ``first_stepped_frame_index`` the node's packet clock jumps by
+    ``step_ns``; samples stay continuous (no sequence or sample gap).
+
+    By default the clock steps *off* true time (later packets read ``step_ns``
+    late). With ``corrects_earlier_offset`` it steps *onto* true time: earlier
+    packets read ``step_ns`` early, as before an SNTP/GPS re-sync."""
 
     node_id: str
     first_stepped_frame_index: int
     step_ns: int
+    corrects_earlier_offset: bool = False
+
+    def offset_ns(self, frame_index: int) -> int:
+        if self.corrects_earlier_offset:
+            return -self.step_ns if frame_index < self.first_stepped_frame_index else 0
+        return self.step_ns if frame_index >= self.first_stepped_frame_index else 0
+
+
+@dataclass(frozen=True, slots=True)
+class PacketClockDrift:
+    """The node's packet clock runs ``ns_per_frame`` fast of its sample clock
+    per frame (time-compressed crystal drift); samples stay continuous."""
+
+    node_id: str
+    ns_per_frame: int
+
+    def offset_ns(self, frame_index: int) -> int:
+        return frame_index * self.ns_per_frame
 
 
 def planar_plan(sample_rate_hz: int) -> ReplayNodePlan:
@@ -174,13 +196,14 @@ def render_captures_at_node_rates(scene: AcousticScene, node_plans: Sequence[Rep
 
 
 def node_frame_timing_table(
-    plan: ReplayNodePlan, capture_samples: int, *, step: PacketTimestampStep | None
+    plan: ReplayNodePlan, capture_samples: int, *, step: PacketTimestampStep | PacketClockDrift | None
 ) -> NodeFrameTimingTable:
-    """GPS-locked 20 ms frames on the capture timeline, with an optional step."""
+    """GPS-locked 20 ms frames on the capture timeline, with an optional
+    packet-clock step or drift."""
     frame_samples = frame_samples_for(plan.sample_rate_hz)
     frame_count = -(-capture_samples // frame_samples)
     offsets_ns_by_frame_index = (
-        {index: step.step_ns for index in range(step.first_stepped_frame_index, frame_count)}
+        {index: step.offset_ns(index) for index in range(frame_count) if step.offset_ns(index) != 0}
         if step is not None and step.node_id == plan.node_id
         else {}
     )
@@ -215,7 +238,7 @@ def write_replay_bundle(
     scene: AcousticScene,
     node_plans: Sequence[ReplayNodePlan],
     captures: Mapping[str, np.ndarray],
-    step: PacketTimestampStep | None = None,
+    step: PacketTimestampStep | PacketClockDrift | None = None,
 ) -> Path:
     """A calibration bundle zip with per-node WAVs and frame timing tables."""
     work_dir = tmp_path / "bundle_work"

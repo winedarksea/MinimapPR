@@ -43,6 +43,14 @@ DEFAULT_LOCALIZATION_TIMELINE_RESIDUAL_OVER_LIMIT_CLEAR_RATIO = 0.8
 DEFAULT_LOCALIZATION_CLOCK_UNKNOWN_UNCERTAINTY_SECONDS = 0.005
 DEFAULT_LOCALIZATION_TIMESTAMP_STEP_THRESHOLD_SECONDS = 0.002
 DEFAULT_LOCALIZATION_TIMESTAMP_STEP_RECOVERY_HOLDOFF_SECONDS = 30.0
+# Timeline discipline (core/timeline_discipline.py, owner decision 2026-11-25):
+# a confirmed step re-anchors the node's buffer timeline, and drift is slewed
+# once the windowed residual passes half the hard limit, so a 20 ppm crystal
+# never reaches it. Three 20-32 ms frames confirm a step (~100 ms); one late
+# frame back on the old timeline is jitter and cancels it.
+DEFAULT_LOCALIZATION_TIMELINE_STEP_REANCHOR_ENABLED = True
+DEFAULT_LOCALIZATION_TIMESTAMP_STEP_CONFIRM_FRAMES = 3
+DEFAULT_LOCALIZATION_TIMELINE_DRIFT_SLEW_FRACTION = 0.5
 DEFAULT_LOCALIZATION_TRIGGER_NOISE_FLOOR_RELATIVE_ENABLED = True
 # Shared with the Python-ingest ``trigger_noise_floor_relative_snr_db`` so both
 # ingest paths admit the same events by default.
@@ -97,6 +105,9 @@ RUST_FORWARDED_LOCALIZATION_SETTING_KEYS: tuple[str, ...] = (
     "localization_clock_unknown_uncertainty_seconds",
     "localization_timestamp_step_threshold_seconds",
     "localization_timestamp_step_recovery_holdoff_seconds",
+    "localization_timeline_step_reanchor_enabled",
+    "localization_timestamp_step_confirm_frames",
+    "localization_timeline_drift_slew_fraction",
     "localization_trigger_noise_floor_relative_enabled",
     "localization_trigger_noise_floor_relative_db",
     "localization_solver_floor_relative_db",
@@ -168,6 +179,11 @@ def localization_overhaul_setting_errors(settings) -> list[str]:
         errors.append("localization_trigger_noise_floor_relative_db must be a finite value > 0")
     if not math.isfinite(settings.localization_solver_floor_relative_db):
         errors.append("localization_solver_floor_relative_db must be finite")
+    if settings.localization_timestamp_step_confirm_frames < 1:
+        errors.append("localization_timestamp_step_confirm_frames must be >= 1")
+    slew_fraction = settings.localization_timeline_drift_slew_fraction
+    if not (math.isfinite(slew_fraction) and 0.0 <= slew_fraction <= 1.0):
+        errors.append("localization_timeline_drift_slew_fraction must be in [0, 1] (0 disables the slew)")
     if settings.localization_timeline_residual_window_frames < 1:
         errors.append("localization_timeline_residual_window_frames must be >= 1")
     percentile = settings.localization_timeline_residual_percentile

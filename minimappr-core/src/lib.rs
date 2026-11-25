@@ -14,6 +14,8 @@ pub mod localization_sensor_entry;
 // Localization overhaul R5: per-frame clock evidence and timestamp-step detection.
 pub mod packet_frame_timing;
 pub mod timestamp_step_detector;
+// Owner decision 2026-11-25: step re-anchor and drift slew of a node's buffer timeline.
+pub mod timeline_discipline;
 pub mod range_projection;
 // Localization overhaul R2: Python-identical site ENU projection + sensor rotation.
 pub mod sensor_world_position;

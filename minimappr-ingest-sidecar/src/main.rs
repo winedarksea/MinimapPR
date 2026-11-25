@@ -1388,6 +1388,8 @@ struct DspStatusResponse {
     // alerting rule (e.g. `total_window_underrun_drops` climbing while no
     // classifier renders emit) works against either backend.
     total_buffer_reanchors: u64,
+    total_timeline_step_reanchors: u64,
+    total_timeline_drift_slews: u64,
     total_window_underrun_drops: u64,
     total_stale_streams_evicted: u64,
     // Same names as the Python FusionMetrics coverage-wait counters.
@@ -1419,6 +1421,8 @@ async fn dsp_status(State(state): State<AppState>) -> Response {
         total_stale_manifest_skips: st.total_stale_manifest_skips,
         total_classification_drops: st.total_classification_drops,
         total_buffer_reanchors: st.total_buffer_reanchors,
+        total_timeline_step_reanchors: st.total_timeline_step_reanchors,
+        total_timeline_drift_slews: st.total_timeline_drift_slews,
         total_window_underrun_drops: st.total_window_underrun_drops,
         total_stale_streams_evicted: st.total_stale_streams_evicted,
         localization_coverage_wait_stop_reasons: st.localization_coverage_wait_stop_reasons.clone(),
