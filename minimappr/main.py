@@ -174,6 +174,7 @@ from minimappr.core.site_origin import (
 from minimappr.core.zones import ZoneMatcher
 from minimappr.core import system_info
 from minimappr.calibration.bundle import build_ground_truth_payload, write_bundle_zip
+from minimappr.calibration.bundle_validation import validate_calibration_bundle
 from minimappr.calibration.embeddings import extract_embedding_npy
 from minimappr.models import (
     AlertStatus,
@@ -7314,9 +7315,7 @@ async def calibration_node_audio_get(session_id: str, node_id: str, request: Req
     return FileResponse(wav_path, media_type="audio/wav", filename=wav_path.name)
 
 
-@app.get("/api/v1/calibration/{session_id}/bundle")
-async def calibration_bundle_download(session_id: str, request: Request):
-    storage: Storage = request.app.state.storage
+async def _write_calibration_bundle(storage: Storage, session_id: str) -> Path:
     row = await _require_calibration_session(storage, session_id)
     _load_calibration_manifest(row)  # raises 409 while processing
     artifact_dir = Path(row["calibration_manifest_path"]).parent
@@ -7326,6 +7325,25 @@ async def calibration_bundle_download(session_id: str, request: Request):
     await asyncio.to_thread(
         write_bundle_zip, artifact_dir, ground_truth_payload, bundle_path
     )
+    return bundle_path
+
+
+@app.get("/api/v1/calibration/{session_id}/validation")
+async def calibration_bundle_validation(session_id: str, request: Request):
+    """Field-capture-protocol report for the session's bundle as exported now.
+
+    Advisory only: export never depends on it (docs/field_capture_protocol.md).
+    """
+    storage: Storage = request.app.state.storage
+    bundle_path = await _write_calibration_bundle(storage, session_id)
+    report = await asyncio.to_thread(validate_calibration_bundle, bundle_path)
+    return report.to_json_payload()
+
+
+@app.get("/api/v1/calibration/{session_id}/bundle")
+async def calibration_bundle_download(session_id: str, request: Request):
+    storage: Storage = request.app.state.storage
+    bundle_path = await _write_calibration_bundle(storage, session_id)
     return FileResponse(
         bundle_path,
         media_type="application/zip",

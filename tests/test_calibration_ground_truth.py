@@ -276,6 +276,30 @@ class TestCalibrationGroundTruthApi:
         # channel 0 is 0.25, others 0 → mono mean ≈ 0.0625
         assert np.allclose(mono, 0.0625, atol=0.01)
 
+    def test_validation_report_is_advisory(self, monkeypatch, tmp_path):
+        db_path = _configure_env(monkeypatch, tmp_path)
+        artifact_dir = tmp_path / "artifacts" / f"{SESSION_ID}_calibration"
+        _seed_calibration_session(db_path, artifact_dir)
+
+        with TestClient(app) as client:
+            resp = client.post(
+                f"/api/v1/calibration/{SESSION_ID}/ground-truth",
+                json=_event_body(start_ns=10_000_000, end_ns=50_000_000),
+            )
+            assert resp.status_code == 200, resp.text
+
+            resp = client.get(f"/api/v1/calibration/{SESSION_ID}/validation")
+            assert resp.status_code == 200, resp.text
+            report = resp.json()
+            # The fake artifact predates the protocol fields: errors are
+            # reported, and the bundle still exports.
+            codes = {finding["code"] for finding in report["findings"]}
+            assert {"node_position_source_missing", "frame_timing_missing", "node_type_missing"} <= codes
+            assert report["error_count"] > 0
+            assert client.get(f"/api/v1/calibration/{SESSION_ID}/bundle").status_code == 200
+
+            assert client.get("/api/v1/calibration/nope/validation").status_code == 404
+
 
 def test_write_and_load_bundle_pure(tmp_path):
     artifact_dir = tmp_path / "artifact"

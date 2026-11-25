@@ -88,6 +88,9 @@ class _StubStorage:
     async def insert_large_artifact(self, **kwargs) -> str:
         return "lar-synthetic"
 
+    async def list_node_position_estimator_states(self) -> dict:
+        return {}
+
 
 async def _build_synthetic_bundle(tmp_path: Path) -> Path:
     from tests.helpers import SIRITH_TETRA_SENSOR_OFFSETS_M

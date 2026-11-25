@@ -58,6 +58,9 @@ class _StubStorage:
         self.artifacts.append(kwargs)
         return "lar-test"
 
+    async def list_node_position_estimator_states(self) -> dict:
+        return {}
+
 
 def _build_session(tmp_path: Path, capture_buffer, node_channel_map, start_ns, end_ns):
     work_dir = tmp_path / "work" / "session-1"
@@ -150,6 +153,11 @@ def test_calibration_pipeline_end_to_end(tmp_path: Path) -> None:
             local = frame.geo_to_local(GeoPoint(**node["position_geo"]))
             assert np.allclose(local, node["position_m"], atol=0.01)
             assert np.allclose(node["position_m"], NODE_ORIGINS_M[node_id], atol=0.01)
+            # Survey fields the field capture protocol checks: the stub row has
+            # no GPS metadata or override, and an explicit identity mount.
+            assert node["position_source"] == "fallback_static"
+            assert node["position_std_m"] is None
+            assert node["body_to_world_quaternion_wxyz"] == [1.0, 0.0, 0.0, 0.0]
             wav_path = final_dir / node["audio_file"]
             with wave.open(str(wav_path), "rb") as w:
                 assert w.getnchannels() == 4

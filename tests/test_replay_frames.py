@@ -138,6 +138,9 @@ class _NodeRowStorage:
     async def insert_large_artifact(self, **kwargs) -> str:
         return "lar-frame-timing"
 
+    async def list_node_position_estimator_states(self) -> dict:
+        return {}
+
 
 async def _run_calibration_capture(tmp_path: Path, capture: ChunkedCaptureSessionBuffer, *, end_ns: int):
     frame = LocalCoordinateFrame(origin=ORIGIN, mode="flat")
