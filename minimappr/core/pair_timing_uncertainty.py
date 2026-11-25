@@ -20,7 +20,9 @@ never excludes a pair. The rules mirror the sidecar's (``dsp_node_clock_assessme
   the published covariance widens by the timing variance with no extra step.
 
 Only a *measured* timeline residual over the hard limit drops a pair, and only
-the sidecar measures one; the Python ingest path has no such gate.
+the sidecar measures one; the Python ingest path has no such gate. Neither path
+consults a cluster's declared sync grade: uncertainty comes from what each node
+reports (the sidecar also adds its measured residual and step penalty).
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from minimappr.models import SyncGrade, TimeQuality
+from minimappr.models import TimeQuality
 
 NANOSECONDS_PER_SECOND = 1.0e9
 # Floor on a pair's correlation/geometry quality before the timing term is
@@ -44,16 +46,6 @@ HOLDOVER_PREDICTED_ERROR_NS_KEY = "predicted_error_ns"
 
 # Legacy database value; the sidecar parses it as ntp_disciplined too.
 _TIME_QUALITY_ALIASES: dict[str, str] = {TimeQuality.NTP_SYNC.value: TimeQuality.NTP_DISCIPLINED.value}
-
-# A cluster's declared sync grade is an operator ceiling on clock quality, so it
-# floors each member's uncertainty at the matching clock class. PTP has no
-# time_quality of its own; it is microsecond-class like a locked GPS clock.
-_TIME_QUALITY_FOR_DECLARED_SYNC_GRADE: dict[SyncGrade, str] = {
-    SyncGrade.GPS_PPS: TimeQuality.GPS_LOCKED.value,
-    SyncGrade.PTP: TimeQuality.GPS_LOCKED.value,
-    SyncGrade.NTP: TimeQuality.NTP_DISCIPLINED.value,
-    SyncGrade.FREE: TimeQuality.FREE_RUNNING.value,
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,10 +103,6 @@ def node_timing_uncertainty_seconds(evidence: NodeClockEvidence | None, policy: 
     if evidence.holdover_predicted_error_seconds is not None:
         uncertainty_seconds = max(uncertainty_seconds, evidence.holdover_predicted_error_seconds)
     return uncertainty_seconds
-
-
-def declared_sync_grade_uncertainty_seconds(grade: SyncGrade, policy: ClockUncertaintyPolicy) -> float:
-    return policy.class_uncertainty_for(_TIME_QUALITY_FOR_DECLARED_SYNC_GRADE[grade])
 
 
 def sensors_spanning_two_nodes(
