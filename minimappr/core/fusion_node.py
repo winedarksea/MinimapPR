@@ -74,6 +74,8 @@ from minimappr.core.localized_render_handoff_hooks import (
     SOLVE_ORIGIN_PYTHON_INGEST,
     build_localization_seam_collaborators,
 )
+from minimappr.core.position_observation import position_observation_solve_id
+from minimappr.core.position_observation_pipeline import classified_solve_resolver
 from minimappr.core.localization import LocalizationError
 from minimappr.core.localization_uncertainty import (
     clamp_covariance_eigenvalues_range_proportional,
@@ -255,6 +257,17 @@ class FusionMetrics:
     # while detections stall. Both default to 0 so status() can detect "never".
     last_detection_emission_ns: int = 0
     last_trigger_enqueue_ns: int = 0
+    # --- P5 one observation per solve (core/position_observation_pipeline.py) ---
+    position_observations_received: int = 0
+    position_observations_not_tracker_eligible: int = 0
+    position_observations_duplicate_solve: int = 0
+    position_observations_dropped_queue_full: int = 0
+    position_observations_applied: int = 0
+    position_observations_track_not_started: int = 0
+    position_observations_deferred_ambiguous: int = 0
+    position_observations_apply_failed: int = 0
+    position_observation_labels_attached: int = 0
+    position_observation_classified_updates: int = 0
     # --- Field Mode W2-onset-srp ---
     onset_clustering_window_count: int = 0
     onset_clustering_accepted_cluster_count: int = 0
@@ -727,6 +740,8 @@ class FusionNode:
             await asyncio.wait_for(self._classification_queue.join(), timeout=join_timeout_s)
             await asyncio.wait_for(self.release_pending_window_reconciliation(), timeout=join_timeout_s)
             await asyncio.wait_for(self._rules_queue.join(), timeout=join_timeout_s)
+            if (position_observations := self._position_observations()) is not None:
+                await asyncio.wait_for(position_observations.drain(), timeout=join_timeout_s)
         except asyncio.TimeoutError:
             self._last_error = "Timeout waiting for pipeline queues to drain during shutdown"
 
@@ -858,6 +873,10 @@ class FusionNode:
     async def ingest_localized_render(self, payload: LocalizedClassifierRenderRequest) -> None:
         """Ingest one Rust classifier render; see ``LocalizedRenderHandoff``."""
         await self._localized_render_handoff.ingest(payload)
+
+    async def observe_event_localization(self, payload: LocalizedClassifierRenderRequest) -> None:
+        """P5: an event-only Rust solve; position only (see ``LocalizedRenderHandoff``)."""
+        await self._localized_render_handoff.observe_event_solve(payload)
 
     async def ingest_continuous_scan_result(self, scan) -> None:
         """Sink for :class:`ContinuousOmniScanner`.
@@ -2459,6 +2478,8 @@ class FusionNode:
                 # Field Mode W3-entity: absorbed bout still feeds partial binding.
                 await self.entity_reporting.feed_absorbed_bout_to_tracker(
                     entity_id=decision.entity_id,
+                    solve_id=position_observation_solve_id(product),
+                    position_observations=self._position_observations(),
                     capability_tier=capability_tier,
                     event_time_ns=product.candidate.event_time_ns,
                     localization_position_m=localization_position_m,
@@ -2555,6 +2576,8 @@ class FusionNode:
                 persist_fused_track_position=self._persists_fused_entity_position(classified.label_category),
                 tracker=self.tracker,
                 storage_batch_ctx=self._storage_batch,
+                solve_id=position_observation_solve_id(product),
+                position_observations=self._position_observations(),
             )
         except aiosqlite.IntegrityError as exc:
             # A concurrent worker won the canonical insert for this reporting window.
@@ -2572,6 +2595,10 @@ class FusionNode:
             event_time_ns=assembly.detection.timestamp_ns,
             entity_id=decision.entity_id,
         )
+
+    def _position_observations(self):
+        """P5: the pipeline that already applied this solve's position, if any."""
+        return classified_solve_resolver(self._localization_seam_collaborators.position_observation_sink)
 
     def _persists_fused_entity_position(self, label_category: str | None) -> bool:
         """Field Mode S-fixes tracking: entity rows store the fused track position."""

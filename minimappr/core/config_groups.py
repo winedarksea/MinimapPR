@@ -345,6 +345,7 @@ CONFIG_STAGE_GROUPS: tuple[tuple[str, str, PipelineStageKind | None, tuple[str, 
             "tracking_mode_by_category",
             "position_observation_queue_max_items",
             "position_observation_unclassified_track_policy",
+            "position_observation_solve_ledger_max_entries",
         ),
     ),
     (

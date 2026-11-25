@@ -43,6 +43,9 @@ class HttpIngestTransport(IngestTransport):
     async def deliver_localized_render(self, payload: LocalizedClassifierRenderRequest) -> None:
         await self._fusion_node.ingest_localized_render(payload)
 
+    async def deliver_event_localization(self, payload: LocalizedClassifierRenderRequest) -> None:
+        await self._fusion_node.observe_event_localization(payload)
+
     async def deliver_node_heartbeat(
         self,
         node: NodeSpec,

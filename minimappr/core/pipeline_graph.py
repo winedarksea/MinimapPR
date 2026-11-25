@@ -695,6 +695,7 @@ _LOCALIZATION_OVERHAUL_TRACKING_PARAM_SPECS: tuple[tuple[str, str, str], ...] = 
     ("Tracking mode by category", "tracking_mode_by_category", ""),
     ("Observation queue max", "position_observation_queue_max_items", ""),
     ("Unclassified track policy", "position_observation_unclassified_track_policy", ""),
+    ("Observation solve ledger max", "position_observation_solve_ledger_max_entries", ""),
 )
 _LOCALIZATION_OVERHAUL_CLASSIFICATION_PARAM_SPECS: tuple[tuple[str, str, str], ...] = (
     ("Point-network clip", "point_network_clip_classification_enabled", ""),

@@ -278,6 +278,9 @@ class DetectionAssembler:
         persist_fused_track_position: bool = False,
         # Tracker
         tracker,
+        # P5: the solve's position already reached the tracker through this pipeline.
+        solve_id: str | None = None,
+        position_observations=None,
         # Storage batch context
         storage_batch_ctx,
     ) -> AssemblyResult:
@@ -356,6 +359,8 @@ class DetectionAssembler:
             reference_sensor=reference_sensor,
             tdoa_s=tdoa_s,
             environment=environment,
+            solve_id=solve_id,
+            position_observations=position_observations,
         )
         track: TrackState | None = track_resolution.track
         if track is not None:

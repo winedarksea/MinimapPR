@@ -5,7 +5,8 @@ FusionNode builds its seam collaborators through
 later work plugs real implementations in here without editing
 ``fusion_node.py``. The P2 seams (geometry, solution, provenance) are live and
 act only on renders whose solve carries provenance; a legacy render keeps the
-pre-overhaul path. The observation sink stays a no-op until P5 lands.
+pre-overhaul path. The observation sink is the P5 ``PositionObservationPipeline``
+(one tracker update per solve).
 
 Seams and their contracts:
 
@@ -42,6 +43,8 @@ if TYPE_CHECKING:
 # (e.g. only event-triggered solves may start a provisional track).
 SOLVE_ORIGIN_RUST_CLASSIFIER_RENDER = "rust_classifier_render"
 SOLVE_ORIGIN_PYTHON_INGEST = "python_ingest"
+# An event-only ``localization_result`` (no render): position only, never classified.
+SOLVE_ORIGIN_RUST_EVENT_LOCALIZATION = "rust_event_localization"
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,11 +118,6 @@ class PositionObservationSink(Protocol):
     ) -> None: ...
 
 
-class NoOpPositionObservationSink:
-    async def observe_localized_solve(self, *, localized_product, reporting_modality, solve_origin) -> None:
-        return None
-
-
 @dataclass(slots=True)
 class LocalizationSeamCollaborators:
     geometry_resolver: HandoffGeometryResolver
@@ -141,6 +139,8 @@ def build_localization_seam_collaborators(host: "FusionNode") -> LocalizationSea
     )
     from minimappr.core.localized_handoff_geometry import ManifestSolveGeometryResolver
     from minimappr.core.localized_handoff_solution import SnapshotGeometrySolutionResolver
+    from minimappr.core.position_observation_config import position_observation_config_from_settings
+    from minimappr.core.position_observation_pipeline import PositionObservationPipeline
 
     return LocalizationSeamCollaborators(
         geometry_resolver=ManifestSolveGeometryResolver(
@@ -148,5 +148,9 @@ def build_localization_seam_collaborators(host: "FusionNode") -> LocalizationSea
         ),
         solution_resolver=SnapshotGeometrySolutionResolver(host),
         provenance_recorder=ManifestLocalizationProvenanceRecorder(),
-        position_observation_sink=NoOpPositionObservationSink(),
+        position_observation_sink=PositionObservationPipeline(
+            config=position_observation_config_from_settings(host.settings),
+            tracker_provider=lambda: host.tracker,
+            metrics_provider=lambda: host._metrics,
+        ),
     )

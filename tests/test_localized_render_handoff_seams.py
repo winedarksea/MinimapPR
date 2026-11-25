@@ -24,13 +24,13 @@ from minimappr.core.localized_render_handoff_hooks import (
     SOLVE_ORIGIN_RUST_CLASSIFIER_RENDER,
     HandoffSolveGeometry,
     LocalizationSeamCollaborators,
-    NoOpPositionObservationSink,
 )
 from minimappr.core.localization_provenance import ManifestLocalizationProvenanceRecorder
 from minimappr.core.localized_handoff_geometry import ManifestSolveGeometryResolver
 from minimappr.core.localized_handoff_solution import SnapshotGeometrySolutionResolver
 from minimappr.core.localized_render_localization import HandoffLocalizationEstimate
 from minimappr.core.node_registry import NodeRegistry
+from minimappr.core.position_observation_pipeline import PositionObservationPipeline
 from minimappr.core.tracking import TrackManager
 from minimappr.core.zones import ZoneMatcher
 from minimappr.models import GeoPoint, NodeSpec, NodeType, TimeQuality
@@ -154,7 +154,7 @@ async def test_default_seams_keep_the_legacy_path_for_renders_without_provenance
     assert isinstance(collaborators.geometry_resolver, ManifestSolveGeometryResolver)
     assert isinstance(collaborators.solution_resolver, SnapshotGeometrySolutionResolver)
     assert isinstance(collaborators.provenance_recorder, ManifestLocalizationProvenanceRecorder)
-    assert isinstance(collaborators.position_observation_sink, NoOpPositionObservationSink)
+    assert isinstance(collaborators.position_observation_sink, PositionObservationPipeline)
     assert fusion._localized_render_handoff.collaborators is collaborators
 
     await fusion.ingest_localized_render(_render("manifest-seam-default"))

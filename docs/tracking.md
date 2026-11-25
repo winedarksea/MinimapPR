@@ -69,3 +69,47 @@ holds at most `dormant_max_records` (`64`) records and evicts the oldest first.
 
 Revivals are counted in `track_dormant_reacquired_count` (`FusionMetrics`), which appears
 on the tracking card of the `/settings/pipeline` graph.
+
+## One observation per solve
+
+Each localized solve updates the tracker once, before classification, so nothing on the
+classification side can starve a track: chunk suppression, the saturated-window pre-gate, an
+empty classification, a classification-queue backlog drop, a cross-reporter duplicate merge, or a
+zone or reporting-policy suppression. Both ingest paths hand every solve to
+`PositionObservationPipeline` (`minimappr/core/position_observation_pipeline.py`) through the
+`PositionObservationSink` seam.
+
+- **Two steps per solve.** First the position: the fix associates on geometry alone (its label
+  is still `unknown`, a wildcard for every gate) and leaves the track's label and dynamics
+  unchanged. Later the label: the solve's classification attaches its label to the track that
+  solve already moved, without moving it again (`core/tracking_position_observation_methods.py`).
+- **Idempotent by `solve_id`.** This is the provenance `solve_id` on the Rust path, where a
+  covering render repeats its event's id, and the candidate id on the Python-ingest path. A second
+  delivery of a solve is counted (`position_observations_duplicate_solve`) and ignored.
+- **Hidden until classified.** With `position_observation_unclassified_track_policy` set to
+  `start_hidden_tentative` (the default), an unmatched fix from an event-triggered solve starts a
+  tentative track. That track stays out of snapshots, storage, the live feed, federation and rules
+  until a classification reveals it. A scheduled render, or a render without provenance, may only
+  update an existing track. `require_classification` means no track starts before a
+  classification.
+- **Ambiguous fixes wait for their label.** When more than one track gates an unclassified fix,
+  geometry cannot tell the sources apart (two birds a few metres apart, crossing drones). The fix
+  is then left to its classification's label-aware `update`, which has the species gates and
+  fingerprint ranking (`position_observations_deferred_ambiguous`).
+- **The label never moves the track.** A solve's classification attaches its label to the track
+  that solve's position already moved; `update_count` and `last_seen_ns` stay as they are, and a
+  hidden track becomes visible. Only when the classification's category contradicts that track (a
+  misassociation), or the track is gone, does the label-aware `update` run instead.
+- **A provisional track is a weak anchor.** A hidden, unclassified track gates later fixes only
+  within `association_distance_m` of its predicted position. Its covariance comes from unclassified
+  fixes, possibly noise such as a texture-gated onset or an echo, which are often poorly ranged. Used
+  as a gate, that covariance would let one unconfirmed fix capture any later source along its
+  bearing.
+- **Bounded FIFO, drop-oldest.** `position_observation_queue_max_items` (`1024`) bounds the queue.
+  Overflow drops the oldest observation and counts it (`position_observations_dropped_queue_full`).
+  Observations are never coalesced: two callers of the same label in one cluster at the same time
+  are two observations. A dropped solve's classification, if one arrives, updates the tracker
+  instead. `position_observation_solve_ledger_max_entries` (`8192`, never below the queue size)
+  bounds how many solves are remembered while their classification is pending.
+- **Entity feed.** An absorbed entity bout whose solve was observed attaches its label to the
+  observed track. It no longer nudges that track a second time through partial binding.

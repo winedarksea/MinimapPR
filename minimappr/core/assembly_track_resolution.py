@@ -14,19 +14,29 @@ classifier's ``below_display_threshold`` feature):
   belief cannot be tracked;
 - a track whose species belief is below the display threshold is *hidden*: it
   is returned as ``hidden_track_id`` only, never persisted, broadcast or ruled on.
+
+With the P5 observation pipeline (``position_observations``), a localized
+solve's position has already reached the tracker before classification, so a
+classified detection never moves a track a second time: the pipeline attaches
+the label to the track that solve updated (``track_for_classified_solve``).
+The same holds for an absorbed entity bout whose solve was observed: it
+attaches its label instead of nudging the track through partial binding.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from minimappr.classifiers.birdnet_two_threshold import detection_is_below_display_threshold
 from minimappr.core.node_registry import NodeRegistry
+from minimappr.core.position_observation import TRACKER_LOCALIZABLE_CAPABILITY_TIERS
 from minimappr.core.track_partial_constraint_evidence import build_partial_constraints
 from minimappr.models import LabelId, TrackState
 
-_LOCALIZABLE_CAPABILITY_TIERS = frozenset({"2d", "full_3d"})
+if TYPE_CHECKING:
+    from minimappr.core.position_observation_pipeline import PositionObservationPipeline
+
 # Written into classification features by the onset stage (Field Mode W3-attribution).
 NODE_BAND_SNR_FEATURE_KEY = "onset_cluster_node_band_snr_db"
 AUDIBLE_SNR_FEATURE_KEY = "onset_cluster_audible_snr_db"
@@ -73,6 +83,8 @@ async def resolve_detection_track(
     reference_sensor: str,
     tdoa_s: dict[str, float],
     environment: dict[str, Any] | None,
+    solve_id: str | None = None,
+    position_observations: "PositionObservationPipeline | None" = None,
 ) -> TrackResolution:
     field_mode = getattr(tracker, "field_mode", None)
     below_display = detection_is_below_display_threshold(classification_features)
@@ -94,26 +106,36 @@ async def resolve_detection_track(
             winner_member=classification_features.get("winner_member"),
         )
 
+    classified_update_kwargs: dict[str, Any] = {
+        "timestamp_ns": event_time_ns,
+        "position_m": localization_position_m,
+        "measurement_covariance_m2": localization_position_covariance_m2,
+        "label": classification_label,
+        "label_category": label_category,
+        "iff_category": iff_category,
+        "label_id": label_id,
+        "confidence": classification_confidence,
+        "sensor_count": len(selected_sensor_ids),
+        "capability_tier": capability_tier,
+        "source_node_id": source_node_id,
+        "classifier_scores": classification_scores,
+    }
+    if species_evidence is not None:
+        classified_update_kwargs["species_evidence"] = species_evidence
+        classified_update_kwargs["below_display_threshold"] = below_display
+
     track: TrackState | None = None
-    if spatial_display_mode == "localized" and capability_tier in _LOCALIZABLE_CAPABILITY_TIERS:
-        update_kwargs: dict[str, Any] = {}
-        if species_evidence is not None:
-            update_kwargs["species_evidence"] = species_evidence
-            update_kwargs["below_display_threshold"] = below_display
-        track = await tracker.update(
-            timestamp_ns=event_time_ns,
-            position_m=localization_position_m,
-            measurement_covariance_m2=localization_position_covariance_m2,
-            label=classification_label,
-            label_category=label_category,
-            iff_category=iff_category,
-            label_id=label_id,
-            confidence=classification_confidence,
-            sensor_count=len(selected_sensor_ids),
-            capability_tier=capability_tier,
-            source_node_id=source_node_id,
-            classifier_scores=classification_scores,
-            **update_kwargs,
+    if spatial_display_mode == "localized" and capability_tier in TRACKER_LOCALIZABLE_CAPABILITY_TIERS:
+        if position_observations is not None:
+            track = await position_observations.track_for_classified_solve(
+                solve_id=solve_id, classified_update_kwargs=classified_update_kwargs
+            )
+        else:
+            track = await tracker.update(**classified_update_kwargs)
+    elif position_observations is not None and position_observations.solve_position_reached_tracker(solve_id):
+        # An absorbed entity bout of an observed solve: its position is already on a track.
+        track = await position_observations.track_for_classified_solve(
+            solve_id=solve_id, classified_update_kwargs=classified_update_kwargs
         )
     elif field_mode is not None and field_mode.partial_binding_enabled:
         constraints = await build_partial_constraints(

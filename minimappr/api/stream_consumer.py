@@ -21,6 +21,7 @@ from minimappr.api.rust_dsp_manifests import (
     LocalizedClassifierRenderRequest,
     load_localized_render_manifest_bundle,
 )
+from minimappr.api.rust_event_localization_manifest import load_event_localization_request
 from minimappr.interfaces import IngestTransport
 from minimappr.models import EnvironmentSampleIn, NodeSpec
 from minimappr.utils.audio import decode_pcm16le_b64, rms
@@ -579,6 +580,16 @@ class IngestStreamConsumer:
         # If the manifest carries an embedded classifier_render, deliver it as a
         # localized render so Python gets the full audio + classification bundle.
         classifier_render = manifest.get("classifier_render")
+        if not isinstance(classifier_render, dict):
+            # P5: an event solve reaches the tracker even with no render; the
+            # observation pipeline queues the tracker work, so this only places
+            # and gates the solve before the consumer moves on.
+            try:
+                event_request = load_event_localization_request(manifest)
+                if event_request is not None:
+                    await self._ingest_transport.deliver_event_localization(event_request)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Failed to deliver event localization from localization_result: %s", exc)
         if isinstance(classifier_render, dict):
             try:
                 bundle = load_localized_render_manifest_bundle(

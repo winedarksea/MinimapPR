@@ -37,6 +37,7 @@ from minimappr.core.track_associators import (
 from minimappr.core.track_field_mode_extensions import FieldModeTrackExtensions
 from minimappr.core.track_filters import KalmanTrackFilter, LinearTrackFilter
 from minimappr.core.tracking_field_mode_methods import TrackManagerFieldModeMethods
+from minimappr.core.tracking_position_observation_methods import TrackManagerPositionObservationMethods
 from minimappr.interfaces import AssociationContext, TrackAssociator, TrackFilter
 from minimappr.models import LabelId, TrackState, TrackStatus
 
@@ -81,7 +82,7 @@ class _DormantRecord:
     capability_tier: str = "full_3d"
 
 
-class TrackManager(TrackManagerFieldModeMethods):
+class TrackManager(TrackManagerPositionObservationMethods, TrackManagerFieldModeMethods):
     CONFIRM_THRESHOLD: int = 2  # detections needed to confirm a track
     _MAX_CONTRIBUTOR_NODE_IDS: int = 16  # bound on the per-track contributor set
 
@@ -230,6 +231,7 @@ class TrackManager(TrackManagerFieldModeMethods):
         self._tqi_weights = tuple(float(value / weight_total) for value in raw_tqi_weights)
 
         self._lock = asyncio.Lock()
+        self._init_position_observation_state()
 
     async def update(
         self,
@@ -494,7 +496,7 @@ class TrackManager(TrackManagerFieldModeMethods):
             return [
                 track
                 for track in self._tracks.values()
-                if include_hidden or not self._field_mode.is_hidden(track.id)
+                if include_hidden or not self.is_track_hidden(track.id)
             ]
 
     def _lifecycle_ns(self, label_category: str) -> tuple[int, int, int]:
@@ -858,5 +860,5 @@ class TrackManager(TrackManagerFieldModeMethods):
             for track in self._tracks.values()
             if track.status in (TrackStatus.TENTATIVE.value, TrackStatus.CONFIRMED.value)
             and len(track.contributor_node_ids) >= 2
-            and not self._field_mode.is_hidden(track.id)
+            and not self.is_track_hidden(track.id)
         )
