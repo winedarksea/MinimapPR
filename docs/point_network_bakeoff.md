@@ -22,9 +22,9 @@ committed (cadbec7) before any held-out seed was scored.
 
 The smoke tests check one easy scene, which the Cartesian solve (behind a
 repaired front-end) and onset clustering must both localize, and run the
-whole protocol on one tuning seed and one held-out seed. An `#[ignore]`d test
-records the production front-end finding below; remove its marker when the
-front-end is repaired.
+whole protocol on one tuning seed and one held-out seed.
+`easy_scene_is_localized_by_production` records the production front-end
+finding below; it was `#[ignore]`d until the band split fixed it.
 
 ## Scenes
 
@@ -65,10 +65,10 @@ is 24 kHz mono per node. Ranges are in `bakeoff_config.rs::SceneDrawConfig`.
 
 | Candidate | What it is |
 |---|---|
-| `production_gcc_phat_lsq` | Today's point-network path. (1) The sidecar's event window: an 80 ms node-local window, grown by the cross-node lag beyond half of it on each side, with the lag capped at `localization_coverage_total_cap_seconds` = 1 s. (2) GCC-PHAT pairs over 50–3430 Hz. (3) The server's default `python_cartesian` re-solve: pairs weighted by inverse variance on pair clock uncertainty (P9), the SRP steering direction as a bearing prior, and the SciPy-parity Cartesian solver. With no re-solve it falls back to the sidecar estimate. |
+| `production_gcc_phat_lsq` | Today's point-network path. (1) The sidecar's event window: an 80 ms node-local window, grown by the cross-node lag beyond half of it on each side, with the lag capped at `localization_coverage_total_cap_seconds` = 1 s. (2) GCC-PHAT pairs with the shipped per-pair front end: every point-network pair is cross-node, so 50–11 000 Hz (Nyquist-clamped) with a 20 % Tukey taper since the band split (2026-11-25, see Production findings 1); 50–3430 Hz and a rectangular window before. (3) The server's default `python_cartesian` re-solve: pairs weighted by inverse variance on pair clock uncertainty (P9), the SRP steering direction as a bearing prior, and the SciPy-parity Cartesian solver. With no re-solve it falls back to the sidecar estimate. |
 | `production_sidecar_srp` | The sidecar's own SRP estimate from the same call, with clock-offset covariance (`localization_single_node_solver = rust`). Diagnostic. |
 | `production_uncapped_window` | Production with the 1 s lag cap lifted. Diagnostic. |
-| `production_repaired_front_end` | Production with the lag cap lifted, a 20 % Tukey taper on the window, and a 50–11 000 Hz band. Diagnostic: it separates the front-end from the solver. |
+| `production_repaired_front_end` | Production with the lag cap lifted, a 20 % Tukey taper on the window, and a 50–11 000 Hz band. Diagnostic: it separates the front-end from the solver. Since the band split it differs from `production_uncapped_window` only if the shipped cross-node band or taper is changed. |
 | `onset_clustering_shadow` | `onset_clustering::localize_onset_clusters`, as the sidecar would run it live. It gets one window per trigger, from one layout lag plus 0.5 s before the trigger to two layout lags plus 1 s after. Accepted clusters with at least 3 TDOA nodes that pass the Field Mode noise-onset gate become fixes. Its covariance carries the R5 policy: the cluster covariance plus each node's clock sigma and position sigma / c, propagated through the reference-TDOA Jacobian (`bakeoff_covariance_propagation.rs`). The SRP grid reach is the only tuned knob: the core default, or 1.5× aperture. |
 
 Every candidate's fixes pass the server's handoff gates (`gate_handoff_localization`):
@@ -185,20 +185,115 @@ would have to run off the audio hot path.
 The every-slice table for all five candidates comes out of the CLI
 (`--markdown`).
 
-## Production findings (reported, not fixed)
+## Band split by pair type (2026-11-25)
+
+Finding 1 below is fixed by splitting the GCC-PHAT front end by pair type
+(`minimappr-core/src/localization_band_policy.rs`, mirrored in
+`minimappr/core/localization_band_policy.py`; owner decision: the ceiling is
+a property of each array's geometry):
+
+- **Intra-array pairs** stop at the array's own alias ceiling c / (2 · d_max)
+  over its solving mics: the SIRITH tetra's widest pair is 52.5 mm, so
+  ≈ 3266 Hz (not 3430); the planar's 50 mm diagonal gives ≈ 3432 Hz.
+  `localization_band_max_hz` now defaults to 0 (derive per array); a positive
+  value overrides every array. Plain PHAT, no taper.
+- **Cross-node pairs** use `localization_cross_node_band_max_hz` (11 000 Hz,
+  0 = Nyquist), a `localization_cross_node_window_taper_fraction` (0.2) Tukey
+  taper and PHAT-β whitening, `localization_cross_node_phat_beta` (0.7; 1 =
+  plain PHAT, spectrum rescaled to unit mean magnitude so SRP sums stay
+  level-independent).
+- `localization_band_min_hz` (50 Hz) applies to both. The Python window
+  filter is now that floor only. The Python solvers apply the cross-node
+  front end like the sidecar but leave their intra-array pairs on every bin,
+  as before: their old 50–3430 Hz time-domain bandpass was undone by PHAT
+  whitening, and masking them moved single-tetra house finch solves onto the
+  radial-refinement divergence (TODO "Re-solve radial divergence").
+
+**Why β.** Plain PHAT over the wide band raises a band-limited source's empty
+bins to the signal's weight. Two sub-sample contracts caught it: the mixed
+planar + point acceptance scene and the GPS-locked planar + tetra replay
+(400–3200 Hz noise sources, 0.5-sample lag tolerance) missed by up to 1.5 and
+2.3 samples (3430 Hz cross band: 0.1). A relative-magnitude bin floor fixed
+them but cost E8 a quarter of its recall (tuning seeds 0.521 → 0.354–0.396 at
+20–40 dB), so it was dropped. β = 0.8 / 0.7 / 0.6 bring the replay's worst
+lag error to 0.54 / 0.21 / 0.10 samples.
+
+**Tuning** (non-held-out seeds; production recall / p90 m / coverage). Seeds
+2–40 (48 calls): legacy 3430 Hz + rectangular 0.417 / 83.1 / 0.667; 3430 +
+taper 0.417 / 25.4 / 0.808; 11 000 + no taper 0.479 / 35.9 / 0.733; 11 000 +
+taper 0.1 / 0.2 / 0.3: 0.479 / 0.521 / 0.500; 8 000 + 0.2: 0.500; Nyquist
+(12 000) + 0.2: 0.500 (all plain PHAT). Then β on seeds 2–200 (256 calls,
+11 000 Hz + 0.2): β 1.0 0.422 / 50.6 / 0.796; β 0.8 0.465 / 51.9 / 0.755;
+β 0.7 0.449 / 36.3 / 0.775. β = 0.7 was chosen: it meets the lag contracts
+with margin and has the best p90 and better coverage than 0.8, for 4 fewer
+calls.
+
+Held-out (seeds 2 000 001–2 000 200, same protocol as Results), production
+before → after:
+
+| metric | before (f37c543) | after |
+|---|---|---|
+| recall | 0.302 | **0.460** |
+| calls fixed | 126 | 150 |
+| median / p90 error (m) | 2.3 / 91.7 | 1.0 / **63.1** |
+| 95 % coverage | 0.730 | 0.753 |
+| two-caller attribution error | 0.545 | 0.368 |
+| single bird recall / p90 m | 0.398 / 66.6 | 0.650 / 20.3 |
+| two birds | 0.146 / 141.8 | 0.269 / 128.8 |
+| continuous source | 0.625 / 51.9 | 0.625 / 21.0 |
+| FM sweep first call | 0.179 / 189.7 | 0.373 / 132.9 |
+| tonal whistle first call | 0.125 / 128.8 | 0.375 / 119.8 |
+| all-GPS clocks | 0.366 / 54.3 | 0.548 / 17.7 |
+| spread < 100 m | 0.316 / 32.8 | 0.579 / 3.2 |
+| spread ≥ 343 m | 0.320 / 205.5 (cov 0.68) | 0.260 / 217.9 (cov 0.59) |
+
+(The "before" coverage is the branch head's 0.730, which includes the
+position-accuracy term added after the first run's 0.540.) The gap to
+`production_uncapped_window` (0.491, p90 57.7 m) is the 1 s lag cap, which
+also explains the ≥ 343 m slice, the one slice that got worse; that is the
+kilometre-range settings item in `TODO.md`, not the front end. Onset
+clustering still fails every criterion (verdict unchanged). Median solve time
+was 60 ms after against 83 ms before, on different machine loads.
+
+**Array bearings** were checked before shipping (synthetic tetra and planar,
+48 directions × 2/10/100 m, 16 and 48 kHz, 20 and 6 dB SNR, 80 ms windows cut
+mid-call): the tetra's 3266 Hz derived ceiling and the old 3430 Hz give the
+same bearing error within noise on noise bursts, harmonic calls and tones,
+and the same share of range-projected solves at 3–8 m; the planar is
+unchanged (3432 Hz). A taper on intra-array pairs made tonal and harmonic
+bearings clearly worse (tetra 16 kHz harmonic call p90 4° → 69°, 1.5 kHz
+tone median 9° → 35°; planar FM sweep median 11° → 30°), so the taper is
+scoped to cross-node pairs. Three white-noise SRP fixtures sit on a knife
+edge that flips with the band or β alone (single tetra near/far at ~5 m and
+~90 m; the tight multinode layout at 10 m); they are pinned to the setting
+they were written at, with the probe in their comments.
+
+Other gates on the same change: the bird gate (`scripts/server_track_gate.py`)
+all-on rows are identical to the branch head (onset clustering localizes
+those scenes); its `baseline` rows (the Python GCC-PHAT path, recall 0 at the
+head) move by several metres under any band change, including the legacy
+band, so they are not a usable signal (`gate_flock_echo` baseline now recalls
+0.67 individuals). In E5 (full matrix), the 100 m NTP hand-measured
+planar + point strict xfail passes in every run and left the known gaps, the
+100 m NTP GPS one passes 3 of 5 runs and moved to the flaky list, and no
+passing cell regressed (41 passed; the one failure, the 1 km four-node
+hand-measured cell, also fails at the branch head).
+
+## Production findings (reported when found)
 
 The bake-off changed no production behaviour. These findings come from it:
 
-1. **The GCC-PHAT front-end loses most point-network calls.** The repaired
+1. **The GCC-PHAT front-end loses most point-network calls.** *Fixed by the
+   band split above (recall 0.302 → 0.460).* The repaired
    front-end raises recall from 0.302 to 0.453 and cuts single-bird p90 error
    from 66.6 m to 7.8 m with the same solver. Lifting the lag cap alone does
    little (0.313), so the gain comes from the two causes below. Both were
    diagnosed during development on a scene with six surveyed GPS nodes over
    a 60 m site and one loud 0.44 s FM sweep, longer than the 0.3 s event
-   window. The `#[ignore]`d test `easy_scene_is_localized_by_production`
-   keeps that configuration. On its current scene, the production fix lands
-   10 m off, outside the 6 m gate, while the repaired front-end and onset
-   clustering both pass.
+   window. The test `easy_scene_is_localized_by_production` keeps that
+   configuration. Before the band split the production fix landed 10 m off,
+   outside the 6 m gate, while the repaired front-end and onset clustering
+   both passed; it now passes too.
    - **Band ceiling.** The band is 50–3430 Hz (`localization_band_hz`, chosen
      to stop PHAT reversing bearings on the compact tetra). It discards most
      of the energy of a 3.4–7 kHz call. On the development scene every pair
@@ -242,9 +337,8 @@ The bake-off changed no production behaviour. These findings come from it:
 
 ## What would change the verdict
 
-- A repaired production front-end (band and taper) is the obvious next
-  candidate for a decision of its own. It would need re-validating on
-  tetra and planar arrays, where the 3430 Hz ceiling came from.
+- The repaired front end shipped as the band split (above); production now
+  carries it, so onset clustering would have to beat 0.460 recall.
 - Onset clustering is worth another look only for 3-node sites and tonal
   calls, and only after its covariance is honest: 0.38 coverage, with the
   clock and position propagation already included.

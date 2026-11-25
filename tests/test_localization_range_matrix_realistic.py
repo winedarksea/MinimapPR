@@ -130,14 +130,19 @@ DEFAULT_DIAGONAL_CELL_IDS = (
 # 1 km planar + point GPS bearing, and the 100 m hand-measured planar cells).
 # Every reason below is an open defect, not pending milestone-2 work: remove an
 # entry when the fix lands (strict: an unexpected pass fails). The GCC-PHAT
-# band split (2026-11-25: wide, tapered cross-node pairs) cleared the 1 m
-# hand-measured planar + point range claim and the 100 m NTP hand-measured
-# planar + point collapse (3 of 3 runs each).
+# band split (2026-11-25: wide, tapered PHAT-beta cross-node pairs) cleared
+# the 100 m NTP hand-measured planar + point collapse (every run since) and
+# made the 100 m NTP GPS one flaky.
 _AFTER_M2 = "open after milestone 2 (R4/R5/R7/P9 on base)"
 # M4 made position_std_m widen the published covariance (both solvers); the
 # hand-measured cells below still fail, but no longer for an overconfident
 # covariance.
 _AFTER_M4 = "open after M4 (position_std_m widens the covariance)"
+_HAND_MEASURED_RANGE_CLAIM = (
+    f"{_AFTER_M4}: the stated covariance now contains the truth, but the solve still reports range_refined "
+    "with range observability over the weak threshold, a range claim the oracle allows only as heard "
+    "(0.3 m placement errors at 1 m); the range-claim rule ignores the stated position accuracy"
+)
 _HAND_MEASURED_SPREAD_RANGE = (
     f"{_AFTER_M4}: the four-node solve on 0.3 m hand-measured positions at 10 m keeps the bearing but reports "
     "weak range observability (a bearing-only claim) where the oracle guarantees a 3-D fix"
@@ -172,6 +177,11 @@ KNOWN_PIPELINE_GAPS: dict[str, str] = {
         "(Mahalanobis^2 3551 > 13.8); earlier runs 460-710 m short or no covering detection",
     ),
     # -- near range, cross-node, weak clock / hand-measured --
+    "1m-planar_point_coplanar-gps_locked-hand_measured": _gap(
+        _HAND_MEASURED_RANGE_CLAIM,
+        "claims RANGE_RESOLVED (0.45 m off, contained) with the cross-node PHAT-beta front end; before M4 it "
+        "claimed a 3-D fix on a 0.05 m covariance",
+    ),
     "1m-planar_point_coplanar-ntp_timed-gps": _gap(
         _COMPACT_PLANAR_POINT_WEAK_CLOCK, "1.74 m off vs stated std [0.20, 0.14, 0.25] m (Mahalanobis^2 47 > 16.3)"
     ),
@@ -196,9 +206,6 @@ KNOWN_PIPELINE_GAPS: dict[str, str] = {
     "100m-planar_point_coplanar-gps_locked-gps": _gap(_PLANAR_FAR_FIELD, "stored omni (low_localization_confidence)"),
     "100m-planar_point_coplanar-gps_locked-hand_measured": _gap(
         _PLANAR_FAR_FIELD, "bearing 51 deg wrong vs stated angular std 8 deg (Mahalanobis^2 46 > 13.8)"
-    ),
-    "100m-planar_point_coplanar-ntp_timed-gps": _gap(
-        _COMPACT_PLANAR_POINT_WEAK_CLOCK, "96 m off (at the array) vs stated std [0.39, 0.32, 0.90] m, claims a 3-D fix"
     ),
     "1000m-planar_point_coplanar-ntp_timed-gps": _gap(
         _COMPACT_PLANAR_POINT_WEAK_CLOCK, "1001 m off (at the array) vs stated std [1.46, 1.11, 2.66] m, claims a 3-D fix"
@@ -227,6 +234,10 @@ KNOWN_FLAKY_CELLS: dict[str, str] = {
     ),
     "10m-four_node_spread-gps_locked-gps": (
         "flaky on the milestone-2 head: usually a 0.15 m 3-D fix, once no stored detection covered the event"
+    ),
+    "100m-planar_point_coplanar-ntp_timed-gps": (
+        f"flaky after the GCC-PHAT band split ({_COMPACT_PLANAR_POINT_WEAK_CLOCK}): passes as stored omni when "
+        "point-b reports (render fallback, honest HEARD), otherwise the 96 m collapse at the array; 3 of 5 runs passed"
     ),
     "10m-planar_point_coplanar-ntp_timed-hand_measured": (
         f"flaky after the onset-window fix ({_COMPACT_PLANAR_POINT_WEAK_CLOCK}): passes when planar-a reports "
