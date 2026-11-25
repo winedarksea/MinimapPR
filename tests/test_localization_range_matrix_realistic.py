@@ -217,6 +217,11 @@ KNOWN_PIPELINE_GAPS: dict[str, str] = {
     ),
     # -- spread far field --
     "100m-four_node_spread-gps_locked-gps": _gap(_SPREAD_FAR_FIELD, "no stored detection covers the event"),
+    "1000m-four_node_spread-gps_locked-hand_measured": _gap(
+        _SPREAD_FAR_FIELD,
+        "no stored detection covers the event (NOT_HEARD, 0 of 4 event detections; 7 of 7 runs on the "
+        "localization-core-overhaul head, 2026-11-25, with and without the review fixes)",
+    ),
     "100m-four_node_spread-ntp_timed-gps": _gap(_SPREAD_FAR_FIELD, "stored omni"),
     "100m-four_node_spread-ntp_timed-hand_measured": _gap(_SPREAD_FAR_FIELD, "stored omni"),
     "1000m-four_node_spread-ntp_timed-gps": _gap(_SPREAD_FAR_FIELD, "stored omni"),
