@@ -6,6 +6,8 @@
 //! point network runs today. Scene numbers describe the simulated sites. The
 //! decision rule is fixed here, before any held-out seed is scored.
 
+use minimappr_core::localization_band_policy::LocalizationBandPolicy;
+
 /// Clock classes a point node reports, with the declared 1-sigma offset the
 /// server assigns each (`localization_clock_class_uncertainty_seconds`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -173,7 +175,8 @@ pub struct ProductionCandidateConfig {
     pub node_local_window_seconds: f64,
     /// `localization_coverage_total_cap_seconds`: the event span's lag cap.
     pub coverage_total_cap_seconds: f64,
-    pub localization_band_hz: [f32; 2],
+    /// Shipped per-pair band and taper; every point-network pair is cross-node.
+    pub localization_band_policy: LocalizationBandPolicy,
     pub grid_resolution_m: f32,
     pub search_padding_m: f32,
     pub interpolation_factor: u32,
@@ -201,7 +204,7 @@ impl Default for ProductionCandidateConfig {
         Self {
             node_local_window_seconds: 0.08,
             coverage_total_cap_seconds: 1.0,
-            localization_band_hz: [50.0, 3_430.0],
+            localization_band_policy: LocalizationBandPolicy::default(),
             grid_resolution_m: 0.5,
             search_padding_m: 2.0,
             interpolation_factor: 4,

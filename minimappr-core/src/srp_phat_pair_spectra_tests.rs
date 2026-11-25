@@ -1,5 +1,6 @@
 use super::*;
 use crate::gcc_phat::phat_correlation;
+use crate::localization_band_policy::{apply_tukey_taper, PairFrontEnd};
 
 fn pseudo_random_window(mut seed: u32, len: usize) -> Vec<f32> {
     (0..len)
@@ -49,9 +50,23 @@ fn shared_spectra_reproduce_per_pair_correlation_bit_for_bit() {
         pseudo_random_window(5, 1536),
     ];
     let mut spectra = FullWindowSpectra::new(windows.len());
+    let front_ends = [
+        (1.0e-4, PairFrontEnd { band_hz: [50.0, 3430.0], taper_fraction: None }),
+        (0.012, PairFrontEnd { band_hz: [0.0, 0.0], taper_fraction: None }),
+        (0.012, PairFrontEnd { band_hz: [50.0, 11_000.0], taper_fraction: Some(0.2) }),
+    ];
+    let windowed = |channel: usize, n: usize, taper_fraction: Option<f32>| {
+        let mut window = windows[channel][..n].to_vec();
+        if let Some(fraction) = taper_fraction {
+            apply_tukey_taper(&mut window, fraction);
+        }
+        window
+    };
     for ch_a in 0..windows.len() {
         for ch_b in ch_a + 1..windows.len() {
-            for (max_tau_s, band_hz) in [(1.0e-4, Some([50.0, 3430.0])), (0.012, None)] {
+            // The cache holds rectangular and tapered spectra side by side, so
+            // a channel's earlier pairs must not leak into a later front end.
+            for (max_tau_s, front_end) in front_ends {
                 let shared = pair_phat_correlation(
                     &windows,
                     &mut spectra,
@@ -59,15 +74,16 @@ fn shared_spectra_reproduce_per_pair_correlation_bit_for_bit() {
                     ch_b,
                     48_000,
                     max_tau_s,
-                    band_hz,
+                    front_end,
                     4,
                 );
+                let n = windows[ch_a].len().min(windows[ch_b].len());
                 let per_pair = phat_correlation(
-                    &windows[ch_a],
-                    &windows[ch_b],
+                    &windowed(ch_a, n, front_end.taper_fraction),
+                    &windowed(ch_b, n, front_end.taper_fraction),
                     48_000,
                     max_tau_s,
-                    band_hz,
+                    Some(front_end.band_hz),
                     4,
                 );
                 assert_bit_identical(&shared, &per_pair);

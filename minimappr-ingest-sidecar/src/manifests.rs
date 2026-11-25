@@ -30,6 +30,13 @@ pub struct PairTdoaDiagnostic {
     pub is_cross_node: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timing_uncertainty_seconds: Option<f32>,
+    /// The band this pair was correlated over (intra-array: the array's
+    /// alias ceiling; cross-node: the wide band), Nyquist-clamped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub band_hz: Option<[f32; 2]>,
+    /// Tukey taper on this pair's windows; omitted for a rectangular cut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_taper_fraction: Option<f32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -47,6 +54,9 @@ pub struct LocalizationManifestPayload {
     pub confidence: f32,
     pub residual_rms_seconds: Option<f32>,
     pub sound_speed_mps: f32,
+    /// The reporting array's intra-array band (each pair's own band is on
+    /// `pair_tdoas[].band_hz`); the first pair's band when the reporter has
+    /// no intra-array pair.
     pub effective_band_hz: Option<[f32; 2]>,
     #[serde(default)]
     pub dominant_frequency_hz: Option<f32>,

@@ -436,12 +436,22 @@ fn srp_on_the_reporter_component_solves_around_the_reporter_not_the_node_midpoin
         SOUND_SPEED_MPS,
         SrpPhatConfig {
             half_space: layout.solve_half_space(admission.solve_sensor_indices()),
+            // Pinned: this 5 m white-noise source sits on the single tetra's
+            // near/far knife edge, which flips with the band edge alone
+            // (probed 2026-11-25: range-projected at 3000/3200/3266/3300 Hz,
+            // near-field boundary at 3100 and 3350-3500 Hz). The projected
+            // answer's range-sized covariance would hide what this checks
+            // (the aperture no longer spanning both nodes).
+            band_policy: minimappr_core::localization_band_policy::LocalizationBandPolicy::with_intra_array_band(
+                [50.0, 3430.0],
+            ),
             ..SrpPhatConfig::default()
         },
         SolveChannelConstraints {
             admitted_pair_filter: Some(&admits_pair),
             channel_clock_offsets: Some(admission.channel_clock_offsets()),
             channel_node_position_std: Some(admission.channel_node_position_std()),
+            array_index_by_channel: Some(admission.sensor_node_indices()),
         },
     );
     assert!(

@@ -23,6 +23,12 @@ pub struct PairTdoa {
     pub ch_a: usize,
     pub ch_b: usize,
     pub tdoa: TdoaResult,
+    /// Band the pair was correlated over, Nyquist-clamped; `None` = every bin.
+    #[serde(default)]
+    pub band_hz: Option<[f32; 2]>,
+    /// Tukey taper applied to the pair's windows; `None` = rectangular.
+    #[serde(default)]
+    pub window_taper_fraction: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -466,7 +472,7 @@ fn zero_pad_hermitian_spectrum(spectrum: &[Complex32], target_len: usize) -> Vec
     padded
 }
 
-fn normalize_band_hz(band_hz: Option<[f32; 2]>, sample_rate_hz: u32) -> Option<[f32; 2]> {
+pub(crate) fn normalize_band_hz(band_hz: Option<[f32; 2]>, sample_rate_hz: u32) -> Option<[f32; 2]> {
     let [low_hz, high_hz] = band_hz?;
     let nyquist_hz = sample_rate_hz as f32 * 0.5;
     let clamped_low_hz = low_hz.max(0.0).min(nyquist_hz);

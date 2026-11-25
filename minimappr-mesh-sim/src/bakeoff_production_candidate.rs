@@ -7,6 +7,8 @@
 //!    over every node, every pair admitted (same rate, long baselines, no
 //!    timeline residual), clock offsets and each node's stated position
 //!    accuracy carried into its covariance (`actors/dsp_compute_srp_solve.rs`).
+//!    Each node is its own array, so every pair takes the cross-node band
+//!    and window taper of `localization_band_policy`.
 //! 3. Server re-solve (default `localization_single_node_solver =
 //!    python_cartesian`): the pair TDOAs, inverse-variance weighted by pair
 //!    clock uncertainty, into `solve_cartesian_tdoa` with the SRP steering
@@ -24,6 +26,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+use minimappr_core::localization_band_policy::LocalizationBandPolicy;
 use minimappr_core::srp_phat::{
     estimate_tetrahedral_steering_with_solve_constraints, ChannelClockOffsets, NoiseFloorRelativeReference, SensorNodePositionStd,
     SolveChannelConstraints, SolverReferenceChannelFloor, SrpPhatConfig, SrpPhatEvaluation, DEFAULT_ABSOLUTE_REFERENCE_CHANNEL_RMS,
@@ -69,9 +72,9 @@ pub fn production_event_window_seconds(aperture_m: f64, sound_speed_mps: f64, co
     (node_local_window_s + LAG_EXTENT_SIDES * excess_lag_s).max(node_local_window_s)
 }
 
-fn srp_config(config: &ProductionCandidateConfig, quietest_node_floor_rms: f64, band_hz: [f32; 2]) -> SrpPhatConfig {
+fn srp_config(config: &ProductionCandidateConfig, quietest_node_floor_rms: f64, band_policy: LocalizationBandPolicy) -> SrpPhatConfig {
     SrpPhatConfig {
-        localization_band_hz: band_hz,
+        band_policy,
         grid_resolution_m: config.grid_resolution_m,
         search_padding_m: config.search_padding_m,
         interp_factor: config.interpolation_factor as usize,
@@ -219,30 +222,12 @@ fn sidecar_fix(evaluation: &SrpPhatEvaluation, cue: (usize, f64)) -> Option<Cand
 }
 
 /// How the front-end cuts and filters the event window. Production is the
-/// capped lag, no taper and its shipped band; the diagnostics change these.
+/// capped lag and its shipped band policy; the diagnostics change these.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProductionFrontEndVariant {
     pub lag_cap_s: Option<f64>,
-    /// Tukey taper: this fraction of the window is cosine-ramped (half at each end).
-    pub taper_fraction: Option<f64>,
-    /// GCC-PHAT band; `None` keeps `localization_band_hz`.
-    pub band_hz: Option<[f32; 2]>,
-}
-
-/// A rectangular cut through a loud call leaves the same broadband step at
-/// the same sample index on every channel; PHAT whitening then favours zero
-/// lag. A Tukey taper removes the step (diagnostic only: production does not taper).
-fn apply_tukey_taper(window: &mut [f32], taper_fraction: f64) {
-    let ramp_samples = ((0.5 * taper_fraction * window.len() as f64) as usize).min(window.len() / 2);
-    if ramp_samples == 0 {
-        return;
-    }
-    let length = window.len();
-    for index in 0..ramp_samples {
-        let gain = 0.5 * (1.0 - (std::f64::consts::PI * index as f64 / ramp_samples as f64).cos());
-        window[index] *= gain as f32;
-        window[length - 1 - index] *= gain as f32;
-    }
+    /// Per-pair band and taper; `None` keeps `localization_band_policy`.
+    pub band_policy: Option<LocalizationBandPolicy>,
 }
 
 /// One production solve for `trigger`, its front-end set as `variant` says.
@@ -255,10 +240,7 @@ pub fn run_production_candidate(
 ) -> ProductionSolveOutcomes {
     let span_s = production_event_window_seconds(scene.aperture_m, scene.sound_speed_mps, config, variant.lag_cap_s);
     let start_s = trigger.stream_time_s - 0.5 * span_s;
-    let mut windows: Vec<Vec<f32>> = scene.streams.iter().map(|stream| cut_window(stream, scene.sample_rate_hz, start_s, start_s + span_s)).collect();
-    if let Some(taper_fraction) = variant.taper_fraction {
-        windows.iter_mut().for_each(|window| apply_tukey_taper(window, taper_fraction));
-    }
+    let windows: Vec<Vec<f32>> = scene.streams.iter().map(|stream| cut_window(stream, scene.sample_rate_hz, start_s, start_s + span_s)).collect();
     let positions_m: Vec<[f32; 3]> = scene.nodes.iter().map(|node| node.measured_position_m.map(|value| value as f32)).collect();
     let active_channels: Vec<usize> = (0..scene.nodes.len()).collect();
     let clock_std_s: Vec<f64> = scene.nodes.iter().map(|node| node.clock_class.declared_offset_std_s()).collect();
@@ -270,11 +252,12 @@ pub fn run_production_candidate(
         &positions_m,
         scene.sample_rate_hz,
         scene.sound_speed_mps as f32,
-        srp_config(config, quietest_node_floor_rms, variant.band_hz.unwrap_or(config.localization_band_hz)),
+        srp_config(config, quietest_node_floor_rms, variant.band_policy.unwrap_or(config.localization_band_policy)),
         SolveChannelConstraints {
             admitted_pair_filter: None,
             channel_clock_offsets: Some(ChannelClockOffsets { clock_index_by_channel: &active_channels, clock_offset_std_seconds: &clock_std_s }),
             channel_node_position_std: Some(SensorNodePositionStd { node_index_by_sensor: &active_channels, node_position_std_m: &stated_position_std_m }),
+            array_index_by_channel: Some(&active_channels),
         },
     );
     let sidecar_wall_time_s = started.elapsed().as_secs_f64();

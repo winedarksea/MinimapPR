@@ -14,7 +14,8 @@ pub struct DspWorkerConfig {
     pub classifier_render_min_interval_seconds: f64,
     pub max_buffer_seconds: f64,
     pub min_coverage_ratio: f64,
-    pub localization_band_hz: [f32; 2],
+    /// Per-pair GCC-PHAT band and taper (`localization_band_policy.rs`).
+    pub localization_band_policy: minimappr_core::localization_band_policy::LocalizationBandPolicy,
     pub gcc_phat_interp_factor: usize,
     pub localization_srp_grid_resolution_m: f32,
     pub localization_search_padding_m: f32,
@@ -89,7 +90,7 @@ impl Default for DspWorkerConfig {
             max_buffer_seconds: DEFAULT_BIRDNET_CLASSIFICATION_WINDOW_SECONDS
                 + DEFAULT_CLASSIFIER_RENDER_OVERLAP_SECONDS,
             min_coverage_ratio: 0.85,
-            localization_band_hz: [50.0, 3430.0],
+            localization_band_policy: Default::default(),
             gcc_phat_interp_factor: 4,
             localization_srp_grid_resolution_m: 0.5,
             localization_search_padding_m: 2.0,

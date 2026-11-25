@@ -59,7 +59,7 @@ pub(super) fn solve_srp_phat(payload: &ComputePayload) -> SrpPhatEvaluation {
     // grid although none of its pairs with the reporter is measured.
     let solve_channels = payload.pair_admission.solve_sensor_indices();
     let srp_config = SrpPhatConfig {
-        localization_band_hz: payload.config.localization_band_hz,
+        band_policy: payload.config.localization_band_policy,
         grid_resolution_m: payload.config.localization_srp_grid_resolution_m,
         search_padding_m: payload.config.localization_search_padding_m,
         interp_factor: payload.config.gcc_phat_interp_factor,
@@ -92,6 +92,7 @@ pub(super) fn solve_srp_phat(payload: &ComputePayload) -> SrpPhatEvaluation {
             admitted_pair_filter: Some(&admits_pair),
             channel_clock_offsets: Some(payload.pair_admission.channel_clock_offsets()),
             channel_node_position_std: Some(payload.pair_admission.channel_node_position_std()),
+            array_index_by_channel: Some(payload.pair_admission.sensor_node_indices()),
         },
     )
 }

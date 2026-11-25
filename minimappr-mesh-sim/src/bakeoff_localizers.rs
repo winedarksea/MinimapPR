@@ -25,6 +25,7 @@ use crate::bakeoff_config::{OnsetCandidateConfig, PointBakeoffConfig, SeedSplit,
 use crate::bakeoff_decision::{decide, BakeoffDecision};
 use crate::bakeoff_onset_candidate::run_onset_candidate;
 use crate::bakeoff_production_candidate::{run_production_candidate, ProductionFrontEndVariant};
+use minimappr_core::localization_band_policy::LocalizationBandPolicy;
 use crate::bakeoff_scenes::{build_bakeoff_scene, BakeoffScene};
 use crate::bakeoff_scoring::{scene_class, score_candidate, CandidateSceneScore, SceneScore};
 use crate::bakeoff_summary::summarize;
@@ -91,12 +92,16 @@ pub fn run_bakeoff_scene(seed: u64, config: &PointBakeoffConfig, onset_grid_mult
     let triggers = detect_triggers(&scene, &config.trigger);
     let floor_rms = quietest_node_floor_rms(&scene, config.trigger.frame_seconds);
     let capped_window_covers_layout = scene.largest_layout_lag_s() <= config.production.coverage_total_cap_seconds;
-    let production_window = ProductionFrontEndVariant { lag_cap_s: Some(config.production.coverage_total_cap_seconds), taper_fraction: None, band_hz: None };
+    let production_window = ProductionFrontEndVariant { lag_cap_s: Some(config.production.coverage_total_cap_seconds), band_policy: None };
     let uncapped_window = ProductionFrontEndVariant { lag_cap_s: None, ..production_window };
     let repaired_front_end = ProductionFrontEndVariant {
         lag_cap_s: None,
-        taper_fraction: Some(config.production.diagnostic_window_taper_fraction),
-        band_hz: Some(config.production.diagnostic_band_hz),
+        band_policy: Some(LocalizationBandPolicy {
+            band_min_hz: config.production.diagnostic_band_hz[0],
+            cross_node_band_max_hz: config.production.diagnostic_band_hz[1],
+            cross_node_window_taper_fraction: config.production.diagnostic_window_taper_fraction as f32,
+            ..config.production.localization_band_policy
+        }),
     };
     let (mut deployed, mut sidecar, mut uncapped, mut repaired) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for trigger in &triggers {
