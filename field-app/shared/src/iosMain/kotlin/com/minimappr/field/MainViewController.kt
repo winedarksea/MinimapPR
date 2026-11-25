@@ -6,6 +6,7 @@ import androidx.compose.ui.window.ComposeUIViewController
 import com.minimappr.field.ffi.fieldFfiSurfaceVersion
 import com.minimappr.field.node.FieldServiceStatusBoard
 import com.minimappr.field.ui.FieldApp
+import com.minimappr.field.ui.FieldAppActions
 
 /**
  * Entry point for a future native iOS shell (Xcode project not included:
@@ -18,7 +19,7 @@ fun MainViewController() = ComposeUIViewController {
     FieldApp(
         serviceStatus = serviceStatus,
         ffiSurfaceVersion = fieldFfiSurfaceVersion().toLong(),
-        onStartCapture = {},
-        onStopCapture = {},
+        discoveredHosts = emptyList(),
+        actions = FieldAppActions(),
     )
 }

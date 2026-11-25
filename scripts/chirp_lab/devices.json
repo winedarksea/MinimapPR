@@ -1,0 +1,14 @@
+{
+  "package": "com.minimappr.field",
+  "activity": "com.minimappr.field.android.FieldMainActivity",
+  "service": "com.minimappr.field.android.FieldCaptureForegroundService",
+  "debug_receiver": "com.minimappr.field.android.debug.ChirpLabDebugReceiver",
+  "adb": "~/Library/Android/sdk/platform-tools/adb",
+  "wifi_adb_port": 5555,
+  "devices": {
+    "pixel7a": {"serial": "34081JEHN18099", "wifi_ip": "192.168.1.30", "platform_name": "pixel_7a"},
+    "sm_a037f": {"serial": "R9ZRC0JQ8ZR", "wifi_ip": "192.168.1.35", "platform_name": "sm-a037f"}
+  },
+  "roles": {"A": "pixel7a", "B": "sm_a037f"},
+  "session_roles": {"host": "pixel7a", "join": "sm_a037f"}
+}

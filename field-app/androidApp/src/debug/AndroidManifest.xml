@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds only: laptop-script control of chirp lab / session runs.
+     Guarded by DUMP, which `adb shell` holds and no installable app can get. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <receiver
+            android:name=".debug.ChirpLabDebugReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="com.minimappr.field.CHIRP_LAB_STOP" />
+                <action android:name="com.minimappr.field.CHIRP_LAB_MARK" />
+                <action android:name="com.minimappr.field.SESSION_STOP" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

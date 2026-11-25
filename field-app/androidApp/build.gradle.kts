@@ -17,8 +17,9 @@ android {
         versionCode = providers.gradleProperty("fieldAppVersionCode").map(String::toInt).getOrElse(1)
         versionName = providers.gradleProperty("fieldAppVersionName").getOrElse("0.0.0-dev")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        // Must match :shared so the APK carries the Rust library for both.
-        ndk.abiFilters += setOf("arm64-v8a", "x86_64")
+        // Must match :shared (same property) so the APK carries the Rust library.
+        ndk.abiFilters += providers.gradleProperty("fieldapp.android.abis")
+            .getOrElse("arm64-v8a,x86_64").split(",").map(String::trim).filter(String::isNotEmpty)
     }
 
     buildTypes {
@@ -38,7 +39,7 @@ android {
         buildConfig = true
     }
     packaging {
-        resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }
+        resources { excludes += setOf("/META-INF/{AL2.0,LGPL2.1}", "/META-INF/INDEX.LIST", "/META-INF/io.netty.versions.properties") }
     }
 }
 

@@ -9,6 +9,7 @@ import androidx.test.rule.GrantPermissionRule
 import com.minimappr.field.ffi.describeFrame
 import com.minimappr.field.ffi.fieldFfiSurfaceVersion
 import com.minimappr.field.node.FieldCaptureServiceState
+import com.minimappr.field.node.FieldServiceMode
 import com.minimappr.field.node.FieldServiceStatus
 import com.minimappr.field.node.FieldServiceStatusBoard
 import org.junit.Assert.assertEquals
@@ -18,16 +19,14 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Emulator smoke test: app launches, the Rust library answers, the
- * microphone foreground service starts and the node runtime advances.
- * Not a microphone validation: the emulator mic is virtual.
+ * Smoke test: app launches, the Rust library answers (FFI surface v3), the
+ * CAPTURE-mode foreground service starts and the solo device advances.
  */
 @RunWith(AndroidJUnit4::class)
 class FieldAppSmokeTest {
     private val serviceStartTimeoutMilliseconds = 10_000L
     private val pollIntervalMilliseconds = 100L
-    private val expectedFfiSurfaceVersion = 1u
-    private val joinRequestKindId = 1
+    private val expectedFfiSurfaceVersion = 3u
 
     @get:Rule
     val recordAudioPermission: GrantPermissionRule = GrantPermissionRule.grant(Manifest.permission.RECORD_AUDIO)
@@ -46,14 +45,13 @@ class FieldAppSmokeTest {
     fun appLaunchesServiceStartsAndFfiAnswers() {
         assertEquals(expectedFfiSurfaceVersion, fieldFfiSurfaceVersion())
         ActivityScenario.launch(FieldMainActivity::class.java).use { scenario ->
-            scenario.onActivity { activity -> FieldCaptureForegroundService.start(activity) }
+            scenario.onActivity { activity -> FieldCaptureForegroundService.start(activity, FieldLaunchRequest.Capture.toExtras()) }
             val running = awaitStatus {
-                it.serviceState == FieldCaptureServiceState.RUNNING && it.node.capturedSampleCount > 0 &&
-                    it.node.outboundFramesSent > 0
+                it.serviceState == FieldCaptureServiceState.RUNNING && (it.session?.capturedSampleCount ?: 0) > 0
             }
             assertEquals(running.failureReason, FieldCaptureServiceState.RUNNING, running.serviceState)
-            assertTrue("capture advanced", running.node.capturedSampleCount > 0)
-            assertEquals("first frame is a join request", joinRequestKindId, running.node.lastOutboundMessageKindId)
+            assertEquals(FieldServiceMode.CAPTURE, running.mode)
+            assertTrue("capture advanced", (running.session?.capturedSampleCount ?: 0) > 0)
 
             FieldCaptureForegroundService.stop(InstrumentationRegistry.getInstrumentation().targetContext)
             val stopped = awaitStatus { it.serviceState == FieldCaptureServiceState.STOPPED }

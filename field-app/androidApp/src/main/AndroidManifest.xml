@@ -3,19 +3,35 @@
 
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <!-- API 34+: required for foregroundServiceType="microphone". -->
+    <!-- API 34+: required for foregroundServiceType="microphone" / "mediaPlayback". -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Screen-locked chirp lab / session runs. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- LAN session: host WebSocket server, joiner client, NSD, Wi-Fi locks. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- Android 17 local network protection; requested at runtime on SDK >= 37. -->
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
+    <!-- usesCleartextTraffic: the LAN session is ws:// to an arbitrary
+         private IP (unsealed dev transport; a domain-config cannot match IP
+         ranges). Sealing replaces this with an authenticated channel. -->
     <application
         android:allowBackup="false"
+        android:usesCleartextTraffic="true"
         android:label="@string/field_app_name"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.NoActionBar">
 
+        <!-- singleTop: a second am-start launch (mode extras) reaches onNewIntent
+             instead of stacking activities. -->
         <activity
             android:name=".FieldMainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTop">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -27,6 +43,6 @@
         <service
             android:name=".FieldCaptureForegroundService"
             android:exported="false"
-            android:foregroundServiceType="microphone" />
+            android:foregroundServiceType="microphone|mediaPlayback" />
     </application>
 </manifest>

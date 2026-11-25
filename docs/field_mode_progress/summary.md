@@ -52,6 +52,25 @@ are NEEDS-WORK.
    - localization results should carry cross-node `pair_tdoas`.
 5. To roll back, set `localization_coverage_wait_all_streaming_nodes_enabled=false` and restart.
 
+## Two Android phones: Phase 1 tooling and a live LAN session (2026-11-25)
+
+Details are in `phase1_sync_spike.md`.
+
+- **FFI surface v3.** Adds `chirp_waveforms`, `chirp_detector` and `FieldMeshDevice` (node, optional
+  host, session-clock alignment, capture anchor, chirp-round listener, LAN envelope, sync status).
+  `FieldMeshNode` is gone. Covered by `tests/two_device_session.rs`, an in-memory two-phone session
+  that ranges 3.000 m to within 0.3 mm with θ within 5 µs.
+- **Core.** `ListenForChirpRound` carries its slots. New: `message_routing`, `session_clock_alignment`,
+  `round_diagnostics`. The slot is now 250 ms, and the waveform and coarse-uncertainty settings are
+  new. The per-model tables exist but are empty.
+- **Core fixes from the live run.** A two-phone island locked out after a silent-gap flag; a silent
+  gap kept an unvalidated rate.
+- **field-app.** Chirp lab, duplex audio rig, a Ktor WebSocket star with NSD, the session UI, and
+  dumpsys status lines.
+- **Laptop tools.** `minimappr-sync-spike` analyser and `scripts/chirp_lab/`.
+- **Still open.** The A1–A9 measurement matrix needs tape-measured placements, so the gate table is
+  empty. The two-model items are PARTIAL by construction.
+
 ## Closeout (branch `field-mode-closeout`, 2026-11-23)
 
 The open issues below were worked by the closeout plan. Per-phase notes: `closeout_A.md`,
