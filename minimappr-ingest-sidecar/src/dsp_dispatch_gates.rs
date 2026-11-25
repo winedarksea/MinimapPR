@@ -92,6 +92,7 @@ impl DspWorker {
             run_classifier_render: true,
             skip_localization_result: true,
             omni_fallback_reason: Some(reason.to_string()),
+            shared_event_solve: None,
             omni_channels_override: Some(omni_channels.clone()),
             listenable_omni_channels_override: Some(omni_channels),
             manifest_store: self.manifest_store.clone(),
@@ -276,6 +277,7 @@ impl DspWorker {
                     run_classifier_render: true,
                     skip_localization_result: true,
                     omni_fallback_reason: Some("localization_coverage_unavailable".to_string()),
+                    shared_event_solve: None,
                     omni_channels_override: Some(fallback_render_channels),
                     listenable_omni_channels_override: Some(listenable_fallback_render_channels),
                     manifest_store: self.manifest_store.clone(),
@@ -474,6 +476,7 @@ impl DspWorker {
             // node at its rate in a mixed-rate cluster): omni render.
             omni_fallback_reason: (solve_eligible_sensor_count < MIN_SRP_CHANNEL_COUNT)
                 .then(|| "single_point_node".to_string()),
+            shared_event_solve: None,
             omni_channels_override: None,
             listenable_omni_channels_override: None,
             manifest_store: self.manifest_store.clone(),

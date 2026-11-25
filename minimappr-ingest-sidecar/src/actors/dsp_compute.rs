@@ -34,86 +34,106 @@ pub(crate) struct ComputeMathResult {
     pub(crate) localization_coverage_json: Option<serde_json::Value>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// `solve_id` of every SRP evaluation computed on this thread, so a test
+    /// can show a repeated solve reused its evaluation instead of re-solving.
+    pub(crate) static COMPUTED_SRP_SOLVE_IDS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The SRP-PHAT solve of `payload`'s localization window over its admitted pairs.
+fn solve_srp_phat(payload: &ComputePayload) -> SrpPhatEvaluation {
+    #[cfg(test)]
+    COMPUTED_SRP_SOLVE_IDS.with(|ids| ids.borrow_mut().push(payload.solve_id.clone()));
+    let windows = payload
+        .channel_states
+        .iter()
+        .map(|state| state.window.clone())
+        .collect::<Vec<_>>();
+    // Amplitude/SNR range prior (Phase 1c): when enabled, derive the projection
+    // distance for unobservable-range solves from the reference-channel received
+    // level instead of the fixed default. Ships off; both `None` reproduces the
+    // fixed-prior behaviour. The Python re-solve path applies its own prior from
+    // the manifest `received_level_dbfs`; this governs the Rust-native SRP solve.
+    let (range_prior_m, range_prior_std_m) = if payload
+        .config
+        .localization_amplitude_range_prior_enabled
+    {
+        match max_window_rms(&payload.channel_states) {
+            Some(rms) => {
+                let received_level_db = (20.0 * (rms.max(1.0e-9)).log10()) as f32;
+                let (prior_range_m, _clamped) = crate::range_projection::amplitude_range_prior_m(
+                    received_level_db,
+                    payload.config.localization_amplitude_reference_level_db,
+                    payload.config.localization_amplitude_prior_min_range_m,
+                    payload.config.localization_amplitude_prior_max_range_m,
+                );
+                (
+                    Some(prior_range_m),
+                    Some(payload.config.localization_amplitude_prior_std_factor * prior_range_m),
+                )
+            }
+            None => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+    // Only the reporter's admitted, connected sensors: a timeline-rejected
+    // node's channels would otherwise stay in the centroid, aperture and
+    // grid although none of its pairs with the reporter is measured.
+    let solve_channels = payload.pair_admission.solve_sensor_indices();
+    let srp_config = SrpPhatConfig {
+        localization_band_hz: payload.config.localization_band_hz,
+        grid_resolution_m: payload.config.localization_srp_grid_resolution_m,
+        search_padding_m: payload.config.localization_search_padding_m,
+        interp_factor: payload.config.gcc_phat_interp_factor,
+        far_field_default_range_m: payload.config.localization_far_field_default_range_m,
+        far_field_max_range_m: payload.config.localization_far_field_max_range_m,
+        range_prior_m,
+        range_prior_std_m,
+        half_space: payload.sensor_layout.solve_half_space(solve_channels),
+        reference_channel_floor: solver_reference_channel_floor(
+            &payload.sensor_layout,
+            solve_channels,
+            &payload.channel_states,
+            &payload.node_noise_floor_rms,
+            payload
+                .config
+                .localization_solve
+                .localization_solver_floor_relative_db,
+        ),
+        ..SrpPhatConfig::default()
+    };
+    let admits_pair = |ch_a: usize, ch_b: usize| payload.pair_admission.admits_pair(ch_a, ch_b);
+    estimate_tetrahedral_steering_with_solve_constraints(
+        windows.as_slice(),
+        solve_channels,
+        payload.sensor_layout.positions_m.as_slice(),
+        payload.sr,
+        payload.effective_sound_speed_mps,
+        srp_config,
+        SolveChannelConstraints {
+            admitted_pair_filter: Some(&admits_pair),
+            channel_clock_offsets: Some(payload.pair_admission.channel_clock_offsets()),
+        },
+    )
+}
+
 /// CPU-only math phase. Runs on a Rayon thread — no I/O, no .await.
 ///
 /// Performs SRP-PHAT and PCM rendering synchronously. All I/O is deferred to
 /// `run_io`, which is spawned onto the Tokio runtime after this returns.
 pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
     let localization_evaluation = if payload.run_srp && payload.channel_states.len() >= 4 {
-        let windows = payload
-            .channel_states
-            .iter()
-            .map(|state| state.window.clone())
-            .collect::<Vec<_>>();
-        // Amplitude/SNR range prior (Phase 1c): when enabled, derive the projection
-        // distance for unobservable-range solves from the reference-channel received
-        // level instead of the fixed default. Ships off; both `None` reproduces the
-        // fixed-prior behaviour. The Python re-solve path applies its own prior from
-        // the manifest `received_level_dbfs`; this governs the Rust-native SRP solve.
-        let (range_prior_m, range_prior_std_m) =
-            if payload.config.localization_amplitude_range_prior_enabled {
-                match max_window_rms(&payload.channel_states) {
-                    Some(rms) => {
-                        let received_level_db = (20.0 * (rms.max(1.0e-9)).log10()) as f32;
-                        let (prior_range_m, _clamped) =
-                            crate::range_projection::amplitude_range_prior_m(
-                                received_level_db,
-                                payload.config.localization_amplitude_reference_level_db,
-                                payload.config.localization_amplitude_prior_min_range_m,
-                                payload.config.localization_amplitude_prior_max_range_m,
-                            );
-                        (
-                            Some(prior_range_m),
-                            Some(
-                                payload.config.localization_amplitude_prior_std_factor
-                                    * prior_range_m,
-                            ),
-                        )
-                    }
-                    None => (None, None),
-                }
-            } else {
-                (None, None)
-            };
-        // Only the reporter's admitted, connected sensors: a timeline-rejected
-        // node's channels would otherwise stay in the centroid, aperture and
-        // grid although none of its pairs with the reporter is measured.
-        let solve_channels = payload.pair_admission.solve_sensor_indices();
-        let srp_config = SrpPhatConfig {
-            localization_band_hz: payload.config.localization_band_hz,
-            grid_resolution_m: payload.config.localization_srp_grid_resolution_m,
-            search_padding_m: payload.config.localization_search_padding_m,
-            interp_factor: payload.config.gcc_phat_interp_factor,
-            far_field_default_range_m: payload.config.localization_far_field_default_range_m,
-            far_field_max_range_m: payload.config.localization_far_field_max_range_m,
-            range_prior_m,
-            range_prior_std_m,
-            half_space: payload.sensor_layout.solve_half_space(solve_channels),
-            reference_channel_floor: solver_reference_channel_floor(
-                &payload.sensor_layout,
-                solve_channels,
-                &payload.channel_states,
-                &payload.node_noise_floor_rms,
-                payload
-                    .config
-                    .localization_solve
-                    .localization_solver_floor_relative_db,
-            ),
-            ..SrpPhatConfig::default()
-        };
-        let admits_pair = |ch_a: usize, ch_b: usize| payload.pair_admission.admits_pair(ch_a, ch_b);
-        estimate_tetrahedral_steering_with_solve_constraints(
-            windows.as_slice(),
-            solve_channels,
-            payload.sensor_layout.positions_m.as_slice(),
-            payload.sr,
-            payload.effective_sound_speed_mps,
-            srp_config,
-            SolveChannelConstraints {
-                admitted_pair_filter: Some(&admits_pair),
-                channel_clock_offsets: Some(payload.pair_admission.channel_clock_offsets()),
-            },
-        )
+        // A covering render repeats its event's solve on the same inputs, so
+        // the evaluation is computed once per solve (`dsp_covered_event_solve`).
+        match payload.shared_event_solve.as_deref() {
+            Some(shared_evaluation) => shared_evaluation
+                .get_or_init(|| solve_srp_phat(&payload))
+                .clone(),
+            None => solve_srp_phat(&payload),
+        }
     } else {
         let skipped_reason = if payload.run_srp {
             // run_srp was true but channel count was insufficient — shouldn't happen
@@ -186,17 +206,25 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
                 render_start_ns: payload.classifier_render_start_ns,
                 render_end_ns: payload.classifier_render_end_ns,
             });
-            let (listenable_bytes, _) = compute_render_bytes(RenderComputeRequest {
-                config: &payload.config,
-                sound_speed_mps: payload.effective_sound_speed_mps,
-                channels: listenable_render_channels,
-                mic_positions_m: payload.sensor_layout.positions_m.as_slice(),
-                sample_rate_hz: payload.sr,
-                localization: Some(&localization),
-                fallback_reason: fallback_reason.clone(),
-                render_start_ns: payload.classifier_render_start_ns,
-                render_end_ns: payload.classifier_render_end_ns,
-            });
+            // Concealment only changes windows with missing spans; with none,
+            // the listenable render is the canonical one, so it is not redone.
+            let listenable_bytes =
+                if windows_bit_identical(listenable_render_channels, render_channels) {
+                    bytes.clone()
+                } else {
+                    compute_render_bytes(RenderComputeRequest {
+                        config: &payload.config,
+                        sound_speed_mps: payload.effective_sound_speed_mps,
+                        channels: listenable_render_channels,
+                        mic_positions_m: payload.sensor_layout.positions_m.as_slice(),
+                        sample_rate_hz: payload.sr,
+                        localization: Some(&localization),
+                        fallback_reason: fallback_reason.clone(),
+                        render_start_ns: payload.classifier_render_start_ns,
+                        render_end_ns: payload.classifier_render_end_ns,
+                    })
+                    .0
+                };
             (Some(bytes), Some(listenable_bytes), Some(meta), cov)
         } else {
             (None, None, None, None)
@@ -410,6 +438,20 @@ pub async fn run_io(result: ComputeMathResult) {
             }
         }
     }
+}
+
+/// Bitwise, so a NaN or a signed zero never lets two different inputs pass.
+fn windows_bit_identical(left: &[Vec<f32>], right: &[Vec<f32>]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left_window, right_window)| {
+            left_window.len() == right_window.len()
+                && left_window
+                    .iter()
+                    .zip(right_window)
+                    .all(|(left_sample, right_sample)| {
+                        left_sample.to_bits() == right_sample.to_bits()
+                    })
+        })
 }
 
 /// The trailing classification windows with every channel the pair admission

@@ -398,6 +398,7 @@ pub(crate) fn localization_only_template(
         run_classifier_render: false,
         skip_localization_result: false,
         omni_fallback_reason: payload.omni_fallback_reason.clone(),
+        shared_event_solve: None,
         omni_channels_override: None,
         listenable_omni_channels_override: None,
         manifest_store: payload.manifest_store.clone(),
