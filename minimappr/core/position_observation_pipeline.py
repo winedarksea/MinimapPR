@@ -25,9 +25,11 @@ drop, cross-reporter merge).
   start a track, ambiguous between tracks, unknown id) is updated by its
   classification through the label-aware ``update``: still one update.
 - Hold rule: a fix whose one gating track is a labelled stationary_hold track
-  is held for its classification (not an event-only Rust solve, which has none). An informative label applies it through the
-  label-aware ``update``; an abstention, or a classification that finds
-  nothing trackable, drops it; a classification that never comes
+  is held for its classification (not an event-only Rust solve, which has
+  none). An informative label applies it to that track unless the label gates
+  reject it, then through the label-aware ``update``; an abstention, or a
+  classification that finds nothing trackable, drops it; a classification
+  that never comes
   (``release_held_position_without_classification``, ledger eviction, or the
   ``held_fix_max_wait_seconds`` deadline) applies it geometry-only.
 - An abstention never labels or reveals a track: it retracts a hidden track
@@ -416,7 +418,9 @@ class PositionObservationPipeline:
                 return None
             entry.cancel_held_deadline()
             metrics.position_observations_held_applied_with_label += 1
-            return await tracker.update_with_classification(**classified_update_kwargs)
+            return await tracker.apply_held_position_with_label(
+                entry.observation, gating_track_id=entry.track_id, classified_update_kwargs=classified_update_kwargs
+            )
         if entry.state is SolveLedgerState.APPLIED:
             if not abstention:
                 metrics.position_observation_labels_attached += 1

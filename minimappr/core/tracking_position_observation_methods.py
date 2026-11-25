@@ -287,6 +287,34 @@ class TrackManagerPositionObservationMethods:
                 return self._apply_classification_to_track(track, classified_update_kwargs)
         return await self.update_with_classification(**classified_update_kwargs)
 
+    async def apply_held_position_with_label(
+        self,
+        observation: "PositionObservation",
+        *,
+        gating_track_id: str,
+        classified_update_kwargs: dict[str, Any],
+    ) -> TrackState | None:
+        """Resolve a held fix with its informative label.
+
+        The fix goes to the track that gated it, now with the label, unless the
+        label-dependent gates reject that track (another species, a concurrent
+        perch) or it is gone; then the label-aware ``update`` places it (a new
+        track for the other bird). Re-associating every held fix from scratch
+        instead would let one poorly conditioned fix jump to a nearer
+        provisional track whose filter is still loose (``gate_flock_echo``).
+        """
+        async with self._lock:
+            self._age_tracks(observation.event_time_ns)
+            track = self._tracks.get(gating_track_id)
+            if (
+                track is not None
+                and track.status != TrackStatus.DROPPED.value
+                and not self._classification_rejects_track(track, classified_update_kwargs)
+            ):
+                self._apply_position_to_track(track, observation)
+                return self._apply_classification_to_track(track, classified_update_kwargs)
+        return await self.update_with_classification(**classified_update_kwargs)
+
     async def refresh_observed_track_recency(self, *, observed_track_id: str | None, sensor_count: int) -> TrackState | None:
         """An abstention on the track a solve's position moved: no label, no reveal,
         only the recency the label step would refresh. ``None`` if the track is gone."""
@@ -338,16 +366,24 @@ class TrackManagerPositionObservationMethods:
             classifier_scores=update_kwargs.get("classifier_scores"),
             species_evidence=update_kwargs.get("species_evidence"),
         )
+        timestamp_ns = int(update_kwargs["timestamp_ns"])
+        # Every live track, as ``update`` passes them: the concurrent-perch guard
+        # needs the neighbours to see who sang since.
+        live_tracks = [
+            self._filter.predict(candidate, max((timestamp_ns - candidate.last_seen_ns) / 1_000_000_000.0, 0.0))
+            for candidate in self._tracks.values()
+            if candidate.status != TrackStatus.DROPPED.value
+        ]
         admitted = self._field_mode.association_candidates(
-            timestamp_ns=int(update_kwargs["timestamp_ns"]),
+            timestamp_ns=timestamp_ns,
             position_m=update_kwargs["position_m"],
             measurement_covariance_m2=update_kwargs.get("measurement_covariance_m2"),
             label_category=label_category,
             evidence=evidence,
-            tracks=[track],
+            tracks=live_tracks,
             track_filter=self._filter,
         )
-        return not admitted
+        return track.id not in {candidate.id for candidate in admitted}
 
     def _classification_contradicts_track(self, track: TrackState, label_category: str | None) -> bool:
         # The same rule the associator's category gate applies to a labeled fix.
