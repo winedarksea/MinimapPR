@@ -44,6 +44,7 @@ from minimappr.core.audio_buffer import AudioCoverageStats, MultiSensorBuffer
 from minimappr.core.beamforming import create_beamformer
 from minimappr.core.classification_chunking import ClassificationChunkingPolicy
 from minimappr.core.classification import ClassificationOrchestrator, ClassifiedResult
+from minimappr.core.classification_empty_outcome import resolve_classification_without_detections
 from minimappr.core.classification_priority import (
     PriorityStageQueue,
     PriorityWeights,
@@ -75,7 +76,6 @@ from minimappr.core.localized_render_handoff_hooks import (
     SOLVE_ORIGIN_PYTHON_INGEST,
     build_localization_seam_collaborators,
 )
-from minimappr.core.classification_empty_outcome import resolve_classification_without_detections
 from minimappr.core.position_observation import position_observation_solve_id
 from minimappr.core.point_network_call_classification import PointNetworkCallClassifier
 from minimappr.core.point_network_call_requests import classify_python_ingest_call, register_python_ingest_call
