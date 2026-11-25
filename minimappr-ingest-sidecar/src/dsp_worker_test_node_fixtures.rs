@@ -19,7 +19,7 @@ use minimappr_core::{
 pub(super) const FIXTURE_SAMPLE_RATE_HZ: u32 = 16_000;
 pub(super) const FIXTURE_FRAME_SAMPLES: usize = 512;
 pub(super) const FIXTURE_FRAME_DURATION_NS: u64 = 32_000_000;
-const FIXTURE_STREAM_START_NS: u64 = 1_000_000_000;
+pub(super) const FIXTURE_STREAM_START_NS: u64 = 1_000_000_000;
 /// Source audio is pre-rolled this far so the farthest sensor's delayed read
 /// never indexes before the start of the signal.
 const SOURCE_PRE_ROLL_SAMPLES: usize = 16_000;

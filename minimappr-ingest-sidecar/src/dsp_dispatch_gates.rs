@@ -146,7 +146,17 @@ impl DspWorker {
         let solve_eligible_sensor_count = owned.sensor_layout.solve_eligible_sensor_count();
         // Only the final contiguous segment of an upload reaches dispatch, so
         // the floor follows the audio each solve decision is made on.
-        let node_frame_relatively_loud = self.localization_trigger.observe_node_frame(
+        self.localization_trigger.observe_node_session(
+            &owned.sensor_layout.reporting_node_id,
+            owned
+                .decoded
+                .frame_timing
+                .last()
+                .and_then(|frame| frame.boot_session),
+            owned.now_ns,
+            u128::from(self.config.stream_inactivity_evict_seconds) * 1_000_000_000,
+        );
+        let node_frame = self.localization_trigger.observe_node_frame(
             &owned.sensor_layout.reporting_node_id,
             &owned.decoded.channels,
             owned.sr,
@@ -280,7 +290,7 @@ impl DspWorker {
             }
         }
 
-        let active_channels = eligible_localization_channels(
+        let mut active_channels = eligible_localization_channels(
             &buffered.channel_states,
             self.config.min_coverage_ratio,
         );
@@ -296,12 +306,26 @@ impl DspWorker {
             pending_backlog_depth,
             LocalizationTriggerEvidence {
                 windows: &windows,
-                node_frame_relatively_loud,
+                node_frame_relatively_loud: node_frame.relatively_loud,
             },
         );
         // Taken before a coverage deferral clears `run_srp`: the parked
         // template solves for this same trigger.
         let trigger_attempt_kind = timing_gates.solve_attempt_kind();
+        let event_center_time_ns = event_window_center_time_ns(
+            timing_gates.event_trigger,
+            node_frame,
+            buffered.end_ns,
+            buffered.localization_center_time_ns,
+            self.config.window_seconds,
+            self.deferred_localizations.is_enabled(),
+        );
+        let mut buffered = buffered;
+        if event_center_time_ns != buffered.localization_center_time_ns {
+            // A solve not parked below reads the onset window now.
+            active_channels =
+                self.recenter_localization_window(&owned, &mut buffered, event_center_time_ns)?;
+        }
         let coverage_deferral_span = self.coverage_deferral_span(
             &owned.buffer_key,
             buffered.localization_center_time_ns,

@@ -86,6 +86,8 @@ mod dsp_solver_reference_floor;
 mod dsp_window_geometry;
 #[path = "explicit_cluster_sensor_list.rs"]
 mod explicit_cluster_sensor_list;
+#[path = "localization_event_onset.rs"]
+mod localization_event_onset;
 #[path = "localization_event_span.rs"]
 mod localization_event_span;
 #[cfg(test)]
@@ -101,6 +103,7 @@ pub(crate) use self::dsp_compute_payload::*;
 use self::dsp_covered_event_solve::*;
 use self::dsp_dispatch_gate_key::*;
 use self::dsp_localization_trigger::*;
+use self::localization_event_onset::*;
 use self::localization_event_span::*;
 use self::dsp_manifest_buffering::*;
 pub(crate) use self::dsp_manifest_publish::*;
@@ -534,6 +537,7 @@ impl DspWorker {
         let cutoff = now_ns.saturating_sub(ttl_ns);
         self.sensor_registry.evict_stale_sensors(now_ns);
         self.node_clock_quality.evict_stale(now_ns);
+        self.localization_trigger.evict_stale_node_floors(now_ns, ttl_ns);
         let stale: Vec<String> = self
             .last_heartbeat_ns_by_stream
             .iter()

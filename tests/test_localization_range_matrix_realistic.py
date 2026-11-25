@@ -125,8 +125,11 @@ DEFAULT_DIAGONAL_CELL_IDS = (
 )
 
 # Measured with --runxfail on the milestone-2 integration head (R4, R5, R7, P9,
-# E4 merged). Every reason below is an open defect, not pending milestone-2
-# work: remove an entry when the fix lands (strict: an unexpected pass fails).
+# E4 merged), re-measured after the relative-trigger onset window and the
+# compact-array guard fix (which cleared the 100 m lone-tetra regression, the
+# 1 km planar + point GPS bearing, and the 100 m hand-measured planar cells).
+# Every reason below is an open defect, not pending milestone-2 work: remove an
+# entry when the fix lands (strict: an unexpected pass fails).
 _AFTER_M2 = "open after milestone 2 (R4/R5/R7/P9 on base)"
 _HAND_POSITION_NOT_WIDENED = (
     f"{_AFTER_M2}: a hand-measured position_std_m of 0.3 m does not widen the cross-node solve covariance"
@@ -143,10 +146,6 @@ _SPREAD_FAR_FIELD = (
 _COMPACT_PLANAR_POINT_WEAK_CLOCK = (
     "solver gap reported by P9: compact planar + one point node with a biased NTP clock collapses near the "
     "array with a too-small covariance"
-)
-_SINGLE_TETRA_100M_REGRESSION = (
-    "regression on the milestone-2 head (passed on the milestone-1 base): a lone tetra at 100 m now returns "
-    "range_refined at the node, 99.7 m off, stated std [0.19, 0.14, 0.07] m, claiming a 3-D fix"
 )
 
 
@@ -184,28 +183,13 @@ KNOWN_PIPELINE_GAPS: dict[str, str] = {
     "10m-planar_point_coplanar-ntp_timed-gps": _gap(
         _COMPACT_PLANAR_POINT_WEAK_CLOCK, "9.4 m off vs stated std [0.18, 0.13, 0.24] m, claims a 3-D fix"
     ),
-    "10m-planar_point_coplanar-ntp_timed-hand_measured": _gap(
-        _COMPACT_PLANAR_POINT_WEAK_CLOCK, "9.9 m off, bearing 68 deg wrong; earlier 9.5 m off vs stated 0.06 m"
-    ),
     "10m-four_node_spread-gps_locked-hand_measured": _gap(
         _HAND_POSITION_NOT_WIDENED, "2.1 m off, bearing-only; oracle guarantees a 3-D fix"
     ),
     "10m-four_node_spread-ntp_timed-hand_measured": _gap(
         _NTP_CROSS_NODE_UNUSABLE, "stored omni (render fallback); oracle guarantees a 3-D fix"
     ),
-    # -- lone tetra at 100 m --
-    **{
-        f"100m-single_tetra-{clock}-{position}": _gap(_SINGLE_TETRA_100M_REGRESSION, "identical in all four cells")
-        for clock in CLOCK_CLASSES
-        for position in POSITION_SOURCES
-    },
     # -- planar far field --
-    "100m-single_planar-gps_locked-hand_measured": _gap(
-        _PLANAR_FAR_FIELD, "bearing-projected with 28.7 deg elevation error vs stated angular std 3.9 deg"
-    ),
-    "100m-single_planar-ntp_timed-hand_measured": _gap(
-        _PLANAR_FAR_FIELD, "bearing-projected with 28.7 deg elevation error vs stated angular std 3.9 deg"
-    ),
     **{
         f"1000m-single_planar-{clock}-{position}": _gap(_PLANAR_FAR_FIELD, "stored omni (low_localization_confidence)")
         for clock in CLOCK_CLASSES
@@ -220,12 +204,6 @@ KNOWN_PIPELINE_GAPS: dict[str, str] = {
     ),
     "100m-planar_point_coplanar-ntp_timed-hand_measured": _gap(
         _COMPACT_PLANAR_POINT_WEAK_CLOCK, "96 m off (at the array) vs stated std [0.83, 0.78, 1.30] m, claims a 3-D fix"
-    ),
-    "1000m-planar_point_coplanar-gps_locked-gps": _gap(
-        _PLANAR_FAR_FIELD, "range_asymptotic with bearing 84 deg wrong (passed on the milestone-1 base)"
-    ),
-    "1000m-planar_point_coplanar-gps_locked-hand_measured": _gap(
-        _PLANAR_FAR_FIELD, "bearing 75 deg wrong (passed on the milestone-1 base)"
     ),
     "1000m-planar_point_coplanar-ntp_timed-gps": _gap(
         _COMPACT_PLANAR_POINT_WEAK_CLOCK, "1001 m off (at the array) vs stated std [1.46, 1.11, 2.66] m, claims a 3-D fix"
@@ -252,6 +230,10 @@ KNOWN_FLAKY_CELLS: dict[str, str] = {
     ),
     "10m-four_node_spread-gps_locked-gps": (
         "flaky on the milestone-2 head: usually a 0.15 m 3-D fix, once no stored detection covered the event"
+    ),
+    "10m-planar_point_coplanar-ntp_timed-hand_measured": (
+        f"flaky after the onset-window fix ({_COMPACT_PLANAR_POINT_WEAK_CLOCK}): passes when planar-a reports "
+        "(3.9 m off, bearing right), fails when point-b reports (9.9 m off, bearing 68 deg wrong); 1 of 3 runs passed"
     ),
 }
 

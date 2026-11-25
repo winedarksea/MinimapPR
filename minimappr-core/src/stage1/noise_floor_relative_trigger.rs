@@ -68,6 +68,21 @@ impl NoiseFloorRelativeTrigger {
         self.floor_by_node.len()
     }
 
+    /// RMS a frame from this node must reach to trigger now (floor plus the
+    /// SNR bar and fluctuation allowance); `None` until the node is tracked.
+    pub fn trigger_level_rms(&self, node_id: &str) -> Option<f64> {
+        let state = self.floor_by_node.get(node_id)?;
+        let required_db = self.config.snr_db + self.config.fluctuation_multiplier * state.mean_excess_db;
+        Some(10f64.powf((state.floor_db + required_db) / DECIBELS_PER_AMPLITUDE_DECADE))
+    }
+
+    /// Drops the node's floor so it re-learns (and re-warms) from its next
+    /// frame: after a reboot or a purge its old floor describes another gain
+    /// state or site.
+    pub fn forget_node(&mut self, node_id: &str) {
+        self.floor_by_node.remove(node_id);
+    }
+
     /// Update the node's floor with this frame; true when the frame stands
     /// `snr_db` (+ the fluctuation allowance) above the floor before it.
     pub fn observe(&mut self, node_id: &str, frame_rms: f64, frame_seconds: f64) -> bool {
@@ -124,5 +139,24 @@ mod tests {
         assert!(trigger.observe("n", 4e-4, frame_seconds));
         assert!(!trigger.observe("n", f64::NAN, frame_seconds));
         assert_eq!(trigger.tracked_node_count(), 1);
+    }
+
+    #[test]
+    fn trigger_level_is_the_bar_a_frame_must_clear_and_forgetting_rewarms() {
+        let mut trigger = NoiseFloorRelativeTrigger::new(RelativeTriggerConfig::default());
+        let frame_seconds = 0.02;
+        assert_eq!(trigger.trigger_level_rms("n"), None);
+        for _ in 0..200 {
+            trigger.observe("n", 1e-4, frame_seconds);
+        }
+        let level = trigger.trigger_level_rms("n").unwrap();
+        // Steady noise: the bar is the floor plus the 8 dB SNR.
+        assert!((level / (1e-4 * 10f64.powf(8.0 / 20.0)) - 1.0).abs() < 1e-6);
+        assert!(!trigger.clone().observe("n", level * 0.99, frame_seconds));
+        assert!(trigger.clone().observe("n", level * 1.01, frame_seconds));
+        trigger.forget_node("n");
+        assert_eq!(trigger.tracked_node_count(), 0);
+        // The first frame after forgetting seeds the floor and never triggers.
+        assert!(!trigger.observe("n", 1.0, frame_seconds));
     }
 }

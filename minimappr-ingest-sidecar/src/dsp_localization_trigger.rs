@@ -43,6 +43,27 @@ pub(crate) struct LocalizationEventTrigger {
     cooldown_ns: u128,
     node_noise_floors: NoiseFloorRelativeTrigger,
     last_dispatched_trigger_ns_by_stream: HashMap<String, u128>,
+    /// Per node: the firmware boot session and receipt time of its last frame,
+    /// so a reboot or a long silence resets the floor instead of leaving one
+    /// learnt under another gain state.
+    node_floor_sessions: HashMap<String, NodeFloorSession>,
+}
+
+#[derive(Clone, Copy)]
+struct NodeFloorSession {
+    boot_session: Option<u32>,
+    last_heard_ns: u128,
+}
+
+/// What the reporter's newest frame says about an event.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct NodeFrameTrigger {
+    /// The frame stood above the node's floor and the relative trigger is on.
+    pub(crate) relatively_loud: bool,
+    /// Seconds from the frame's first sample to the event onset (the first
+    /// short block that reaches the trigger level); set when `relatively_loud`.
+    pub(crate) onset_offset_seconds: Option<f64>,
+    pub(crate) frame_seconds: f64,
 }
 
 impl LocalizationEventTrigger {
@@ -64,33 +85,87 @@ impl LocalizationEventTrigger {
                 as u128,
             node_noise_floors: NoiseFloorRelativeTrigger::new(relative_trigger_config),
             last_dispatched_trigger_ns_by_stream: HashMap::new(),
+            node_floor_sessions: HashMap::new(),
         }
+    }
+
+    /// Resets the node's floor when its firmware rebooted (new boot session)
+    /// or it was silent past `stale_after_ns`: the old floor describes another
+    /// gain state, and a stale floor would mute or flood the relative trigger
+    /// until it re-converged. Call before `observe_node_frame`.
+    pub(crate) fn observe_node_session(
+        &mut self,
+        node_id: &str,
+        boot_session: Option<u32>,
+        now_ns: u128,
+        stale_after_ns: u128,
+    ) {
+        let session = NodeFloorSession {
+            boot_session,
+            last_heard_ns: now_ns,
+        };
+        if let Some(previous) = self
+            .node_floor_sessions
+            .insert(node_id.to_string(), session)
+        {
+            let rebooted = previous.boot_session.is_some()
+                && boot_session.is_some()
+                && previous.boot_session != boot_session;
+            let stale = now_ns.saturating_sub(previous.last_heard_ns) >= stale_after_ns;
+            if rebooted || stale {
+                self.node_noise_floors.forget_node(node_id);
+            }
+        }
+    }
+
+    /// Forgets the floors (and sessions) of nodes silent past `stale_after_ns`,
+    /// alongside the stream purge, so a node that left takes no floor with it
+    /// when it returns.
+    pub(crate) fn evict_stale_node_floors(&mut self, now_ns: u128, stale_after_ns: u128) {
+        let node_floors = &mut self.node_noise_floors;
+        self.node_floor_sessions.retain(|node_id, session| {
+            let keep = now_ns.saturating_sub(session.last_heard_ns) < stale_after_ns;
+            if !keep {
+                node_floors.forget_node(node_id);
+            }
+            keep
+        });
     }
 
     /// Feeds the node's newly decoded (preprocessed) audio to its floor, once
     /// per frame. The level is the strongest channel's RMS, as in Python's
     /// `trigger_rms` (averaging channels can cancel narrowband birdsong).
-    /// True when the frame stands above the node's floor and the relative
-    /// trigger is enabled.
+    /// A frame that stands above the node's floor (relative trigger enabled)
+    /// also reports where in it the event began.
     pub(crate) fn observe_node_frame(
         &mut self,
         node_id: &str,
         channels: &[Vec<f32>],
         sample_rate_hz: u32,
-    ) -> bool {
+    ) -> NodeFrameTrigger {
         let frame_samples = channels.iter().map(Vec::len).max().unwrap_or(0);
         if frame_samples == 0 || sample_rate_hz == 0 {
-            return false;
+            return NodeFrameTrigger::default();
         }
         let frame_seconds = frame_samples as f64 / f64::from(sample_rate_hz);
         let frame_rms = channels
             .iter()
             .map(|channel| f64::from(window_rms(channel)))
             .fold(0.0, f64::max);
+        // The bar this frame is judged against, before the frame moves the floor.
+        let trigger_level_rms = self.node_noise_floors.trigger_level_rms(node_id);
         let relatively_loud = self
             .node_noise_floors
-            .observe(node_id, frame_rms, frame_seconds);
-        relatively_loud && self.noise_floor_relative_enabled
+            .observe(node_id, frame_rms, frame_seconds)
+            && self.noise_floor_relative_enabled;
+        let onset_offset_seconds = trigger_level_rms
+            .filter(|_| relatively_loud)
+            .and_then(|level_rms| event_onset_offset_seconds(channels, sample_rate_hz, level_rms));
+        NodeFrameTrigger {
+            relatively_loud,
+            onset_offset_seconds,
+            frame_seconds,
+        }
     }
 
     /// Which gate opens a solve on this buffer now, without starting the
@@ -143,6 +218,11 @@ impl LocalizationEventTrigger {
 
     pub(crate) fn forget_stream(&mut self, stream_key: &str) {
         self.last_dispatched_trigger_ns_by_stream.remove(stream_key);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn node_floor_rms(&self, node_id: &str) -> Option<f64> {
+        self.node_noise_floors.floor_rms(node_id)
     }
 
     #[cfg(test)]
