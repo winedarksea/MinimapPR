@@ -17,6 +17,7 @@ from minimappr.core.localization_band_policy import (
     array_alias_ceiling_hz,
     band_policy_from_config,
     normalize_band_hz,
+    solve_pair_front_ends,
     tukey_taper,
 )
 from minimappr.config import Settings
@@ -63,7 +64,9 @@ def test_intra_array_pairs_use_their_array_ceiling_and_cross_node_pairs_the_wide
     assert intra.taper_fraction is None
     assert intra.band_hz[0] == 50.0
     assert intra.band_hz[1] == pytest.approx(3266.0, abs=2.0)
-    assert fronts.pair_front_end("tetra:ch2", "point-a:ch0") == PairFrontEnd(band_hz=(50.0, 11_000.0), taper_fraction=0.2)
+    assert fronts.pair_front_end("tetra:ch2", "point-a:ch0") == PairFrontEnd(
+        band_hz=(50.0, 11_000.0), taper_fraction=0.2, phat_beta=0.7
+    )
     assert fronts.is_cross_node_pair("point-a:ch0", "point-b:ch0")
 
 
@@ -94,6 +97,21 @@ def test_zero_taper_keeps_the_rectangular_window_on_cross_node_pairs() -> None:
         LocalizationBandPolicy(cross_node_window_taper_fraction=0.0), positions, node_ids, SOUND_SPEED_MPS
     )
     assert fronts.pair_front_end("tetra:ch0", "point-a:ch0").taper_fraction is None
+
+
+def test_python_solver_front_ends_leave_intra_array_pairs_on_every_bin() -> None:
+    positions, node_ids = _tetra_plus_points()
+    fronts = solve_pair_front_ends(LocalizationBandPolicy(), positions, list(positions), node_ids, SOUND_SPEED_MPS)
+    assert fronts is not None
+    assert fronts.pair_front_end("tetra:ch0", "tetra:ch3") == PairFrontEnd(band_hz=None, taper_fraction=None)
+    assert fronts.pair_front_end("tetra:ch0", "point-a:ch0").band_hz == (50.0, 11_000.0)
+    assert solve_pair_front_ends(None, positions, list(positions), node_ids, SOUND_SPEED_MPS) is None
+
+
+def test_beta_of_one_is_plain_phat_on_cross_node_pairs() -> None:
+    positions, node_ids = _tetra_plus_points()
+    fronts = SensorPairFrontEnds(LocalizationBandPolicy(cross_node_phat_beta=1.0), positions, node_ids, SOUND_SPEED_MPS)
+    assert fronts.pair_front_end("tetra:ch0", "point-a:ch0").phat_beta is None
 
 
 def test_tukey_taper_ramps_both_ends_and_leaves_the_middle() -> None:
@@ -161,6 +179,7 @@ def test_cross_node_front_end_recovers_a_call_lag_the_array_band_misses(true_lag
         sample_rate_hz,
         max_tau_s,
         band_hz=front.band_hz,
+        phat_beta=front.phat_beta,
     )
     assert abs(split_tau_s - true_lag_s) < 2.0 / sample_rate_hz
     assert abs(legacy_tau_s - true_lag_s) > 10.0 / sample_rate_hz

@@ -51,9 +51,12 @@ fn shared_spectra_reproduce_per_pair_correlation_bit_for_bit() {
     ];
     let mut spectra = FullWindowSpectra::new(windows.len());
     let front_ends = [
-        (1.0e-4, PairFrontEnd { band_hz: [50.0, 3430.0], taper_fraction: None }),
-        (0.012, PairFrontEnd { band_hz: [0.0, 0.0], taper_fraction: None }),
-        (0.012, PairFrontEnd { band_hz: [50.0, 11_000.0], taper_fraction: Some(0.2) }),
+        (1.0e-4, PairFrontEnd { band_hz: [50.0, 3430.0], taper_fraction: None, phat_beta: None }),
+        (0.012, PairFrontEnd { band_hz: [0.0, 0.0], taper_fraction: None, phat_beta: None }),
+        (
+            0.012,
+            PairFrontEnd { band_hz: [50.0, 11_000.0], taper_fraction: Some(0.2), phat_beta: Some(0.8) },
+        ),
     ];
     let windowed = |channel: usize, n: usize, taper_fraction: Option<f32>| {
         let mut window = windows[channel][..n].to_vec();
@@ -78,14 +81,21 @@ fn shared_spectra_reproduce_per_pair_correlation_bit_for_bit() {
                     4,
                 );
                 let n = windows[ch_a].len().min(windows[ch_b].len());
-                let per_pair = phat_correlation(
-                    &windowed(ch_a, n, front_end.taper_fraction),
-                    &windowed(ch_b, n, front_end.taper_fraction),
-                    48_000,
-                    max_tau_s,
-                    Some(front_end.band_hz),
-                    4,
-                );
+                let per_pair = if n == 0 {
+                    phat_correlation(&[], &[], 48_000, max_tau_s, None, 4)
+                } else {
+                    let fft_len = phat_fft_len(n);
+                    phat_correlation_from_spectra(
+                        &phat_forward_spectrum(&windowed(ch_a, n, front_end.taper_fraction), fft_len),
+                        &phat_forward_spectrum(&windowed(ch_b, n, front_end.taper_fraction), fft_len),
+                        fft_len,
+                        48_000,
+                        max_tau_s,
+                        Some(front_end.band_hz),
+                        front_end.phat_beta,
+                        4,
+                    )
+                };
                 assert_bit_identical(&shared, &per_pair);
             }
         }

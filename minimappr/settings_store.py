@@ -44,6 +44,7 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "localization_band_max_hz": float,
     "localization_cross_node_band_max_hz": float,
     "localization_cross_node_window_taper_fraction": float,
+    "localization_cross_node_phat_beta": float,
     "classification_audio_source": str,
     "birdnet_enabled": bool,
     "drone_head_enabled": bool,

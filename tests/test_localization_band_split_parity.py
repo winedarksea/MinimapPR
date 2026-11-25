@@ -100,12 +100,14 @@ def test_both_engines_split_the_band_by_pair_type_and_agree_on_cross_node_lags()
             assert front.band_hz[1] == pytest.approx(3266.0, abs=2.0)
             continue
         assert front.band_hz == (50.0, 11_000.0)
+        assert front.phat_beta == pytest.approx(0.7)
         python_lag_s, _ = gcc_phat(
             tukey_taper(channels[ch_a], front.taper_fraction),
             tukey_taper(channels[ch_b], front.taper_fraction),
             SAMPLE_RATE_HZ,
             0.1,
             band_hz=front.band_hz,
+            phat_beta=front.phat_beta,
         )
         true_lag_s = arrival_s[ch_a] - arrival_s[ch_b]
         assert abs(rust["lag_seconds"] - python_lag_s) < LAG_AGREEMENT_SAMPLES * sample_s, (ch_a, ch_b)

@@ -24,6 +24,8 @@ import numpy as np
 
 # Below this widest-pair spacing an array cannot alias: its ceiling is Nyquist.
 COINCIDENT_ARRAY_SPACING_M = 1.0e-6
+# Whitening exponent of plain PHAT (every bin to unit magnitude).
+PLAIN_PHAT_BETA = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,12 +36,19 @@ class LocalizationBandPolicy:
     intra_array_band_max_hz: float = 0.0
     cross_node_band_max_hz: float = 11_000.0
     cross_node_window_taper_fraction: float = 0.2
+    # Cross-node PHAT-beta whitening exponent (1 = plain PHAT): below 1 the
+    # empty bins a band-limited source leaves in the wide band count less than
+    # its signal bins instead of being raised to equal weight.
+    cross_node_phat_beta: float = 0.7
 
 
 @dataclass(frozen=True, slots=True)
 class PairFrontEnd:
-    band_hz: tuple[float, float]
+    # ``None``: every bin (the Python solvers' intra-array pairs, see
+    # ``SensorPairFrontEnds``).
+    band_hz: tuple[float, float] | None
     taper_fraction: float | None
+    phat_beta: float | None = None
 
 
 def array_alias_ceiling_hz(mic_positions_m: Iterable[np.ndarray], sound_speed_mps: float) -> float:
@@ -77,6 +86,13 @@ class SensorPairFrontEnds:
     ``sensor_node_ids`` says which rigid array (node) each sensor is on;
     ``None`` puts every sensor on one array (a single-node solve). Only the
     given (solving) sensors set an array's geometry.
+
+    ``mask_intra_array_pairs=False`` leaves intra-array pairs on every bin.
+    The Python solvers use it: their old time-domain 50-3430 Hz bandpass was
+    undone by PHAT whitening, so their intra-array pairs always correlated the
+    full band, and masking them (the Rust behaviour) moved single-tetra house
+    finch solves onto the radial-refinement divergence (TODO "Re-solve radial
+    divergence"). Cross-node pairs get the policy in both engines.
     """
 
     def __init__(
@@ -85,8 +101,11 @@ class SensorPairFrontEnds:
         sensor_positions: Mapping[str, np.ndarray],
         sensor_node_ids: Mapping[str, str] | None,
         sound_speed_mps: float,
+        *,
+        mask_intra_array_pairs: bool = True,
     ) -> None:
         self._policy = policy
+        self._mask_intra_array_pairs = mask_intra_array_pairs
         self._array_by_sensor = {
             sensor_id: (sensor_node_ids.get(sensor_id, sensor_id) if sensor_node_ids is not None else "")
             for sensor_id in sensor_positions
@@ -105,10 +124,14 @@ class SensorPairFrontEnds:
     def pair_front_end(self, sensor_a: str, sensor_b: str) -> PairFrontEnd:
         if self.is_cross_node_pair(sensor_a, sensor_b):
             taper = float(self._policy.cross_node_window_taper_fraction)
+            beta = float(self._policy.cross_node_phat_beta)
             return PairFrontEnd(
                 band_hz=(float(self._policy.band_min_hz), float(self._policy.cross_node_band_max_hz)),
                 taper_fraction=taper if taper > 0.0 else None,
+                phat_beta=beta if beta != PLAIN_PHAT_BETA else None,
             )
+        if not self._mask_intra_array_pairs:
+            return PairFrontEnd(band_hz=None, taper_fraction=None)
         ceiling_hz = self._intra_array_ceiling_hz.get(self._array_by_sensor.get(sensor_a, sensor_a), 0.0)
         return PairFrontEnd(band_hz=(float(self._policy.band_min_hz), ceiling_hz), taper_fraction=None)
 
@@ -120,18 +143,23 @@ def solve_pair_front_ends(
     sensor_node_ids: Mapping[str, str] | None,
     sound_speed_mps: float,
 ) -> SensorPairFrontEnds | None:
-    """Front ends of one solve over ``sensor_ids``; ``None`` without a policy (every bin, no taper)."""
+    """The Python solvers' front ends over ``sensor_ids`` (intra-array pairs on
+    every bin, see ``SensorPairFrontEnds``); ``None`` without a policy."""
     if policy is None:
         return None
     positions = {sensor_id: sensor_positions[sensor_id] for sensor_id in sensor_ids}
-    return SensorPairFrontEnds(policy, positions, sensor_node_ids, sound_speed_mps)
+    return SensorPairFrontEnds(policy, positions, sensor_node_ids, sound_speed_mps, mask_intra_array_pairs=False)
 
 
 def tukey_taper(window: np.ndarray, taper_fraction: float | None) -> np.ndarray:
-    """Copy of ``window`` with a raised-cosine ramp over ``taper_fraction`` of it, half at each end."""
-    samples = np.asarray(window, dtype=np.float64)
+    """Copy of ``window`` with a raised-cosine ramp over ``taper_fraction`` of it, half at each end.
+
+    With no taper the window comes back as given (same array and dtype), so an
+    untapered pair correlates exactly what it did before the band policy.
+    """
     if not taper_fraction or taper_fraction <= 0.0:
-        return samples
+        return window
+    samples = np.asarray(window, dtype=np.float64)
     length = samples.size
     ramp_samples = min(int(0.5 * min(float(taper_fraction), 1.0) * length), length // 2)
     if ramp_samples == 0:
@@ -155,4 +183,5 @@ def band_policy_from_config(config: object) -> LocalizationBandPolicy:
         cross_node_window_taper_fraction=float(
             getattr(config, "localization_cross_node_window_taper_fraction", defaults.cross_node_window_taper_fraction)
         ),
+        cross_node_phat_beta=float(getattr(config, "localization_cross_node_phat_beta", defaults.cross_node_phat_beta)),
     )

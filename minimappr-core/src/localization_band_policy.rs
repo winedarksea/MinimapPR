@@ -21,6 +21,8 @@
 /// Below this widest-pair spacing an array is treated as coincident: no
 /// spatial aliasing, so its intra-array ceiling is Nyquist.
 const COINCIDENT_ARRAY_SPACING_M: f32 = 1.0e-6;
+/// Whitening exponent of plain PHAT (every bin to unit magnitude).
+const PLAIN_PHAT_BETA: f32 = 1.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LocalizationBandPolicy {
@@ -34,6 +36,11 @@ pub struct LocalizationBandPolicy {
     /// Fraction of a cross-node pair's window that is cosine-ramped (half at
     /// each end); `0` keeps the rectangular cut.
     pub cross_node_window_taper_fraction: f32,
+    /// Whitening exponent of cross-node pairs (PHAT-beta): `1` is plain PHAT.
+    /// Below 1 a bin keeps some of its magnitude, so the empty bins a
+    /// band-limited source leaves in the wide band count less than its signal
+    /// bins (plain PHAT raised them to equal weight and biased the lag).
+    pub cross_node_phat_beta: f32,
 }
 
 impl Default for LocalizationBandPolicy {
@@ -43,6 +50,7 @@ impl Default for LocalizationBandPolicy {
             intra_array_band_max_hz: 0.0,
             cross_node_band_max_hz: 11_000.0,
             cross_node_window_taper_fraction: 0.2,
+            cross_node_phat_beta: 0.7,
         }
     }
 }
@@ -88,6 +96,8 @@ pub struct PairFrontEnd {
     pub band_hz: [f32; 2],
     /// `None` keeps the rectangular window.
     pub taper_fraction: Option<f32>,
+    /// PHAT-beta whitening exponent; `None` is plain PHAT.
+    pub phat_beta: Option<f32>,
 }
 
 /// Per-array ceilings of one solve, resolved once and looked up per pair.
@@ -145,9 +155,11 @@ impl ChannelPairFrontEnds {
     pub fn pair_front_end(&self, ch_a: usize, ch_b: usize) -> PairFrontEnd {
         if self.is_cross_node_pair(ch_a, ch_b) {
             let taper = self.policy.cross_node_window_taper_fraction;
+            let beta = self.policy.cross_node_phat_beta;
             return PairFrontEnd {
                 band_hz: [self.policy.band_min_hz, self.policy.cross_node_band_max_hz],
                 taper_fraction: (taper > 0.0).then_some(taper),
+                phat_beta: (beta != PLAIN_PHAT_BETA).then_some(beta),
             };
         }
         let ceiling_hz = self
@@ -159,6 +171,7 @@ impl ChannelPairFrontEnds {
         PairFrontEnd {
             band_hz: [self.policy.band_min_hz, ceiling_hz],
             taper_fraction: None,
+            phat_beta: None,
         }
     }
 }

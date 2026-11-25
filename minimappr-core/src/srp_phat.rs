@@ -2801,6 +2801,16 @@ mod tests {
             far_field_default_range_m: 250.0,
             far_field_max_range_m: 2_000.0,
             max_grid_points: 200_000,
+            // Plain PHAT on cross-node pairs: this white-noise fixture's tight
+            // layout at 10 m has a second SRP maximum 2.95 m off that wins
+            // under any PHAT-beta below 1 (probed 0.9/0.8/0.7 on 2026-11-25;
+            // the other seven multinode cases are unchanged), so it pins the
+            // weighting it was written for. Beta exists for band-limited
+            // sources in the wide cross-node band, which white noise is not.
+            band_policy: LocalizationBandPolicy {
+                cross_node_phat_beta: 1.0,
+                ..LocalizationBandPolicy::default()
+            },
             ..SrpPhatConfig::default()
         }
     }

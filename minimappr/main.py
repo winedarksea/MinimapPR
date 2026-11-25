@@ -3206,6 +3206,7 @@ async def get_config(request: Request) -> dict:
         "localization_band_max_hz": settings.localization_band_max_hz,
         "localization_cross_node_band_max_hz": settings.localization_cross_node_band_max_hz,
         "localization_cross_node_window_taper_fraction": settings.localization_cross_node_window_taper_fraction,
+        "localization_cross_node_phat_beta": settings.localization_cross_node_phat_beta,
         "birdnet_chunked_dispatch_enabled": settings.birdnet_chunked_dispatch_enabled,
         "birdnet_trigger_min_confidence": settings.birdnet_trigger_min_confidence,
         "birdnet_geo_min_confidence": settings.birdnet_geo_min_confidence,
@@ -3551,6 +3552,7 @@ _SIDECAR_RESTART_REQUIRED_KEYS = {
     "localization_band_max_hz",
     "localization_cross_node_band_max_hz",
     "localization_cross_node_window_taper_fraction",
+    "localization_cross_node_phat_beta",
     "localization_window_seconds",
     "birdnet_trigger_min_confidence",
     "birdnet_geo_min_confidence",
@@ -3998,6 +4000,8 @@ async def patch_config(request: Request) -> dict:
             "localization_cross_node_band_max_hz",
         } and value < 0.0:  # type: ignore[operator]
             errors.append(f"{key}: must be >= 0")
+        elif key == "localization_cross_node_phat_beta" and not 0.0 < value <= 1.0:  # type: ignore[operator]
+            errors.append(f"{key}: must be in (0, 1]")
         elif key == "localization_cross_node_window_taper_fraction" and not 0.0 <= value <= 1.0:  # type: ignore[operator]
             errors.append(f"{key}: must be in [0, 1]")
         elif key == "tracking_filter" and value not in _TRACKING_FILTERS:

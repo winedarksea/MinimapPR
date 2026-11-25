@@ -50,7 +50,9 @@ fn intra_array_pairs_use_their_array_ceiling_and_cross_node_pairs_the_wide_band(
     assert_eq!(intra.band_hz[0], 50.0);
     assert!((intra.band_hz[1] - 3266.0).abs() < 2.0);
     let cross = fronts.pair_front_end(2, 4);
-    assert_eq!(cross, PairFrontEnd { band_hz: [50.0, 11_000.0], taper_fraction: Some(0.2) });
+    assert_eq!(cross.band_hz, [50.0, 11_000.0]);
+    assert_eq!(cross.taper_fraction, Some(0.2));
+    assert_eq!(cross.phat_beta, Some(0.7));
     assert!(fronts.is_cross_node_pair(4, 5));
 }
 
@@ -78,7 +80,10 @@ fn an_explicit_intra_array_ceiling_overrides_the_geometry() {
         None,
         SOUND_SPEED_MPS,
     );
-    assert_eq!(fronts.pair_front_end(1, 2), PairFrontEnd { band_hz: [300.0, 3500.0], taper_fraction: None });
+    assert_eq!(
+        fronts.pair_front_end(1, 2),
+        PairFrontEnd { band_hz: [300.0, 3500.0], taper_fraction: None, phat_beta: None }
+    );
 }
 
 #[test]
@@ -101,6 +106,14 @@ fn zero_taper_keeps_the_rectangular_window_on_cross_node_pairs() {
     let policy = LocalizationBandPolicy { cross_node_window_taper_fraction: 0.0, ..LocalizationBandPolicy::default() };
     let fronts = ChannelPairFrontEnds::resolve(policy, &[0, 4], &positions, Some(&[0, 0, 0, 0, 1, 2]), SOUND_SPEED_MPS);
     assert_eq!(fronts.pair_front_end(0, 4).taper_fraction, None);
+}
+
+#[test]
+fn beta_of_one_is_plain_phat_on_cross_node_pairs() {
+    let positions = tetra_plus_points();
+    let policy = LocalizationBandPolicy { cross_node_phat_beta: 1.0, ..LocalizationBandPolicy::default() };
+    let fronts = ChannelPairFrontEnds::resolve(policy, &[0, 4], &positions, Some(&[0, 0, 0, 0, 1, 2]), SOUND_SPEED_MPS);
+    assert_eq!(fronts.pair_front_end(0, 4).phat_beta, None);
 }
 
 #[test]

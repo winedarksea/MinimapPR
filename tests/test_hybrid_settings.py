@@ -35,6 +35,7 @@ from minimappr.core.beamforming import create_beamformer
 from minimappr.core.environment import LiveEnvironmentProvider
 from minimappr.core.fusion_node import FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
+from minimappr.core.localization_band_policy import band_policy_from_config
 from minimappr.core.localization_dispatch import build_localizer_from_settings
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.preprocessing import create_localization_preprocessor
@@ -1396,14 +1397,13 @@ async def test_birdnet_hybrid_production_no_audio_written_to_disk_without_retent
         await storage.close()
 
 
-def test_birdnet_hybrid_production_localization_bandpass_configured_for_bird_frequencies(
+def test_birdnet_hybrid_production_localization_band_configured_for_bird_frequencies(
     tmp_path: Path,
 ) -> None:
-    """The birdnet_hybrid_production profile must apply a bandpass to the
-    localization path so that only frequencies resolvable at the sensor
-    spacing contribute to TDOA estimation (bird-call range: 300–3500 Hz).
-    Frequencies above ~1715 Hz alias given the ~0.1 m sensor spacing at
-    343 m/s, but lower bird harmonics still anchor the cross-correlation."""
+    """The birdnet_hybrid_production profile's 300-3500 Hz band: the window
+    filter removes content under the 300 Hz floor, and the 3500 Hz ceiling is
+    the intra-array GCC-PHAT pair band (an explicit override of the array's
+    own c / 2d), so cross-node pairs keep the wide band."""
     settings = _build_profile_settings(tmp_path, sample_rate_hz=16_000)
 
     assert settings.localization_band_min_hz == pytest.approx(300.0)
@@ -1413,19 +1413,18 @@ def test_birdnet_hybrid_production_localization_bandpass_configured_for_bird_fre
     preprocessor = create_localization_preprocessor(loc_config)
     assert preprocessor is not None
 
-    # Verify the filter actually attenuates out-of-band content.
     sample_rate_hz = 16_000
     t = np.linspace(0.0, 0.5, int(0.5 * sample_rate_hz), endpoint=False, dtype=np.float32)
-    out_of_band = np.sin(2 * np.pi * 6000.0 * t)  # 6 kHz — above 3500 Hz cutoff
-    in_band = np.sin(2 * np.pi * 1000.0 * t)       # 1 kHz — well within band
-
-    filtered_oob = np.asarray(preprocessor.process(out_of_band, sample_rate_hz), dtype=np.float32)
+    below_floor = np.sin(2 * np.pi * 60.0 * t)
+    in_band = np.sin(2 * np.pi * 1000.0 * t)
+    filtered_low = np.asarray(preprocessor.process(below_floor, sample_rate_hz), dtype=np.float32)
     filtered_inb = np.asarray(preprocessor.process(in_band, sample_rate_hz), dtype=np.float32)
-
-    # Out-of-band energy must be substantially suppressed (< 10 % of original).
-    assert rms(filtered_oob) < rms(out_of_band) * 0.10
-    # In-band energy must be largely preserved (> 70 % of original).
+    assert rms(filtered_low) < rms(below_floor) * 0.10
     assert rms(filtered_inb) > rms(in_band) * 0.70
+
+    policy = band_policy_from_config(loc_config)
+    assert policy.band_min_hz == pytest.approx(300.0)
+    assert policy.intra_array_band_max_hz == pytest.approx(3500.0)
 
 
 @pytest.mark.asyncio

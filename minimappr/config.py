@@ -353,6 +353,7 @@ class LocalizationConfig:
     localization_band_max_hz: float = 0.0
     localization_cross_node_band_max_hz: float = 11_000.0
     localization_cross_node_window_taper_fraction: float = 0.2
+    localization_cross_node_phat_beta: float = 0.7
     skip_localization_for_classification: bool = False
     # Classification audio source: "beamformed" | "omni" | "nearest_node_omni".
     # Mirrors Settings.classification_audio_source so the fusion node can read it
@@ -1050,11 +1051,14 @@ class Settings:
     # positive value overrides it for every array. Cross-node pairs (long
     # baselines, where c / 2d means nothing) use the wide cross-node band (0 =
     # Nyquist) and a Tukey taper that removes the zero-lag pull of a rectangular
-    # cut through a loud call; E8 point-network recall 0.30 -> 0.45 with both.
+    # cut through a loud call; E8 point-network recall 0.30 -> 0.46. Cross-node
+    # pairs whiten with PHAT-beta (|X|^beta, 1 = plain PHAT) so the empty bins a
+    # band-limited source leaves in the wide band count less than its signal.
     localization_band_min_hz: float = 50.0
     localization_band_max_hz: float = 0.0
     localization_cross_node_band_max_hz: float = 11_000.0
     localization_cross_node_window_taper_fraction: float = 0.2
+    localization_cross_node_phat_beta: float = 0.7
     localization_srp_grid_resolution_m: float = 0.5
     localization_search_padding_m: float = 2.0
     localization_far_field_default_range_m: float = 50.0
@@ -2016,6 +2020,8 @@ class Settings:
             raise ValueError("MINIMAPPR_LOCALIZATION_CROSS_NODE_BAND_MAX_HZ must be > MIN when set")
         if not 0.0 <= self.localization_cross_node_window_taper_fraction <= 1.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_CROSS_NODE_WINDOW_TAPER_FRACTION must be in [0, 1]")
+        if not 0.0 < self.localization_cross_node_phat_beta <= 1.0:
+            raise ValueError("MINIMAPPR_LOCALIZATION_CROSS_NODE_PHAT_BETA must be in (0, 1]")
         if self.localization_srp_grid_resolution_m <= 0.0:
             raise ValueError("MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M must be > 0")
         if self.localization_search_padding_m <= 0.0:
@@ -2723,6 +2729,7 @@ class Settings:
             localization_cross_node_window_taper_fraction=_env_float(
                 "MINIMAPPR_LOCALIZATION_CROSS_NODE_WINDOW_TAPER_FRACTION", 0.2
             ),
+            localization_cross_node_phat_beta=_env_float("MINIMAPPR_LOCALIZATION_CROSS_NODE_PHAT_BETA", 0.7),
             localization_srp_grid_resolution_m=_env_float("MINIMAPPR_LOCALIZATION_SRP_GRID_RESOLUTION_M", 0.5),
             localization_search_padding_m=_env_float("MINIMAPPR_LOCALIZATION_SEARCH_PADDING_M", 2.0),
             localization_far_field_default_range_m=_env_float(
@@ -3559,6 +3566,7 @@ class Settings:
             localization_band_max_hz=self.localization_band_max_hz,
             localization_cross_node_band_max_hz=self.localization_cross_node_band_max_hz,
             localization_cross_node_window_taper_fraction=self.localization_cross_node_window_taper_fraction,
+            localization_cross_node_phat_beta=self.localization_cross_node_phat_beta,
             localization_srp_grid_resolution_m=self.localization_srp_grid_resolution_m,
             localization_search_padding_m=self.localization_search_padding_m,
             localization_far_field_default_range_m=self.localization_far_field_default_range_m,

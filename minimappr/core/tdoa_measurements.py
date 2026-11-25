@@ -150,6 +150,7 @@ def measure_pair_tdoas(
             signal = tukey_taper(signal, front_end.taper_fraction)
             reference_signal = tukey_taper(reference_signal, front_end.taper_fraction)
             front_end_kwargs["band_hz"] = front_end.band_hz
+            front_end_kwargs["phat_beta"] = front_end.phat_beta
         tdoa_seconds, correlation_peak = gcc_phat_function(
             signal=signal,
             reference_signal=reference_signal,

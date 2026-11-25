@@ -82,6 +82,7 @@ pub(crate) fn phat_correlation(
         sample_rate_hz,
         max_tau_s,
         band_hz,
+        None,
         interp_factor,
     )
 }
@@ -129,7 +130,11 @@ pub(crate) fn phat_forward_spectrum(samples: &[f32], fft_len: usize) -> Vec<Comp
 }
 
 /// GCC-PHAT of two forward spectra from [`phat_forward_spectrum`] at the
-/// same `fft_len`.
+/// same `fft_len`. `phat_beta` is the whitening exponent (PHAT-beta): each
+/// bin is divided by |cross|^beta, so `None` / 1.0 is plain PHAT and a lower
+/// beta keeps some magnitude weighting, letting empty (noise-only) bins of a
+/// wide band count less than the signal's bins.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn phat_correlation_from_spectra(
     x1: &[Complex32],
     x2: &[Complex32],
@@ -137,12 +142,13 @@ pub(crate) fn phat_correlation_from_spectra(
     sample_rate_hz: u32,
     max_tau_s: f32,
     band_hz: Option<[f32; 2]>,
+    phat_beta: Option<f32>,
     interp_factor: usize,
 ) -> GccPhatCorrelation {
     const EPSILON: f32 = 1e-9;
 
     let effective_band = normalize_band_hz(band_hz, sample_rate_hz);
-    let cross_spectrum: Vec<Complex32> = x1
+    let mut cross_spectrum: Vec<Complex32> = x1
         .iter()
         .zip(x2.iter())
         .enumerate()
@@ -155,10 +161,16 @@ pub(crate) fn phat_correlation_from_spectra(
             if magnitude <= EPSILON {
                 Complex32::new(0.0, 0.0)
             } else {
-                cross / magnitude
+                match phat_beta {
+                    None => cross / magnitude,
+                    Some(beta) => cross / magnitude.powf(beta),
+                }
             }
         })
         .collect();
+    if phat_beta.is_some() {
+        normalize_to_unit_mean_magnitude(&mut cross_spectrum);
+    }
 
     let interp_factor = interp_factor.max(1);
     let upsampled_fft_len = fft_len.saturating_mul(interp_factor);
@@ -435,6 +447,23 @@ pub fn tetrahedral_gcc_phat(
         )
         .tdoa
     })
+}
+
+/// Rescales a PHAT-beta spectrum so its kept bins average unit magnitude, as
+/// plain PHAT's do: without it the correlation peak scales with the absolute
+/// signal level, and an SRP sum would let loud pairs outweigh quiet ones (or
+/// beta pairs outweigh plain-PHAT intra-array pairs).
+fn normalize_to_unit_mean_magnitude(spectrum: &mut [Complex32]) {
+    let (magnitude_sum, kept_bins) = spectrum
+        .iter()
+        .map(|value| value.norm())
+        .filter(|magnitude| *magnitude > 0.0)
+        .fold((0.0_f64, 0_usize), |(sum, count), magnitude| (sum + f64::from(magnitude), count + 1));
+    if kept_bins == 0 || magnitude_sum <= 0.0 {
+        return;
+    }
+    let scale = (kept_bins as f64 / magnitude_sum) as f32;
+    spectrum.iter_mut().for_each(|value| *value *= scale);
 }
 
 fn next_pow2(n: usize) -> usize {

@@ -320,6 +320,14 @@ struct Args {
     /// Tukey taper fraction on cross-node pair windows; 0 keeps the rectangular cut.
     localization_cross_node_window_taper_fraction: f32,
 
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_CROSS_NODE_PHAT_BETA",
+        default_value_t = 0.7
+    )]
+    /// Cross-node PHAT-beta whitening exponent; 1 is plain PHAT.
+    localization_cross_node_phat_beta: f32,
+
     #[arg(long, env = "MINIMAPPR_GCC_PHAT_INTERP_FACTOR", default_value_t = 4)]
     gcc_phat_interp_factor: usize,
 
@@ -539,6 +547,7 @@ fn run_srp_oracle() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         band_policy.cross_node_band_max_hz = field("cross_node_band_max_hz", band_policy.cross_node_band_max_hz);
         band_policy.cross_node_window_taper_fraction =
             field("cross_node_window_taper_fraction", band_policy.cross_node_window_taper_fraction);
+        band_policy.cross_node_phat_beta = field("cross_node_phat_beta", band_policy.cross_node_phat_beta);
     }
     let evaluation = srp_phat::estimate_tetrahedral_steering_with_solve_constraints(
         &windows,
@@ -935,6 +944,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     cross_node_band_max_hz: args.localization_cross_node_band_max_hz,
                     cross_node_window_taper_fraction: args
                         .localization_cross_node_window_taper_fraction,
+                    cross_node_phat_beta: args.localization_cross_node_phat_beta,
                 },
                 gcc_phat_interp_factor: args.gcc_phat_interp_factor,
                 localization_srp_grid_resolution_m: args.localization_srp_grid_resolution_m,

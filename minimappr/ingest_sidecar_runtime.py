@@ -266,6 +266,9 @@ def build_ingest_sidecar_environment(
         "MINIMAPPR_LOCALIZATION_CROSS_NODE_WINDOW_TAPER_FRACTION": str(
             getattr(settings, "localization_cross_node_window_taper_fraction", 0.2)
         ),
+        "MINIMAPPR_LOCALIZATION_CROSS_NODE_PHAT_BETA": str(
+            getattr(settings, "localization_cross_node_phat_beta", 0.7)
+        ),
         # Phase 2: propagate the localization range envelope so the sidecar's
         # far-field search matches the Python solver (default 1 km).
         "MINIMAPPR_LOCALIZATION_FAR_FIELD_DEFAULT_RANGE_M": str(

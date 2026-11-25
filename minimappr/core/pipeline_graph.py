@@ -349,6 +349,7 @@ def build_pipeline_graph(
                 _param("Max baseline", float(settings.localization_cross_node_max_baseline_m), "localization_cross_node_max_baseline_m", suffix=" m"),
                 _param("Band max (0 = Nyquist)", float(settings.localization_cross_node_band_max_hz), "localization_cross_node_band_max_hz", suffix=" Hz"),
                 _param("Window taper", float(settings.localization_cross_node_window_taper_fraction), "localization_cross_node_window_taper_fraction"),
+                _param("PHAT beta (1 = plain)", float(settings.localization_cross_node_phat_beta), "localization_cross_node_phat_beta"),
             ],
             status=_tdoa_status(metrics, fusion_available),
             link="/settings/config#localization",

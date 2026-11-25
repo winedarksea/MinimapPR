@@ -140,9 +140,11 @@ def gcc_phat(
     max_tau_s: float,
     interp: int = 4,
     band_hz: tuple[float, float] | None = None,
+    phat_beta: float | None = None,
 ) -> tuple[float, float]:
     """``band_hz`` masks the whitened cross-spectrum to that band (a 0 ceiling
-    is Nyquist), mirroring the Rust ``bin_in_band``; ``None`` keeps every bin."""
+    is Nyquist), mirroring the Rust ``bin_in_band``; ``None`` keeps every bin.
+    ``phat_beta`` is the PHAT-beta whitening exponent (``None`` = plain PHAT)."""
     n = signal.size + reference_signal.size
     if n <= 0:
         return 0.0, 0.0
@@ -153,13 +155,21 @@ def gcc_phat(
 
     denom = np.abs(response)
     denom[denom < 1e-12] = 1e-12
-    whitened = response / denom
+    whitened = response / (denom if phat_beta is None else denom**phat_beta)
     effective_band = normalize_band_hz(band_hz, sample_rate_hz)
     in_band: np.ndarray | None = None
     if effective_band is not None:
         bin_frequencies_hz = np.fft.rfftfreq(n, d=1.0 / sample_rate_hz)
         in_band = (bin_frequencies_hz >= effective_band[0]) & (bin_frequencies_hz <= effective_band[1])
         whitened = np.where(in_band, whitened, 0.0)
+    if phat_beta is not None:
+        # Unit mean magnitude over the kept bins, as plain PHAT: the peak must
+        # not scale with the absolute signal level (Rust
+        # ``normalize_to_unit_mean_magnitude``).
+        kept_magnitudes = np.abs(whitened)
+        kept_magnitudes = kept_magnitudes[kept_magnitudes > 0.0]
+        if kept_magnitudes.size and float(np.sum(kept_magnitudes)) > 0.0:
+            whitened = whitened * (kept_magnitudes.size / float(np.sum(kept_magnitudes)))
     cross_corr = np.fft.irfft(whitened, n=interp * n)
 
     max_shift = int(interp * sample_rate_hz * max_tau_s)
@@ -438,6 +448,7 @@ class LocalizationEngine:
                 max_tau_s=effective_max_tau_s,
                 interp=max(1, self.interp_factor),
                 band_hz=front_end.band_hz if front_end is not None else None,
+                phat_beta=front_end.phat_beta if front_end is not None else None,
             )
             if not np.isfinite(tau_s) or not np.isfinite(peak):
                 raise LocalizationError(f"Non-finite GCC-PHAT output for sensor {sensor_id}")

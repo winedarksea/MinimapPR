@@ -110,6 +110,7 @@ pub(super) fn pair_phat_correlation(
         sample_rate_hz,
         max_tau_s,
         Some(front_end.band_hz),
+        front_end.phat_beta,
         interp_factor,
     )
 }
