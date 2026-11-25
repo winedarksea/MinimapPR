@@ -139,3 +139,66 @@ fn clock_term_matches_the_refit_shift_of_an_offset_node() {
         "refit moved {measured_baseline_shift_m} m, covariance predicts {predicted_baseline_shift_m} m"
     );
 }
+
+#[test]
+fn a_point_nodes_position_error_is_a_clock_offset_of_sigma_over_c() {
+    // One sensor per node: a rigid position error d moves that node's only
+    // arrival by u . d / c, a scalar with std sigma / c shared by all of its
+    // TDOAs, which is exactly how a clock offset enters.
+    use crate::tdoa_node_position_covariance::SensorNodePositionStd;
+    const HAND_MEASURED_STD_M: f64 = 0.3;
+    let mics: Vec<[f32; 3]> = vec![
+        [0.0, 0.0, 1.5],
+        [60.0, 0.0, 2.0],
+        [0.0, 60.0, 1.0],
+        [60.0, 60.0, 3.0],
+        [30.0, 30.0, 6.0],
+    ];
+    let source_m = [35.0, 20.0, 4.0];
+    let measurements = exact_measurements(source_m, &mics);
+    let node_by_channel = [0, 1, 2, 3, 4];
+    let position_std_m = [0.0, HAND_MEASURED_STD_M, 0.0, 0.0, 0.0];
+    let position_term = super::super::reference_tdoa_node_position_covariance_m2(
+        source_m,
+        0,
+        &measurements,
+        &mics,
+        SOUND_SPEED_MPS,
+        SensorNodePositionStd {
+            node_index_by_sensor: &node_by_channel,
+            node_position_std_m: &position_std_m,
+        },
+    )
+    .expect("stated error");
+    let clock_term = clock_offset_position_covariance_m2(
+        source_m,
+        0,
+        &measurements,
+        &mics,
+        SOUND_SPEED_MPS,
+        ChannelClockOffsets {
+            clock_index_by_channel: &node_by_channel,
+            clock_offset_std_seconds: &[
+                0.0,
+                HAND_MEASURED_STD_M / f64::from(SOUND_SPEED_MPS),
+                0.0,
+                0.0,
+                0.0,
+            ],
+        },
+    )
+    .expect("clock term");
+    for row in 0..3 {
+        for column in 0..3 {
+            let scale = clock_term[row][row]
+                .abs()
+                .max(clock_term[column][column].abs());
+            assert!(
+                (position_term[row][column] - clock_term[row][column]).abs() <= 1.0e-4 * scale,
+                "[{row}][{column}]: position {} vs clock {}",
+                position_term[row][column],
+                clock_term[row][column]
+            );
+        }
+    }
+}

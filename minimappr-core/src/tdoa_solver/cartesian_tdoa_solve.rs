@@ -88,6 +88,18 @@ pub struct CartesianTdoaSolveRequest {
     /// Field Mode extension; `None` reproduces the Python solver exactly.
     pub canopy_height_prior: Option<CanopyHeightPrior>,
     pub refinement_engine: CartesianRefinementEngine,
+    /// Python `node_position_uncertainty`: stated node position accuracies
+    /// widen the covariance (`tdoa_node_position_covariance`); `None` keeps
+    /// the timing-only covariance.
+    pub node_position_uncertainty: Option<NodePositionUncertainty>,
+}
+
+/// Sensor id -> node id, and each node's per-axis 1-sigma position error (m).
+/// A sensor or node missing from the maps states no error.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NodePositionUncertainty {
+    pub sensor_node_ids: BTreeMap<String, String>,
+    pub node_position_std_m: BTreeMap<String, f64>,
 }
 
 impl CartesianTdoaSolveRequest {
@@ -118,6 +130,7 @@ impl CartesianTdoaSolveRequest {
             bearing_observed_obs_floor: BEARING_OBSERVED_OBS_FACTOR_FLOOR,
             canopy_height_prior: None,
             refinement_engine: CartesianRefinementEngine::ScipyTrfParity,
+            node_position_uncertainty: None,
         }
     }
 }

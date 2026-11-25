@@ -1,9 +1,9 @@
 """Phase 5: true cross-node TDOA (tier c).
 
 Synthetic, sample-accurate multi-node scenes exercising the widened cross-node tau
-ceiling, clock-uncertainty weighting (P9: weak clocks are kept, never gated),
-and geometry weighting in ``measure_pair_tdoas`` +
-``solve_cartesian_tdoa``.
+ceiling, clock-uncertainty weighting (P9: weak clocks are kept, never gated)
+in ``measure_pair_tdoas`` + ``solve_cartesian_tdoa``, and the node-position
+covariance term.
 """
 
 from __future__ import annotations
@@ -158,38 +158,38 @@ def test_weak_clock_cross_node_pairs_are_kept_and_down_weighted() -> None:
     assert len(free_running) == 10
 
 
-def test_node_position_std_inflates_downweights_cross_node_pair() -> None:
-    """A poorly-surveyed node (σ=5 m) contributes a lower-weighted cross-node pair."""
-    positions = {
-        "a:ch0": np.array([0.0, 0.0, 0.0]),
-        "b:ch0": np.array([30.0, 0.0, 0.0]),
-        "a:ch1": np.array([0.05, 0.0, 0.0]),
-        "b:ch1": np.array([30.05, 0.0, 0.0]),
-    }
-    node_ids = {sid: sid.split(":")[0] for sid in positions}
-    windows = {sid: _broadband(2) for sid in positions}
+def test_hand_measured_node_widens_the_ingest_covariance_without_moving_the_fix() -> None:
+    """Python-ingest path: a stated node position accuracy (σ=0.3 m on one tetra)
+    widens the solve covariance through the node-position term and leaves the
+    pair weights, and so the fix, unchanged (the sidecar weights pairs without
+    it, so both paths weight a pair set alike)."""
+    nodes = {"tetra-a": (0.0, 0.0, 0.0), "tetra-b": (30.0, 0.0, 0.0), "tetra-c": (0.0, 30.0, 2.0)}
+    positions, windows, node_ids = synthesize_multinode_windows(
+        _broadband(3),
+        SAMPLE_RATE_HZ,
+        source_position_m=(15.0, 12.0, 1.0),
+        node_origins_m=nodes,
+        tetra_node_ids=tuple(nodes),
+        sound_speed_mps=SOUND_SPEED_MPS,
+    )
+    engine = LocalizationEngine(max_tau_s=0.02, interp_factor=8, cross_node_max_tau_s=0.35)
 
-    def _cross_pair_weight(node_std):
-        pairs = measure_pair_tdoas(
-            sensor_positions=positions,
-            sensor_windows=windows,
-            sensor_ids=sorted(positions),
-            sample_rate_hz=SAMPLE_RATE_HZ,
-            sound_speed_mps=SOUND_SPEED_MPS,
-            max_tau_s=0.02,
-            interpolation_factor=4,
-            sensor_timing_uncertainty_seconds=None,
-            gcc_phat_function=gcc_phat,
-            sensor_node_ids=node_ids,
-            cross_node_max_tau_s=0.35,
-            node_position_std_m=node_std,
+    def localize(node_position_std_m):
+        return engine.localize(
+            positions, windows, SAMPLE_RATE_HZ, 20.0, 0.5,
+            sensor_node_ids=node_ids, node_position_std_m=node_position_std_m,
         )
-        cross = [m for m in pairs if node_ids[m.sensor_a] != node_ids[m.sensor_b]]
-        return max(m.weight for m in cross)
 
-    surveyed = _cross_pair_weight({sid: 0.0 for sid in positions})
-    uncertain = _cross_pair_weight({sid: 5.0 for sid in positions})
-    assert uncertain < surveyed
+    unstated = localize(None)
+    hand_measured_b = localize({sid: 0.3 for sid, node in node_ids.items() if node == "tetra-b"})
+    np.testing.assert_allclose(hand_measured_b.position_m, unstated.position_m, atol=1e-9)
+    added_variance_m2 = np.trace(np.asarray(hand_measured_b.position_covariance_m2)) - np.trace(
+        np.asarray(unstated.position_covariance_m2)
+    )
+    # A 0.3 m rigid error on one of three nodes moves a 15 m fix by a good
+    # fraction of that; the timing-only covariance states centimetres.
+    assert added_variance_m2 > 0.01
+    assert localize({}).position_covariance_m2 == unstated.position_covariance_m2
 
 
 def test_build_localizer_from_localization_config_carries_cross_node_settings() -> None:

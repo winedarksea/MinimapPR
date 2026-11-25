@@ -14,6 +14,8 @@ use crate::{
 mod srp_phat_clock_covariance;
 #[path = "srp_phat_pair_spectra.rs"]
 mod srp_phat_pair_spectra;
+pub use crate::tdoa_node_position_covariance::SensorNodePositionStd;
+use crate::tdoa_node_position_covariance::{node_position_error_covariance_m2, WeightedTdoaRow};
 use srp_phat_clock_covariance::clock_offset_position_covariance_m2;
 pub use srp_phat_clock_covariance::ChannelClockOffsets;
 use srp_phat_pair_spectra::{pair_phat_correlation, FullWindowSpectra};
@@ -212,6 +214,9 @@ pub struct SolveChannelConstraints<'a> {
     pub admitted_pair_filter: Option<AdmittedChannelPairFilter<'a>>,
     /// Adds the clock offsets' effect on the solved position to its covariance.
     pub channel_clock_offsets: Option<ChannelClockOffsets<'a>>,
+    /// Adds the nodes' stated position errors (indexed by buffer channel) the
+    /// same way: a node's rigid offset moves all of its TDOAs together.
+    pub channel_node_position_std: Option<SensorNodePositionStd<'a>>,
 }
 
 /// Every pair among `active_channels` (see
@@ -256,7 +261,7 @@ pub fn estimate_tetrahedral_steering_with_pair_filter(
         config,
         SolveChannelConstraints {
             admitted_pair_filter,
-            channel_clock_offsets: None,
+            ..SolveChannelConstraints::default()
         },
     )
 }
@@ -427,11 +432,21 @@ pub fn estimate_tetrahedral_steering_with_solve_constraints(
             clocks,
         )
     }) {
-        for (row, clock_row) in position_covariance_m2.iter_mut().zip(clock_covariance_m2) {
-            for (value, clock_value) in row.iter_mut().zip(clock_row) {
-                *value += clock_value;
-            }
-        }
+        add_covariance_term(&mut position_covariance_m2, clock_covariance_m2);
+    }
+    if let Some(node_position_covariance_m2) =
+        constraints.channel_node_position_std.and_then(|nodes| {
+            reference_tdoa_node_position_covariance_m2(
+                candidate.position_m,
+                reference_channel,
+                &measured_tdoa,
+                mic_positions_m,
+                sound_speed_mps,
+                nodes,
+            )
+        })
+    {
+        add_covariance_term(&mut position_covariance_m2, node_position_covariance_m2);
     }
 
     SrpPhatEvaluation {
@@ -492,6 +507,47 @@ fn candidate_confidence_and_observability(
         (obs, _) => obs,
     };
     (confidence, range_observability)
+}
+
+/// The node-position term over the solve's reference TDOAs: the Gauss-Newton
+/// refinement is an unweighted fit of `arrival(ch) - arrival(reference)`.
+fn reference_tdoa_node_position_covariance_m2(
+    position_m: [f32; 3],
+    reference_channel: usize,
+    measurements: &[ReferenceMeasurement],
+    mic_positions_m: &[[f32; 3]],
+    sound_speed_mps: f32,
+    nodes: SensorNodePositionStd<'_>,
+) -> Option<[[f32; 3]; 3]> {
+    let rows: Vec<WeightedTdoaRow> = measurements
+        .iter()
+        .map(|measurement| WeightedTdoaRow {
+            sensor_a: measurement.channel_index,
+            sensor_b: reference_channel,
+            weight: 1.0,
+        })
+        .collect();
+    let sensor_positions_m: Vec<[f64; 3]> = mic_positions_m
+        .iter()
+        .map(|position| position.map(f64::from))
+        .collect();
+    node_position_error_covariance_m2(
+        position_m.map(f64::from),
+        &sensor_positions_m,
+        &rows,
+        [[0.0; 3]; 3],
+        f64::from(sound_speed_mps),
+        nodes,
+    )
+    .map(|covariance| covariance.map(|row| row.map(|value| value as f32)))
+}
+
+fn add_covariance_term(covariance_m2: &mut [[f32; 3]; 3], term_m2: [[f32; 3]; 3]) {
+    for (row, term_row) in covariance_m2.iter_mut().zip(term_m2) {
+        for (value, term_value) in row.iter_mut().zip(term_row) {
+            *value += term_value;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

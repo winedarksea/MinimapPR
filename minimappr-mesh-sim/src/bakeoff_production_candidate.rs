@@ -5,12 +5,13 @@
 //!    (`localization_event_span.rs::event_solve_window_seconds`).
 //! 2. Sidecar front-end and SRP: `estimate_tetrahedral_steering_with_solve_constraints`
 //!    over every node, every pair admitted (same rate, long baselines, no
-//!    timeline residual), clock offsets carried into its covariance
-//!    (`actors/dsp_compute_srp_solve.rs`).
+//!    timeline residual), clock offsets and each node's stated position
+//!    accuracy carried into its covariance (`actors/dsp_compute_srp_solve.rs`).
 //! 3. Server re-solve (default `localization_single_node_solver =
 //!    python_cartesian`): the pair TDOAs, inverse-variance weighted by pair
 //!    clock uncertainty, into `solve_cartesian_tdoa` with the SRP steering
-//!    direction as a bearing prior (`minimappr/core/rust_tdoa_solve.py`).
+//!    direction as a bearing prior, the stated position accuracies widening
+//!    its covariance (`minimappr/core/rust_tdoa_solve.py`).
 //!    No re-solve (fewer than 4 sensors or 3 pairs, or a solver error) falls
 //!    back to the sidecar estimate, as `localized_handoff_solution.py` does.
 //!
@@ -24,10 +25,10 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use minimappr_core::srp_phat::{
-    estimate_tetrahedral_steering_with_solve_constraints, ChannelClockOffsets, NoiseFloorRelativeReference, SolveChannelConstraints,
-    SolverReferenceChannelFloor, SrpPhatConfig, SrpPhatEvaluation, DEFAULT_ABSOLUTE_REFERENCE_CHANNEL_RMS,
+    estimate_tetrahedral_steering_with_solve_constraints, ChannelClockOffsets, NoiseFloorRelativeReference, SensorNodePositionStd,
+    SolveChannelConstraints, SolverReferenceChannelFloor, SrpPhatConfig, SrpPhatEvaluation, DEFAULT_ABSOLUTE_REFERENCE_CHANNEL_RMS,
 };
-use minimappr_core::tdoa_solver::cartesian_tdoa_solve::{solve_cartesian_tdoa, CartesianTdoaSolveRequest};
+use minimappr_core::tdoa_solver::cartesian_tdoa_solve::{solve_cartesian_tdoa, CartesianTdoaSolveRequest, NodePositionUncertainty};
 use minimappr_core::tdoa_solver::measurement_types::{normalized_pair_quality, BearingPrior, PairTdoaMeasurement, SensorPositions};
 use minimappr_core::tdoa_solver::nalgebra::{DMatrix, DVector, Vector3};
 
@@ -174,6 +175,11 @@ fn python_cartesian_resolve(inputs: &ResolveInputs<'_>) -> Option<CandidateFix> 
     request.bearing_prior = bearing_prior(evaluation.localization.steering_direction, mean_confidence, config.node_bearing_strength);
     request.far_field_initial_range_m = config.far_field_default_range_m;
     request.bearing_observed_obs_floor = config.bearing_observed_obs_floor;
+    // One sensor per node: the sensor id doubles as the node id.
+    request.node_position_uncertainty = Some(NodePositionUncertainty {
+        sensor_node_ids: sensor_ids.iter().map(|id| (id.clone(), id.clone())).collect(),
+        node_position_std_m: sensor_ids.iter().cloned().zip(scene.nodes.iter().map(|node| node.stated_position_std_m)).collect(),
+    });
     let solve = solve_cartesian_tdoa(&request).ok()?;
     let position = [solve.position_m[0], solve.position_m[1], solve.position_m[2]];
     Some(CandidateFix {
@@ -256,6 +262,7 @@ pub fn run_production_candidate(
     let positions_m: Vec<[f32; 3]> = scene.nodes.iter().map(|node| node.measured_position_m.map(|value| value as f32)).collect();
     let active_channels: Vec<usize> = (0..scene.nodes.len()).collect();
     let clock_std_s: Vec<f64> = scene.nodes.iter().map(|node| node.clock_class.declared_offset_std_s()).collect();
+    let stated_position_std_m: Vec<f64> = scene.nodes.iter().map(|node| node.stated_position_std_m).collect();
     let started = Instant::now();
     let evaluation = estimate_tetrahedral_steering_with_solve_constraints(
         &windows,
@@ -267,6 +274,7 @@ pub fn run_production_candidate(
         SolveChannelConstraints {
             admitted_pair_filter: None,
             channel_clock_offsets: Some(ChannelClockOffsets { clock_index_by_channel: &active_channels, clock_offset_std_seconds: &clock_std_s }),
+            channel_node_position_std: Some(SensorNodePositionStd { node_index_by_sensor: &active_channels, node_position_std_m: &stated_position_std_m }),
         },
     );
     let sidecar_wall_time_s = started.elapsed().as_secs_f64();

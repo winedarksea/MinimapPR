@@ -8,6 +8,8 @@ Solution seam implementation (plan item P2). Given the geometry
 - ``python_cartesian``: re-solve the admitted pair TDOAs on the solve's full
   ordered sensor list and snapshot positions. The id map is complete by
   construction, so a pair can never be read against the wrong microphones.
+  Each sensor's ``position_std_m`` (its node placement's stated accuracy)
+  widens the re-solve covariance, as the sidecar widens its own.
 
 Legacy renders (no provenance) and rejected geometry return ``None`` so the
 handoff keeps its default path / omni handling.
@@ -22,6 +24,7 @@ from minimappr.core.localized_render_localization import (
     python_cartesian_estimate_from_rust_tdoas,
     python_cartesian_resolve_requested,
 )
+from minimappr.core.node_position_covariance import NodePositionUncertainty
 
 if TYPE_CHECKING:
     from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest
@@ -65,6 +68,10 @@ class SnapshotGeometrySolutionResolver:
                 for pair in solve.admitted_pair_tdoas
             ],
             steering_direction=steering_direction,
+            node_position_uncertainty=NodePositionUncertainty.from_sensor_position_std(
+                sensor_node_ids={sensor.sensor_id: sensor.node_id for sensor in solve.provenance.sensors},
+                sensor_position_std_m={sensor.sensor_id: sensor.position_std_m for sensor in solve.provenance.sensors},
+            ),
         )
         return sidecar_estimate if resolved is None else resolved
 

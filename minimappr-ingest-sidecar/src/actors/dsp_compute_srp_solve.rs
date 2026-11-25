@@ -91,6 +91,7 @@ pub(super) fn solve_srp_phat(payload: &ComputePayload) -> SrpPhatEvaluation {
         SolveChannelConstraints {
             admitted_pair_filter: Some(&admits_pair),
             channel_clock_offsets: Some(payload.pair_admission.channel_clock_offsets()),
+            channel_node_position_std: Some(payload.pair_admission.channel_node_position_std()),
         },
     )
 }

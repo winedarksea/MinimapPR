@@ -157,6 +157,7 @@ fn run_cartesian_case(input: CartesianCaseInput) -> Value {
         bearing_observed_obs_floor: input.bearing_observed_obs_floor,
         canopy_height_prior: None,
         refinement_engine: CartesianRefinementEngine::ScipyTrfParity,
+        node_position_uncertainty: None,
     };
     match solve_cartesian_tdoa(&request) {
         Ok(solve) => json!({

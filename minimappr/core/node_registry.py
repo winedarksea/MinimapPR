@@ -40,6 +40,25 @@ def operator_override_position_m(
     return coordinate_frame.geo_to_local(override.position_geo)
 
 
+# Accuracy assumed for an operator-entered position with no stated accuracy: a
+# tape- or laser-measured placement is good to about a decimetre. Operators
+# with a survey-grade or phone-GPS placement enter position_std_m explicitly.
+DEFAULT_OPERATOR_PLACEMENT_POSITION_STD_M = 0.1
+
+
+def operator_override_position_std_m(override: NodeOverrides) -> float | None:
+    """1-sigma accuracy of an operator-pinned position; None when position is not pinned.
+
+    The same value the geometry push sends the sidecar, so both ingest paths
+    widen a hand-measured node's solves alike.
+    """
+    if override.position_m is None and override.position_geo is None:
+        return None
+    if override.position_std_m is not None:
+        return float(override.position_std_m)
+    return DEFAULT_OPERATOR_PLACEMENT_POSITION_STD_M
+
+
 @dataclass(slots=True)
 class SensorDescriptor:
     sensor_id: str
@@ -66,9 +85,8 @@ class NodeRegistry:
         self._nodes: dict[str, NodeRuntime] = {}
         self._sensors: dict[str, SensorDescriptor] = {}
         self._latest_observations: dict[str, str] = {}
-        # Phase 5: per-node position 1σ (m), fed from the ingest position-Kalman P.
-        # Absent → 0.0 (surveyed / trusted-GPS default). Used to down-weight
-        # cross-node TDOA pairs anchored on poorly-localized nodes.
+        # Per-node position 1σ (m) from the stationary KDE estimate (the value
+        # the geometry push sends as a stationary_estimate's position_std_m).
         self._node_position_std_m: dict[str, float] = {}
         # Latest clock report per node; the cross-node TDOA pair weights derive
         # from it (core/pair_timing_uncertainty.py).
@@ -202,13 +220,21 @@ class NodeRegistry:
     async def sensor_position_std_m(self) -> dict[str, float]:
         """Per-sensor position 1σ (m), inherited from the sensor's node.
 
-        Sensors on nodes without a recorded std default to 0.0 (surveyed / trusted
-        GPS). Consumed by the cross-node TDOA geometry weighting (Phase 5).
+        Same precedence as the sidecar geometry push: an operator-pinned
+        position's accuracy, else the stationary estimate's spread. A node with
+        neither is absent (states no accuracy), so it adds nothing to the solve
+        covariance (``core/node_position_covariance.py``).
         """
         async with self._lock:
+            node_position_std_m: dict[str, float] = dict(self._node_position_std_m)
+            for node_id, override in self._overrides.items():
+                override_std_m = operator_override_position_std_m(override)
+                if override_std_m is not None:
+                    node_position_std_m[node_id] = override_std_m
             return {
-                sensor_id: self._node_position_std_m.get(descriptor.node_id, 0.0)
+                sensor_id: node_position_std_m[descriptor.node_id]
                 for sensor_id, descriptor in self._sensors.items()
+                if descriptor.node_id in node_position_std_m
             }
 
     async def record_node_clock_evidence(self, node_id: str, evidence: NodeClockEvidence) -> None:

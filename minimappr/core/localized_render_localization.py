@@ -29,6 +29,7 @@ from minimappr.core.rust_tdoa_solve import solve_localization_from_rust_tdoas
 if TYPE_CHECKING:
     from minimappr.core.fusion_node import FusionNode
     from minimappr.core.localized_render_handoff_hooks import HandoffSolveGeometry
+    from minimappr.core.node_position_covariance import NodePositionUncertainty
 
 LOCALIZATION_METHOD_PYTHON_CARTESIAN_RUST_TDOA = "python_cartesian_rust_tdoa"
 LOCALIZATION_REJECTED_OUT_OF_RANGE_REASON = "position_out_of_range"
@@ -123,6 +124,7 @@ def python_cartesian_estimate_from_rust_tdoas(
     sensor_positions: dict[str, Any],
     pair_tdoas: list[dict],
     steering_direction: tuple[float, float, float] | None,
+    node_position_uncertainty: "NodePositionUncertainty | None" = None,
 ) -> HandoffLocalizationEstimate | None:
     """Python Cartesian solve of the sidecar's pair TDOAs; ``None`` when unsolvable.
 
@@ -158,6 +160,7 @@ def python_cartesian_estimate_from_rust_tdoas(
         far_field_prior_radial_std_m=far_field_prior_radial_std_m,
         bearing_strength=cfg.localization_node_bearing_strength,
         bearing_observed_obs_floor=getattr(cfg, "localization_obs_factor_bearing_floor", None),
+        node_position_uncertainty=node_position_uncertainty,
     )
     if solved is None:
         host._metrics.localization_single_node_python_fallback_count += 1

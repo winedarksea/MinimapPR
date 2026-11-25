@@ -4,7 +4,8 @@ The Rust-handoff re-solve (``core/rust_tdoa_solve.py``, fed the sidecar's
 per-pair ``timing_uncertainty_seconds``) and the Python-ingest pair measurement
 (``core/tdoa_measurements.py``, fed per-node clock evidence from the registry)
 must weight the same pair set identically, and the Rust and Python per-class
-defaults must agree.
+defaults must agree. A stated node position accuracy never enters the weights
+on either path; both add the same node-position covariance term.
 """
 
 from __future__ import annotations
@@ -372,3 +373,68 @@ def test_point_only_network_on_weak_clocks_keeps_the_fix_and_widens_covariance()
     assert np.trace(np.asarray(ntp_weighted.position_covariance_m2)) > np.trace(
         np.asarray(unweighted.position_covariance_m2)
     )
+
+
+def test_both_ingest_paths_widen_alike_for_a_stated_node_position_accuracy(monkeypatch) -> None:
+    """Owner decision on both paths: the Python-ingest solve (registry accuracy
+    via ``node_position_std_m``) and the Rust-handoff re-solve (manifest
+    ``sensors[].position_std_m``) weight the same pair set alike and add the
+    same node-position term, so a hand-measured node widens a fix equally
+    whichever path the site runs."""
+    import minimappr.core.localization as localization_module
+    from minimappr.core.localization import LocalizationEngine
+    from minimappr.core.node_position_covariance import NodePositionUncertainty
+
+    positions = {
+        f"{node_id}:ch0": np.asarray(origin, dtype=np.float64)
+        for node_id, origin in {
+            "p0": (0.0, 0.0, 1.5),
+            "p1": (50.0, 0.0, 2.0),
+            "p2": (0.0, 50.0, 1.0),
+            "p3": (50.0, 50.0, 2.5),
+            "p4": (25.0, 25.0, 8.0),
+        }.items()
+    }
+    ordered_sensor_ids = sorted(positions)
+    node_ids = {sensor_id: sensor_id.split(":")[0] for sensor_id in ordered_sensor_ids}
+    sensor_position_std_m = {"p1:ch0": 0.3, "p3:ch0": 0.1}
+    source_m = np.asarray([30.0, 20.0, 3.0])
+    windows = {sensor_id: np.full(8, float(index + 1)) for index, sensor_id in enumerate(ordered_sensor_ids)}
+
+    def exact_gcc_phat(*, signal, reference_signal, **_kwargs):
+        sensor_a = ordered_sensor_ids[int(signal[0]) - 1]
+        sensor_b = ordered_sensor_ids[int(reference_signal[0]) - 1]
+        return _arrival_lag_seconds(source_m, positions[sensor_a], positions[sensor_b]), CORRELATION_PEAK
+
+    monkeypatch.setattr(localization_module, "gcc_phat", exact_gcc_phat)
+    engine = LocalizationEngine(interp_factor=INTERPOLATION_FACTOR, amplitude_ratio_strength=0.0, max_tau_s=0.35)
+    python_ingest = engine.localize(
+        positions,
+        windows,
+        SAMPLE_RATE_HZ,
+        20.0,
+        0.5,
+        sensor_node_ids=node_ids,
+        node_position_std_m=sensor_position_std_m,
+    )
+    rust_handoff = solve_localization_from_rust_tdoas(
+        sensor_positions=positions,
+        ordered_sensor_ids=ordered_sensor_ids,
+        pair_tdoas=_rust_pair_tdoas(
+            ordered_sensor_ids, positions, node_ids, source_m, {node_id: 0.0 for node_id in node_ids.values()}
+        ),
+        steering_direction=None,
+        sound_speed_mps=localization_module.speed_of_sound_mps(temperature_c=20.0, humidity_fraction=0.5),
+        sample_rate_hz=SAMPLE_RATE_HZ,
+        interpolation_factor=INTERPOLATION_FACTOR,
+        far_field_default_range_m=50.0,
+        node_position_uncertainty=NodePositionUncertainty.from_sensor_position_std(node_ids, sensor_position_std_m),
+    )
+    np.testing.assert_allclose(python_ingest.position_m, rust_handoff.position_m, atol=1e-6)
+    np.testing.assert_allclose(
+        python_ingest.position_covariance_m2, rust_handoff.position_covariance_m2, rtol=1e-6, atol=1e-9
+    )
+    unstated = engine.localize(positions, windows, SAMPLE_RATE_HZ, 20.0, 0.5, sensor_node_ids=node_ids)
+    assert np.trace(np.asarray(python_ingest.position_covariance_m2)) > np.trace(
+        np.asarray(unstated.position_covariance_m2)
+    ) + 0.3**2 * 0.25

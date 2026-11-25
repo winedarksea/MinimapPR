@@ -168,3 +168,56 @@ fn a_channel_without_a_reference_pair_does_not_void_the_far_field_direction() {
         "bearing off: {direction:?}"
     );
 }
+
+fn solve_with_node_position_std(node_position_std_m: Option<&[f64]>) -> SrpPhatEvaluation {
+    const NODE_INDEX_BY_CHANNEL: [usize; 6] = [0, 0, 0, 0, 1, 2];
+    let mics = three_node_mics();
+    let windows = point_source_windows(&mics);
+    estimate_tetrahedral_steering_with_solve_constraints(
+        &windows,
+        &[0, 1, 2, 3, 4, 5],
+        &mics,
+        SAMPLE_RATE_HZ,
+        SOUND_SPEED_MPS,
+        config(),
+        SolveChannelConstraints {
+            channel_node_position_std: node_position_std_m.map(|stds| SensorNodePositionStd {
+                node_index_by_sensor: &NODE_INDEX_BY_CHANNEL,
+                node_position_std_m: stds,
+            }),
+            ..SolveChannelConstraints::default()
+        },
+    )
+}
+
+fn covariance_trace_m2(evaluation: &SrpPhatEvaluation) -> f32 {
+    let covariance = evaluation
+        .localization
+        .position_covariance_m2
+        .expect("solved covariance");
+    covariance[0][0] + covariance[1][1] + covariance[2][2]
+}
+
+#[test]
+fn a_hand_measured_node_widens_the_published_covariance_and_unstated_ones_do_not() {
+    let without = solve_with_node_position_std(None);
+    let unstated = solve_with_node_position_std(Some(&[0.0, 0.0, 0.0]));
+    assert_eq!(
+        unstated.localization.position_covariance_m2, without.localization.position_covariance_m2,
+        "no stated accuracy keeps today's covariance"
+    );
+    let hand_measured_point = solve_with_node_position_std(Some(&[0.0, 0.3, 0.0]));
+    assert_eq!(
+        hand_measured_point.localization.position_m, without.localization.position_m,
+        "a stated accuracy widens the error, it never moves the fix"
+    );
+    // A 0.3 m rigid error on the 4 m point node, with the source ~5 m out,
+    // moves the fix by a sizeable fraction of that; the bare solve states
+    // centimetres.
+    let added_variance_m2 =
+        covariance_trace_m2(&hand_measured_point) - covariance_trace_m2(&without);
+    assert!(
+        added_variance_m2 > 0.01,
+        "added variance {added_variance_m2} m^2"
+    );
+}

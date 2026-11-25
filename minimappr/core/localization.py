@@ -13,6 +13,7 @@ from minimappr.core.localization_uncertainty import (
     covariance_to_nested_list,
     embed_planar_covariance_m2,
 )
+from minimappr.core.node_position_covariance import NodePositionUncertainty
 from minimappr.core.pair_timing_uncertainty import (
     inverse_variance_pair_weight,
     optimizer_residual_scale,
@@ -32,6 +33,25 @@ class LocalizationError(RuntimeError):
 def _minimum_position_std_m(sound_speed_mps: float, sample_rate_hz: int, interp_factor: int) -> float:
     sample_period_s = 1.0 / max(sample_rate_hz * max(interp_factor, 1), 1)
     return max(sound_speed_mps * sample_period_s, 0.05)
+
+
+def _node_position_uncertainty(
+    sensor_ids: list[str],
+    sensor_node_ids: dict[str, str] | None,
+    sensor_position_std_m: dict[str, float] | None,
+) -> NodePositionUncertainty | None:
+    """Per-sensor stated accuracies grouped by node for the solve covariance.
+
+    Without node membership each sensor is its own node, which is exact for
+    point nodes and the only grouping that cannot invent a correlation.
+    """
+    if not sensor_position_std_m:
+        return None
+    node_ids = sensor_node_ids if sensor_node_ids is not None else {sensor_id: sensor_id for sensor_id in sensor_ids}
+    return NodePositionUncertainty.from_sensor_position_std(
+        sensor_node_ids={sensor_id: node_ids[sensor_id] for sensor_id in sensor_ids if sensor_id in node_ids},
+        sensor_position_std_m={sensor_id: sensor_position_std_m.get(sensor_id) for sensor_id in sensor_ids},
+    )
 
 
 def speed_of_sound_mps(temperature_c: float, humidity_fraction: float) -> float:
@@ -232,7 +252,6 @@ class LocalizationEngine:
             gcc_phat_function=gcc_phat,
             sensor_node_ids=sensor_node_ids,
             cross_node_max_tau_s=self.cross_node_max_tau_s,
-            node_position_std_m=node_position_std_m,
             stats=pair_stats,
         )
         array_aperture_m = max(
@@ -284,6 +303,9 @@ class LocalizationEngine:
                 far_field_initial_range_m=self.far_field_default_range_m,
                 radial_refinement_enabled=True,
                 bearing_observed_obs_floor=self.bearing_observed_obs_floor,
+                node_position_uncertainty=_node_position_uncertainty(
+                    sensor_ids, sensor_node_ids, node_position_std_m
+                ),
             )
         except (ValueError, np.linalg.LinAlgError) as exc:
             raise LocalizationError(str(exc)) from exc

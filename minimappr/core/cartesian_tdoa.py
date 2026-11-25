@@ -13,6 +13,10 @@ from minimappr.core.far_field_model_selection import (
     far_field_alternative_if_curvature_unsupported,
 )
 from minimappr.core.localization_uncertainty import covariance_to_nested_list
+from minimappr.core.node_position_covariance import (
+    NodePositionUncertainty,
+    pair_measurement_node_position_covariance_m2,
+)
 from minimappr.core.pair_timing_uncertainty import optimizer_residual_scale
 from minimappr.core.radial_range_refinement import (
     adaptive_radial_refinement,
@@ -232,7 +236,12 @@ def solve_cartesian_tdoa(
     far_field_prior_radial_std_m: float | None = None,
     radial_refinement_enabled: bool = True,
     bearing_observed_obs_floor: float = BEARING_OBSERVED_OBS_FACTOR_FLOOR,
+    node_position_uncertainty: NodePositionUncertainty | None = None,
 ) -> CartesianTdoaSolve:
+    """``node_position_uncertainty`` (stated node position accuracies) widens
+    the covariance by the nodes' rigid position errors propagated through this
+    solve's sensitivity (``core/node_position_covariance.py``); ``None`` keeps
+    the timing-only covariance."""
     bearing_constraints = bearing_constraints or []
     amplitude_constraints = amplitude_constraints or []
     sensor_ids = sorted(sensor_positions)
@@ -503,6 +512,18 @@ def solve_cartesian_tdoa(
         minimum_position_std_m=minimum_position_std_m,
         unobservable_position_std_m=unobservable_position_std_m,
     )
+    if node_position_uncertainty is not None and has_tdoa_measurements:
+        constraint_jacobian = jacobian[len(measurements) :]
+        node_position_term_m2 = pair_measurement_node_position_covariance_m2(
+            position_m=best_position,
+            sensor_positions=sensor_positions,
+            measurements=measurements,
+            additional_normal_matrix=constraint_jacobian.T @ constraint_jacobian if len(constraint_jacobian) else None,
+            sound_speed_mps=sound_speed_mps,
+            uncertainty=node_position_uncertainty,
+        )
+        if node_position_term_m2 is not None:
+            covariance_m2 = covariance_m2 + node_position_term_m2
     radial_axis = (best_position - centroid_m) / max(solved_range_m, EPSILON)
     if radial_refinement_std_m is not None:
         radial_variance_m2 = float(radial_axis @ covariance_m2 @ radial_axis)

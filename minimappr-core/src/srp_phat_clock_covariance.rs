@@ -14,6 +14,7 @@
 //! position (the same linearisation the Python re-solve uses).
 
 use super::{magnitude, sub, ReferenceMeasurement, EPSILON};
+use crate::tdoa_node_position_covariance::{invert_symmetric_3x3, multiply_3x3_vector};
 
 /// Which clock stamps each buffer channel, and every clock's 1-sigma offset.
 /// Channels sharing a clock index (one node) have no offset between them.
@@ -136,40 +137,6 @@ fn reference_tdoa_jacobian_rows(
                 .map(|axis| (sensor_unit[axis] - reference_unit[axis]) * reciprocal_sound_speed)
         })
         .collect()
-}
-
-fn invert_symmetric_3x3(matrix: [[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
-    let cofactor = |row_a: usize, row_b: usize, col_a: usize, col_b: usize| {
-        matrix[row_a][col_a] * matrix[row_b][col_b] - matrix[row_a][col_b] * matrix[row_b][col_a]
-    };
-    let adjugate = [
-        [
-            cofactor(1, 2, 1, 2),
-            -cofactor(0, 2, 1, 2),
-            cofactor(0, 1, 1, 2),
-        ],
-        [
-            -cofactor(1, 2, 0, 2),
-            cofactor(0, 2, 0, 2),
-            -cofactor(0, 1, 0, 2),
-        ],
-        [
-            cofactor(1, 2, 0, 1),
-            -cofactor(0, 2, 0, 1),
-            cofactor(0, 1, 0, 1),
-        ],
-    ];
-    let determinant = matrix[0][0] * adjugate[0][0]
-        + matrix[0][1] * adjugate[1][0]
-        + matrix[0][2] * adjugate[2][0];
-    if determinant == 0.0 || !determinant.is_finite() {
-        return None;
-    }
-    Some(adjugate.map(|row| row.map(|value| value / determinant)))
-}
-
-fn multiply_3x3_vector(matrix: [[f64; 3]; 3], vector: [f64; 3]) -> [f64; 3] {
-    matrix.map(|row| row[0] * vector[0] + row[1] * vector[1] + row[2] * vector[2])
 }
 
 #[cfg(test)]
