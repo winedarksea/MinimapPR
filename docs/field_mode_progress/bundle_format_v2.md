@@ -18,6 +18,7 @@ A bundle is one zip:
 | `expectations.json` | no | pass thresholds (§5); harness defaults when absent |
 | `audio/{node_id}.wav` | yes, per node | PCM16 little-endian, multichannel interleaved; channel `i` is `channel_sensor_ids[i]` |
 | `reference_audio/{event_id}.wav` | no | mono PCM16 at the source node, for node-sourced events |
+| `frame_timing/{node_id}.json` | no | per-frame packet timing and `time_quality`, named by the node's `frame_timing_file` (§2.1) |
 
 Versioning: `manifest.json` keeps `"schema_version": 1` (its layout did not
 change). `ground_truth.json` carries its own `schema_version`: **2** for this
@@ -64,6 +65,33 @@ all additions are optional and default to v1 behaviour. Unknown keys are ignored
   Offsets are metres in the node body frame (rotated by `orientation`).
 - A node whose `node_id` is some event's `source_node_id` is a ground-truth
   reference node and is excluded from replay by default.
+- **Optional node keys (E4).** `node_type` (a `NodeType` value; the binary
+  replay needs it, the in-process replay still infers from the offset count)
+  and `frame_timing_file` (§2.1). Both are written by calibration capture;
+  older bundles lack them and stay valid.
+
+### 2.1 Per-frame timing (`frame_timing/{node_id}.json`)
+
+The WAV is one flat sample timeline, so it cannot show a timestamp step or a
+clock-class change inside an upload. Capture keeps one entry per firmware
+frame (`minimappr/calibration/frame_timing.py`):
+
+```json
+{"schema_version": 1, "node_id": "node-a", "sample_rate_hz": 48000,
+ "frames": [{"sample_offset": 0, "sample_count": 960,
+             "start_time_ns": 1800000000000000000,
+             "time_quality": "gps_locked", "sequence": 41}]}
+```
+
+`sample_offset` indexes the node's WAV; `start_time_ns` is the packet
+timestamp as received (it may disagree with `audio_start_time_ns + n / rate`,
+which is the point); `time_quality` is a `TimeQuality` value or `null` when not
+reported; `sequence` may be `null`. Frames are sorted and never overlap; gaps
+are lost packets. `minimappr/sim/replay_frames.py` turns each entry back into
+one binary-upload frame with its own timing, and
+`minimappr/sim/replay_sidecar.py` posts the uploads to a running sidecar in
+live arrival order. A bundle without the table replays as evenly cut frames on
+the flat timeline, with the frame size and clock class stated by the caller.
 
 ## 3. ground_truth.json v2
 

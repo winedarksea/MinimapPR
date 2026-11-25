@@ -549,6 +549,8 @@ class IngestProcessor:
                     start_sample_index=frame.start_sample_index,
                     end_sample_index=frame.end_sample_index,
                     end_time_ns=buffer_end_time_ns,
+                    time_quality=frame.time_quality.value,
+                    sequence=frame.sequence,
                 )
                 if self._persist_observations_on_ingest:
                     await self._registry.record_observation(

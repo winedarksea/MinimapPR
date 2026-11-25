@@ -4,7 +4,9 @@ Runs after a `capture_kind == "calibration"` session stops:
 
   1. Extract  — per node in node_channel_map, render that node's sensor
                 channels from the session capture buffer and write a
-                multichannel PCM16 WAV (channel i == channel_sensor_ids[i]).
+                multichannel PCM16 WAV (channel i == channel_sensor_ids[i])
+                plus its per-frame packet timing table
+                (calibration/frame_timing.py).
   2. Manifest — node geometry (geo + local ENU + sensor offsets + orientation),
                 site origin/coordinate mode, environment snapshot, per-node
                 sync diagnostics.
@@ -32,6 +34,7 @@ from typing import Any, Optional
 
 import numpy as np
 
+from minimappr.calibration.frame_timing import frame_timing_bundle_path, frame_timing_table_from_capture
 from minimappr.core.capture_session import CaptureSessionRecord
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.localization import speed_of_sound_mps
@@ -104,6 +107,17 @@ class CalibrationPipeline:
 
             wav_path = audio_dir / f"{node_id}.wav"
             await asyncio.to_thread(write_multichannel_wav, wav_path, channels, sample_rate_hz)
+            # Every channel of a node arrives in the same frames, so the first
+            # sensor's packet timing is the node's.
+            frame_timing_table = frame_timing_table_from_capture(
+                node_id,
+                sample_rate_hz,
+                record.capture_audio_buffer.frame_timings_in_range(sensor_ids[0], start_ns, end_ns),
+                total_samples=int(channels.shape[1]),
+            )
+            frame_timing_path = record.work_dir / frame_timing_bundle_path(node_id)
+            frame_timing_path.parent.mkdir(parents=True, exist_ok=True)
+            frame_timing_path.write_text(json.dumps(frame_timing_table.to_json_payload()))
             node_manifests.append(
                 await self._build_node_manifest(
                     node_id=node_id,
@@ -175,7 +189,9 @@ class CalibrationPipeline:
         position_m: Optional[list[float]] = None
         sensor_offsets_m: list = []
         orientation: dict = {}
+        node_type: Optional[str] = None
         if node_row is not None:
+            node_type = node_row.get("node_type")
             sensor_offsets_m = node_row.get("sensor_offsets_m") or []
             raw_orientation = node_row.get("orientation")
             orientation = raw_orientation if isinstance(raw_orientation, dict) else {}
@@ -204,7 +220,9 @@ class CalibrationPipeline:
                     }
         return {
             "node_id": node_id,
+            "node_type": node_type,
             "audio_file": f"audio/{node_id}.wav",
+            "frame_timing_file": frame_timing_bundle_path(node_id),
             "sample_rate_hz": int(sample_rate_hz),
             "audio_start_time_ns": int(sync_diag.get("requested_start_ns") or 0),
             "channel_sensor_ids": sensor_ids,

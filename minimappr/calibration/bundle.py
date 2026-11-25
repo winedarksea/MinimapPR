@@ -11,6 +11,10 @@ harness. A bundle is a zip per field scenario:
     detections.json        live system outputs during the window (reference)
     expectations.json      optional pass thresholds (harness defaults if absent)
     audio/{node_id}.wav    per-node multichannel PCM16; channel i == channel_sensor_ids[i]
+    frame_timing/{node_id}.json
+                           optional per-frame packet timing and time_quality
+                           (calibration/frame_timing.py); named by the node
+                           entry's ``frame_timing_file``, absent in older bundles
     reference_audio/{event_id}.wav
                            mono mixdown of the event's ground-truth node
                            (a node placed at the source, excluded from
@@ -30,6 +34,7 @@ from typing import Any
 
 import numpy as np
 
+from minimappr.calibration.frame_timing import FRAME_TIMING_BUNDLE_DIRECTORY, NodeFrameTimingTable
 from minimappr.calibration.ground_truth_events import (
     GROUND_TRUTH_SCHEMA_VERSION,
     validate_ground_truth_payload,
@@ -157,6 +162,10 @@ def write_bundle_zip(
         if audio_dir.is_dir():
             for wav_path in sorted(audio_dir.glob("*.wav")):
                 zf.write(wav_path, f"audio/{wav_path.name}")
+        frame_timing_dir = session_artifact_dir / FRAME_TIMING_BUNDLE_DIRECTORY
+        if frame_timing_dir.is_dir():
+            for timing_path in sorted(frame_timing_dir.glob("*.json")):
+                zf.write(timing_path, f"{FRAME_TIMING_BUNDLE_DIRECTORY}/{timing_path.name}")
         manifest = json.loads(manifest_path.read_text())
         for event in ground_truth_payload.get("events", []):
             if not event.get("source_node_id"):
@@ -179,16 +188,31 @@ class CalibrationBundle:
     detections: list[dict]
     _audio_cache: dict[str, tuple[np.ndarray, int]] = field(default_factory=dict, repr=False)
 
-    def node_audio(self, node_id: str) -> tuple[np.ndarray, int]:
-        """Return (channels_first float32 in [-1, 1], sample_rate_hz) for a node."""
-        cached = self._audio_cache.get(node_id)
-        if cached is not None:
-            return cached
+    def node_manifest(self, node_id: str) -> dict:
         node = next(
             (n for n in self.manifest.get("nodes", []) if n.get("node_id") == node_id), None
         )
         if node is None:
             raise KeyError(f"node {node_id} not in bundle manifest")
+        return node
+
+    def node_frame_timing(self, node_id: str) -> NodeFrameTimingTable | None:
+        """The node's per-frame packet timing; None for a bundle written before the table existed."""
+        timing_file = self.node_manifest(node_id).get("frame_timing_file")
+        if not timing_file:
+            return None
+        with zipfile.ZipFile(self.zip_path) as zf:
+            table = NodeFrameTimingTable.from_json_payload(json.loads(zf.read(timing_file)))
+        if table.node_id != node_id:
+            raise ValueError(f"{timing_file} describes node {table.node_id!r}, not {node_id!r}")
+        return table
+
+    def node_audio(self, node_id: str) -> tuple[np.ndarray, int]:
+        """Return (channels_first float32 in [-1, 1], sample_rate_hz) for a node."""
+        cached = self._audio_cache.get(node_id)
+        if cached is not None:
+            return cached
+        node = self.node_manifest(node_id)
         with zipfile.ZipFile(self.zip_path) as zf:
             with zf.open(node["audio_file"]) as raw:
                 with wave.open(raw) as w:
