@@ -344,6 +344,8 @@ CONFIG_STAGE_GROUPS: tuple[tuple[str, str, PipelineStageKind | None, tuple[str, 
             "position_observation_queue_max_items",
             "position_observation_unclassified_track_policy",
             "position_observation_solve_ledger_max_entries",
+            "position_observation_solve_id_memory_max_entries",
+            "position_observation_held_fix_max_wait_seconds",
         ),
     ),
     (

@@ -182,6 +182,13 @@ class BearingFusionStore:
     async def register(self, observation: BearingObservation, *, now_ns: int) -> None:
         async with self._lock:
             self._prune_locked(now_ns)
+            # One cone per (node, event): an event solve and the render covering
+            # it register the same cone, which must not corroborate itself twice.
+            self._observations = [
+                obs
+                for obs in self._observations
+                if not (obs.node_id == observation.node_id and obs.event_time_ns == observation.event_time_ns)
+            ]
             self._observations.append(observation)
             if len(self._observations) > self._max_entries:
                 # Drop oldest by expiry.

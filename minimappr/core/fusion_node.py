@@ -33,6 +33,7 @@ from minimappr.classifiers.base import AudioClassifier
 from minimappr.classifiers.birdnet_two_threshold import detection_is_below_display_threshold
 from minimappr.config import Settings
 from minimappr.core.assembly import DetectionAssembler
+from minimappr.core.assembly_track_resolution import label_observed_solve_track_without_report
 from minimappr.core.multi_node_bearing_fusion import (
     BearingFusionResult,
     BearingFusionStore,
@@ -279,6 +280,11 @@ class FusionMetrics:
     # --- P8 synchronized-window skips (core/synchronized_window_skips.py), synced in status() ---
     buffer_synchronized_window_skips_by_reason: dict[str, int] = field(default_factory=dict)
     buffer_synchronized_window_skips_by_sensor: dict[str, dict[str, int]] = field(default_factory=dict)
+    # Hold rule: fixes held for their classification, and how each was resolved.
+    position_observations_held_for_label: int = 0
+    position_observations_held_applied_with_label: int = 0
+    position_observations_held_applied_geometry_only: int = 0
+    position_observations_held_dropped: int = 0
     # --- Field Mode W2-onset-srp ---
     onset_clustering_window_count: int = 0
     onset_clustering_accepted_cluster_count: int = 0
@@ -756,6 +762,9 @@ class FusionNode:
                 await asyncio.wait_for(position_observations.drain(), timeout=join_timeout_s)
         except asyncio.TimeoutError:
             self._last_error = "Timeout waiting for pipeline queues to drain during shutdown"
+        finally:
+            if (position_observations := self._position_observations()) is not None:
+                position_observations.close()
 
         try:
             for _ in self._localization_workers:
@@ -1214,6 +1223,8 @@ class FusionNode:
                         )
                     if await self._enqueue_stage(self._classification_queue, product):
                         self._metrics.localization_stage_out += 1
+                    else:
+                        await self._release_held_position_without_classification(product)
             except asyncio.TimeoutError:
                 self._metrics.stage_timeout_count += 1
                 self._last_error = f"Localization stage timed out after {timeout_s:.3f}s"
@@ -1309,8 +1320,9 @@ class FusionNode:
                         source_node_id=product.candidate.source_node_id,
                     )
                     if (position_observations := self._position_observations()) is not None:
-                        # P5: the classifier found nothing, so the solve's lone provisional track goes.
-                        await position_observations.retract_provisional_track_started_by(
+                        # P5: the classifier found nothing: a held fix is dropped and the
+                        # solve's lone provisional track goes.
+                        await position_observations.classification_found_nothing_trackable(
                             position_observation_solve_id(product)
                         )
                 else:
@@ -1345,6 +1357,9 @@ class FusionNode:
                 self._last_error = f"{type(exc).__name__}: {exc}"
                 self._record_worker_exception(stage="classification", exc=exc, candidate_id=product.candidate.id)
             finally:
+                if not product.held_for_window_label_reconciliation:
+                    # A held fix its classification never resolved (suppressed, failed, timed out).
+                    await self._release_held_position_without_classification(product)
                 self._realtime_tracker.mark_finished(
                     stage_name="classification",
                     item_id=product.candidate.id,
@@ -2509,7 +2524,18 @@ class FusionNode:
                 source_position_m=product.omni_position_m,
             )
         # --- end Field Mode W3-entity ---
+        classification_tracker_feed = self._classification_tracker_feed(
+            product=product,
+            classified=classified,
+            source_node_id=source_node_id,
+            capability_tier=capability_tier,
+            reference_sensor=reference_sensor,
+            tdoa_s=tdoa_s,
+            localization_position_m=localization_position_m,
+            localization_position_covariance_m2=localization_position_covariance_m2,
+        )
         if decision.action == "suppress":
+            await self._label_track_of_unreported_classification(classification_tracker_feed)
             return None
         if decision.action == "enrich_existing":
             existing_detection = DetectionEvent.model_validate(decision.existing_detection)
@@ -2529,26 +2555,10 @@ class FusionNode:
             if decision.entity_id is not None and self.entity_reporting is not None:
                 # Field Mode W3-entity: absorbed bout still feeds partial binding.
                 await self.entity_reporting.feed_absorbed_bout_to_tracker(
-                    entity_id=decision.entity_id,
-                    solve_id=position_observation_solve_id(product),
-                    position_observations=self._position_observations(),
-                    capability_tier=capability_tier,
-                    event_time_ns=product.candidate.event_time_ns,
-                    localization_position_m=localization_position_m,
-                    localization_position_covariance_m2=localization_position_covariance_m2,
-                    classification_label=classified.classification.label,
-                    classification_confidence=classified.classification.confidence,
-                    classification_scores=classified.classification.scores,
-                    classification_features=dict(classified.classification.features),
-                    label_category=classified.label_category,
-                    iff_category=classified.iff_category,
-                    label_id=classified.label_id,
-                    selected_sensor_ids=product.selected_sensor_ids,
-                    source_node_id=source_node_id,
-                    reference_sensor=reference_sensor,
-                    tdoa_s=tdoa_s,
-                    environment=product.environment,
+                    entity_id=decision.entity_id, **classification_tracker_feed
                 )
+            else:
+                await self._label_track_of_unreported_classification(classification_tracker_feed)
             return None
 
         if reporting_modality == "localized" and not decision_is_entity_routed:
@@ -2651,6 +2661,53 @@ class FusionNode:
     def _position_observations(self):
         """P5: the pipeline that already applied this solve's position, if any."""
         return classified_solve_resolver(self._localization_seam_collaborators.position_observation_sink)
+
+    async def _release_held_position_without_classification(self, product: LocalizedCandidate) -> None:
+        if (position_observations := self._position_observations()) is not None:
+            await position_observations.release_held_position_without_classification(
+                position_observation_solve_id(product)
+            )
+
+    def _classification_tracker_feed(
+        self,
+        *,
+        product: LocalizedCandidate,
+        classified,
+        source_node_id: str | None,
+        capability_tier: str,
+        reference_sensor: str,
+        tdoa_s: dict[str, float],
+        localization_position_m: tuple[float, float, float],
+        localization_position_covariance_m2: list[list[float]] | None,
+    ) -> dict[str, Any]:
+        """``resolve_detection_track`` keywords for a classification no detection carries."""
+        return {
+            "solve_id": position_observation_solve_id(product),
+            "position_observations": self._position_observations(),
+            "capability_tier": capability_tier,
+            "event_time_ns": product.candidate.event_time_ns,
+            "localization_position_m": localization_position_m,
+            "localization_position_covariance_m2": localization_position_covariance_m2,
+            "classification_label": classified.classification.label,
+            "classification_confidence": classified.classification.confidence,
+            "classification_scores": classified.classification.scores,
+            "classification_features": dict(classified.classification.features),
+            "label_category": classified.label_category,
+            "iff_category": classified.iff_category,
+            "label_id": classified.label_id,
+            "selected_sensor_ids": product.selected_sensor_ids,
+            "source_node_id": source_node_id,
+            "reference_sensor": reference_sensor,
+            "tdoa_s": tdoa_s,
+            "environment": product.environment,
+        }
+
+    async def _label_track_of_unreported_classification(self, classification_tracker_feed: dict[str, Any]) -> None:
+        """P5: a classification reporting will not surface (suppressed, merged into an
+        existing detection) still labels, or resolves the held fix of, its solve's track."""
+        await label_observed_solve_track_without_report(
+            tracker=self.tracker, registry=self.registry, **classification_tracker_feed
+        )
 
     def _persists_fused_entity_position(self, label_category: str | None) -> bool:
         """Field Mode S-fixes tracking: entity rows store the fused track position."""
@@ -3429,6 +3486,9 @@ class FusionNode:
             stage_name=stage_name,
         )
         self._realtime_tracker.mark_dropped(stage_name=stage_name, item_id=evicted_id)
+        if isinstance(evicted, LocalizedCandidate) and (position_observations := self._position_observations()):
+            # Its classification will never run: a held fix goes on geometry-only.
+            position_observations.schedule_held_position_release(position_observation_solve_id(evicted))
         return evicted
 
     def _queue_stage_name(self, queue: asyncio.Queue) -> str:

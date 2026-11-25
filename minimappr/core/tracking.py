@@ -587,7 +587,7 @@ class TrackManager(
         if not self._dormant_enabled:
             return
         # Never park one-hit clutter — only tracks that were corroborated.
-        if track.update_count < self.CONFIRM_THRESHOLD:
+        if track.update_count < self.CONFIRM_THRESHOLD or not self._parks_as_dormant(track):
             return
         fingerprint = self._fingerprints.get(track.id)
         self._dormant[track.id] = _DormantRecord(

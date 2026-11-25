@@ -89,7 +89,8 @@ zone or reporting-policy suppression. Both ingest paths hand every solve to
 - **Hidden until classified.** With `position_observation_unclassified_track_policy` set to
   `start_hidden_tentative` (the default), an unmatched fix from an event-triggered solve starts a
   tentative track. That track stays out of snapshots, storage, the live feed, federation and rules
-  until a classification reveals it. A scheduled render, or a render without provenance, may only
+  until a classification reveals it, including after it is dropped and until it is reaped. It is
+  never parked in the dormant registry, since it has no identity to reacquire. A scheduled render, or a render without provenance, may only
   update an existing track. `require_classification` means no track starts before a
   classification.
 - **Ambiguous fixes wait for their label.** When more than one track gates an unclassified fix,
@@ -98,13 +99,86 @@ zone or reporting-policy suppression. Both ingest paths hand every solve to
   fingerprint ranking (`position_observations_deferred_ambiguous`).
 - **The label never moves the track.** A solve's classification attaches its label to the track
   that solve's position already moved; `update_count` and `last_seen_ns` stay as they are, and a
-  hidden track becomes visible. Only when the classification's category contradicts that track (a
-  misassociation), or the track is gone, does the label-aware `update` run instead.
+  hidden track becomes visible. The label-aware `update` runs instead only when the track is gone,
+  or when the classification contradicts the track. A contradiction is a different category, or
+  a rejection by the label-dependent association gates (`association_candidates`: species
+  log-odds, concurrent-perch guard), which run again once the label exists. A label whose category
+  has tracking mode `none` ends an unclassified provisional track but never a labelled one. This
+  matters only with `association_category_gate_enabled` off, where it used to delete an
+  established track.
+- **Abstentions say nothing.** A classification with an `unknown` label or zero confidence (a
+  classifier abstention, an `unsettled` onset attribution) never labels, reveals or re-labels a
+  track. It is judged on the label, not the category: a real species label that the taxonomy
+  files under `unknown` still names a source. It
+  retracts a hidden track that only its own fix started; otherwise it refreshes recency only.
+- **Classifications that reporting drops still reach the tracker.** A `suppress` decision, a
+  non-entity `enrich_existing`, or a cross-reporter duplicate merge still labels the solve's
+  track, or resolves its held fix (`label_observed_solve_track_without_report`).
 - **Bounded FIFO, drop-oldest.** `position_observation_queue_max_items` (`1024`) bounds the queue.
   Overflow drops the oldest observation and counts it (`position_observations_dropped_queue_full`).
   Observations are never coalesced: two callers of the same label in one cluster at the same time
   are two observations. A dropped solve's classification, if one arrives, updates the tracker
   instead. `position_observation_solve_ledger_max_entries` (`8192`, never below the queue size)
-  bounds how many solves are remembered while their classification is pending.
+  bounds how many solves are remembered in full while their classification is pending. An evicted
+  entry leaves its solve id and track id in
+  `position_observation_solve_id_memory_max_entries` (`32768`, never below the ledger size). That
+  is about 34 minutes at 16 event solves per second, well past any render interval or classifier
+  backlog. A covering render or a classification that arrives after eviction is still a duplicate,
+  or attaches only its label, and never applies the position a second time.
+- **Event solves off the event loop.** The SSE consumer awaits every event-only solve. With the
+  default `localization_single_node_solver: python_cartesian`, the Python re-solve of a
+  six-sensor cluster solve took a median of 11 ms (max 15 ms) on the event loop. It now runs in a
+  worker thread, one at a time, so ordering and idempotency are unchanged. A covering render
+  repeats its event's solve, but it does not count the solve's rejections or silent drops again,
+  and the bearing-fusion store keeps one cone per node and event.
 - **Entity feed.** An absorbed entity bout whose solve was observed attaches its label to the
   observed track. It no longer nudges that track a second time through partial binding.
+
+### Hold rule for perched tracks (a plan change)
+
+Plan point 4 asked for one tracker update per solve "ahead of every suppression path". The
+milestone 3 review found a case where applying the position first is wrong. A perched bird's
+`stationary_hold` filter averages every fix in and never forgets one. When a neighbour's
+overlapping call is solved from a poor geometry, the fix lands on the perched track before any
+label exists, and an abstaining classification cannot undo it. In `gate_collinear_trail` this
+moved the thrush's median error from 0.12 m to 0.45 m. It also skipped the species gate and
+concurrent-perch guard: a Hermit Thrush fix moved a perched robin's track instead of starting
+its own.
+
+So a fix whose only gating track is a **labelled `stationary_hold` track** is held for its
+classification (`position_observations_held_for_label`):
+
+- An informative label applies the fix to the track that gated it, unless the label-dependent
+  gates (species log-odds, concurrent-perch guard, both run against every live track) reject
+  that track or it is gone. In that case the label-aware `update` places it, for example on a
+  new track for a second bird (`position_observations_held_applied_with_label`). The fix is not
+  re-associated from scratch: in `gate_flock_echo` a poorly conditioned fix then jumped to a
+  nearer provisional track whose filter was still loose.
+- An abstention, an empty classification, or a classification that finds nothing trackable
+  drops the fix (`position_observations_held_dropped`).
+- If no classification ever arrives, the fix is applied geometry-only
+  (`position_observations_held_applied_geometry_only`). That covers a classification-queue drop,
+  chunk suppression, a saturated report window, a timeout, a backend failure and ledger eviction,
+  and `position_observation_held_fix_max_wait_seconds` (`30`) is a deadline for anything else. A
+  released fix never moves `last_seen_ns` backwards.
+
+Continuous-motion and hidden tracks still update at once, so the drone update-gap gate is
+unaffected. Event-only Rust solves are never held, because they carry no classification and only
+one per render interval is ever covered by a render. Holding them would only delay them by the
+deadline, and the gates that run again at attach still catch a covering render's contradicting
+label.
+
+This keeps the reason for point 4: no capacity or dedupe drop starves the tracker, and only the
+classifier's own verdict can stop a fix reaching a perched bird. It is the same kind of
+exception as the ambiguity rule above.
+
+`gate_flock_echo` recalls less than it did before milestone 3 (`event_recall_sum` 0.56 to 0.33).
+This is expected: the extra recall came from a misassociation that P5 removed.
+
+`onset_overlap_two_species` (all-on) has a median error of 0.44 m, against 0.33 m before
+milestone 3. Before milestone 3, an abstaining classification (`unknown`, confidence 0) founded
+a track, and the tanager's first call joined it. Abstentions no longer found or move tracks, so
+the tanager's track now starts from its own first fix. That fix is poorly conditioned in height
+(variance 211 m²), but the stationary_hold filter restarts at it with its default variance, not
+the fix's. Starting a track's filter from the first fix's covariance (P4's filters) would fix
+this.

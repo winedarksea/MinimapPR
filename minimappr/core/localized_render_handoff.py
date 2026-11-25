@@ -19,6 +19,7 @@ packet time (``api/stream_consumer.py``), and a receipt-timed mono copy
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -27,6 +28,7 @@ import numpy as np
 
 from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest
 from minimappr.api.rust_solve_contract_degradation import SOLVE_CONTRACT_VIOLATION_FALLBACK_REASON
+from minimappr.core.bounded_recent_ids import BoundedRecentIds
 from minimappr.core.fusion_stage_carriers import EventCandidate, LocalizationBranch, LocalizedCandidate
 from minimappr.core.localized_handoff_duplicate_merge import (
     CrossReporterDuplicateMerger,
@@ -52,7 +54,8 @@ from minimappr.core.localized_render_localization import (
     HandoffGatingOutcome,
     HandoffLocalizationEstimate,
     gate_handoff_localization,
-    resolve_default_handoff_estimate,
+    python_cartesian_resolve_requested,
+    resolve_handoff_estimate,
 )
 from minimappr.core.point_network_call_requests import classify_rust_render_call, localized_call_for_rust_solve
 from minimappr.models import NodeSpec
@@ -83,6 +86,10 @@ class LocalizedRenderHandoff:
         self._host = host
         self.collaborators = collaborators
         self._cross_reporter_duplicate_merger = CrossReporterDuplicateMerger()
+        # A covering render repeats its event's solve: its rejections count once.
+        self._processed_solve_ids = BoundedRecentIds(host.settings.position_observation_solve_id_memory_max_entries)
+        # One off-loop solve at a time: the solver's metric counters are not thread-safe.
+        self._off_loop_solve_lock = asyncio.Lock()
 
     async def ingest(self, payload: LocalizedClassifierRenderRequest) -> None:
         host = self._host
@@ -110,17 +117,21 @@ class LocalizedRenderHandoff:
             solve_origin=SOLVE_ORIGIN_RUST_CLASSIFIER_RENDER,
         )
         self._register_localized_call(payload, solve, localized_product)
-        await self._classify_and_report(
-            payload,
-            node=solve.node,
-            geometry=solve.geometry,
-            localized_product=localized_product,
-            reporting_modality=solve.reporting_modality,
-            reference_sensor=solve.geometry.reference_sensor,
-            capability_tier=solve.gating.capability_tier,
-            normalized_audio=normalized_audio,
-            rust_extra_features=solve.rust_extra_features,
-        )
+        try:
+            await self._classify_and_report(
+                payload,
+                node=solve.node,
+                geometry=solve.geometry,
+                localized_product=localized_product,
+                reporting_modality=solve.reporting_modality,
+                reference_sensor=solve.geometry.reference_sensor,
+                capability_tier=solve.gating.capability_tier,
+                normalized_audio=normalized_audio,
+                rust_extra_features=solve.rust_extra_features,
+            )
+        finally:
+            # A held fix this render's classification never resolved (suppressed, failed).
+            await host._release_held_position_without_classification(localized_product)
 
     async def observe_event_solve(self, payload: LocalizedClassifierRenderRequest) -> None:
         """An event-only solve (no render): position only, never classified or reported.
@@ -161,6 +172,7 @@ class LocalizedRenderHandoff:
         host = self._host
         server_received_ns = time.time_ns()
         node = self._node_with_local_position(payload)
+        counts_solve_outcome = self._first_processing_of_solve(payload)
 
         # A render may retain the DSP localization payload for diagnostics even
         # after the sidecar deliberately selected an omni render (e.g. a
@@ -178,15 +190,16 @@ class LocalizedRenderHandoff:
             server_received_ns=server_received_ns,
         )
         if geometry.rejected_reason is not None and reporting_modality == "localized":
-            host._record_silent_drop(stage="localization", reason=geometry.rejected_reason, source_node_id=node.id)
+            if counts_solve_outcome:
+                host._record_silent_drop(stage="localization", reason=geometry.rejected_reason, source_node_id=node.id)
             reporting_modality = "omni"
-        estimate = self.collaborators.solution_resolver.resolve_handoff_solution(
-            payload=payload,
-            geometry=geometry,
-            reporting_modality=reporting_modality,
-        )
-        if estimate is None:
-            estimate = resolve_default_handoff_estimate(host, payload, geometry, reporting_modality)
+        resolve_args = (host, self.collaborators.solution_resolver, payload, geometry, reporting_modality)
+        if python_cartesian_resolve_requested(host, payload, reporting_modality):
+            # The Python re-solve takes ~10 ms per solve; keep it off the event loop.
+            async with self._off_loop_solve_lock:
+                estimate = await asyncio.to_thread(resolve_handoff_estimate, *resolve_args)
+        else:
+            estimate = resolve_handoff_estimate(*resolve_args)
         gating = gate_handoff_localization(
             host,
             payload=payload,
@@ -194,6 +207,7 @@ class LocalizedRenderHandoff:
             estimate=estimate,
             reporting_modality=reporting_modality,
             source_node_id=node.id,
+            records_rejections=counts_solve_outcome,
         )
         return _HandoffSolve(
             node=node,
@@ -204,6 +218,10 @@ class LocalizedRenderHandoff:
             reporting_modality=gating.reporting_modality,
             rust_extra_features=rust_render_features(payload, gating, geometry),
         )
+
+    def _first_processing_of_solve(self, payload: LocalizedClassifierRenderRequest) -> bool:
+        solve = payload.localization_solve
+        return solve is None or self._processed_solve_ids.add_if_new(solve.provenance.solve_id)
 
     async def _localized_product_for_solve(
         self, payload: LocalizedClassifierRenderRequest, solve: "_HandoffSolve", audio: np.ndarray
@@ -410,6 +428,11 @@ class LocalizedRenderHandoff:
         if cluster_emission_key is not None and self._merges_into_earlier_reporter(
             payload, cluster_emission_key=cluster_emission_key, position_m=branch.localization_position_m
         ):
+            await host._label_track_of_unreported_classification(host._classification_tracker_feed(
+                product=localized_product, classified=classified, source_node_id=node.id, capability_tier=capability_tier,
+                reference_sensor=reference_sensor, tdoa_s={}, localization_position_m=branch.localization_position_m,
+                localization_position_covariance_m2=branch.localization_position_covariance_m2,
+            ))
             return
         await host._maybe_trigger_speech_capture(
             node_id=node.id,
