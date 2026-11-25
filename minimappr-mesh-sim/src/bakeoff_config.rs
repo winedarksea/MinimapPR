@@ -156,7 +156,11 @@ pub struct TriggerModelConfig {
 
 impl Default for TriggerModelConfig {
     fn default() -> Self {
-        Self { frame_seconds: 0.032, relative_db: 8.0, cooldown_seconds: 0.8 }
+        Self {
+            frame_seconds: 0.032,
+            relative_db: 8.0,
+            cooldown_seconds: 0.8,
+        }
     }
 }
 
@@ -318,6 +322,8 @@ pub struct SeedSplit {
 /// Seeds 1_000_001–1_000_012 were looked at while building the harness, so
 /// the held-out range starts above them.
 pub const HELD_OUT_SEED_BASE: u64 = 2_000_000;
+/// Seeds whose results were seen while building the harness: never held out.
+pub const LOOKED_AT_SEEDS: std::ops::RangeInclusive<u64> = 1_000_001..=1_000_012;
 
 impl SeedSplit {
     pub fn counts(tuning_count: u64, held_out_count: u64) -> Self {
@@ -325,8 +331,51 @@ impl SeedSplit {
     }
 
     /// A nightly run may draw fresh held-out seeds from another base.
+    ///
+    /// Panics when the held-out range overlaps the tuning seeds or the
+    /// looked-at seeds: a decision read from seeds already seen is not held out.
     pub fn with_held_out_base(tuning_count: u64, held_out_count: u64, held_out_base: u64) -> Self {
-        Self { tuning_seeds: (1..=tuning_count).collect(), held_out_seeds: (held_out_base + 1..=held_out_base + held_out_count).collect() }
+        let held_out_seeds: Vec<u64> = (held_out_base + 1..=held_out_base + held_out_count).collect();
+        if let (Some(&first), Some(&last)) = (held_out_seeds.first(), held_out_seeds.last()) {
+            assert!(
+                first > tuning_count,
+                "held-out seeds {first}..={last} overlap the tuning seeds 1..={tuning_count}"
+            );
+            assert!(
+                last < *LOOKED_AT_SEEDS.start() || first > *LOOKED_AT_SEEDS.end(),
+                "held-out seeds {first}..={last} overlap the looked-at seeds {LOOKED_AT_SEEDS:?}"
+            );
+        }
+        Self {
+            tuning_seeds: (1..=tuning_count).collect(),
+            held_out_seeds,
+        }
+    }
+}
+
+#[cfg(test)]
+mod seed_split_tests {
+    use super::*;
+
+    #[test]
+    fn default_held_out_seeds_are_disjoint_from_tuning_and_looked_at_seeds() {
+        let split = SeedSplit::counts(200, 400);
+        assert!(split
+            .held_out_seeds
+            .iter()
+            .all(|seed| !split.tuning_seeds.contains(seed) && !LOOKED_AT_SEEDS.contains(seed)));
+    }
+
+    #[test]
+    #[should_panic(expected = "overlap the tuning seeds")]
+    fn held_out_base_inside_the_tuning_seeds_panics() {
+        SeedSplit::with_held_out_base(100, 10, 50);
+    }
+
+    #[test]
+    #[should_panic(expected = "overlap the looked-at seeds")]
+    fn held_out_range_over_the_looked_at_seeds_panics() {
+        SeedSplit::with_held_out_base(10, 20, 999_995);
     }
 }
 

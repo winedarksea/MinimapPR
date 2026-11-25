@@ -1253,14 +1253,29 @@ def _solve_status(metrics: dict, fusion_available: bool) -> PipelineStageStatus:
     out = int(metrics.get("localization_stage_out") or 0)
     fails = int(metrics.get("localization_failures") or 0)
     fallback = int(metrics.get("localization_fallback_count") or 0)
-    # P8: sensors a synchronized window left out, e.g. buffered at another rate.
-    skips_by_reason = metrics.get("buffer_synchronized_window_skips_by_reason") or {}
-    rate_mismatch_skips = int(skips_by_reason.get("sample_rate_mismatch") or 0)
-    health = "ok" if out > 0 else ("warn" if fails > 0 or rate_mismatch_skips > 0 else "ok")
+    # P8: sensors left out of solves (counted once per solve), e.g. buffered at
+    # another rate. The summary reads the recent window, so a mismatch that was
+    # fixed stops showing; the total stays as a metric.
+    rate_mismatch_reason = "sample_rate_mismatch"
+    recent_window_minutes = float(metrics.get("localization_excluded_sensor_recent_window_seconds") or 0.0) / 60.0
+    recent_rate_mismatch_exclusions = int(
+        (metrics.get("localization_excluded_sensor_recent_counts_by_reason") or {}).get(rate_mismatch_reason) or 0
+    )
+    total_rate_mismatch_exclusions = int(
+        (metrics.get("localization_excluded_sensor_counts_by_reason") or {}).get(rate_mismatch_reason) or 0
+    )
+    health = "ok" if out > 0 else ("warn" if fails > 0 or recent_rate_mismatch_exclusions > 0 else "ok")
     summary = f"last: {metrics.get('last_localization_algorithm', '?')}" if out else "configured; no solves yet"
-    if rate_mismatch_skips:
-        skipped_sensors = len(metrics.get("buffer_synchronized_window_skips_by_sensor") or {})
-        summary = f"{summary}; {skipped_sensors} sensor(s) excluded: sample-rate mismatch"
+    if recent_rate_mismatch_exclusions:
+        recently_excluded_sensors = sum(
+            1
+            for reasons in (metrics.get("localization_excluded_sensor_recent_counts_by_sensor") or {}).values()
+            if reasons.get(rate_mismatch_reason)
+        )
+        summary = (
+            f"{summary}; {recently_excluded_sensors} sensor(s) excluded in the last "
+            f"{recent_window_minutes:g} min: sample-rate mismatch"
+        )
     return PipelineStageStatus(
         health=health,
         summary=summary,
@@ -1269,7 +1284,8 @@ def _solve_status(metrics: dict, fusion_available: bool) -> PipelineStageStatus:
             _param("Failures", fails),
             _param("Fallbacks", fallback),
             _param("Attempted", str(metrics.get("last_attempted_algorithm", "?"))),
-            _param("Rate-mismatch skips", rate_mismatch_skips),
+            _param(f"Rate-mismatch exclusions ({recent_window_minutes:g} min)", recent_rate_mismatch_exclusions),
+            _param("Rate-mismatch exclusions (total)", total_rate_mismatch_exclusions),
         ],
     )
 

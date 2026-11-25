@@ -17,7 +17,11 @@ from pathlib import Path
 import pytest
 
 from minimappr.calibration.bundle_ground_truth_checks import range_ladder_rung_for
-from minimappr.calibration.bundle_validation import main, validate_calibration_bundle
+from minimappr.calibration.bundle_validation import (
+    main,
+    validate_calibration_artifact_directory,
+    validate_calibration_bundle,
+)
 from minimappr.calibration.bundle_validation_findings import (
     SEVERITY_BY_FINDING_CODE,
     BundleFindingCode as Code,
@@ -156,6 +160,15 @@ def test_protocol_defaults_flag_a_short_capture_and_thin_rungs(good_bundle_path:
     report = validate_calibration_bundle(good_bundle_path)
     assert report.codes(FindingSeverity.WARNING) == {Code.CAPTURE_TOO_SHORT, Code.RANGE_LADDER_RUNG_UNDERCOVERED}
     assert {f.details["rung_m"] for f in report.findings if f.code is Code.RANGE_LADDER_RUNG_EMPTY} == {10.0, 100.0, 1000.0}
+
+
+def _extracted_artifact_directory(bundle_path: Path, tmp_path: Path) -> tuple[Path, dict]:
+    artifact_dir = tmp_path / "artifact"
+    with zipfile.ZipFile(bundle_path) as bundle_zip:
+        bundle_zip.extractall(artifact_dir)
+    ground_truth_payload = json.loads((artifact_dir / "ground_truth.json").read_text())
+    (artifact_dir / "ground_truth.json").unlink()  # supplied from storage, never read from the directory
+    return artifact_dir, ground_truth_payload
 
 
 def test_cli_exit_status_and_json(good_bundle_path: Path, tmp_path: Path, capsys) -> None:
@@ -457,3 +470,17 @@ def test_event_beyond_the_ladder_is_reported(good_bundle_path: Path, tmp_path: P
 )
 def test_range_ladder_rungs_match_the_e5_matrix(range_m: float, expected_rung_m: float | None) -> None:
     assert range_ladder_rung_for(range_m, BundleValidationConfig()) == expected_rung_m
+
+
+def _finding_tuples(report) -> list[tuple]:
+    return [(finding.code, finding.node_id, finding.message) for finding in report.findings]
+
+
+@pytest.mark.parametrize("edit", [None, _remove_audio, _set_time_quality("ntp_disciplined", first_frame_index=5)])
+def test_artifact_directory_validation_matches_the_exported_zip(good_bundle_path: Path, tmp_path: Path, edit) -> None:
+    # The API validates the session's artifact directory instead of rebuilding the zip.
+    bundle_path = good_bundle_path if edit is None else rewrite_bundle(good_bundle_path, tmp_path / "edited.zip", edit)
+    artifact_dir, ground_truth_payload = _extracted_artifact_directory(bundle_path, tmp_path)
+    from_zip = validate_calibration_bundle(bundle_path, SHORT_BUNDLE_CONFIG)
+    from_directory = validate_calibration_artifact_directory(artifact_dir, ground_truth_payload, SHORT_BUNDLE_CONFIG)
+    assert _finding_tuples(from_directory) == _finding_tuples(from_zip)

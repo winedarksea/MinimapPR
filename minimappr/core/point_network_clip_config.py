@@ -30,6 +30,16 @@ DEFAULT_OVERLAPPING_CALLER_COMPARABLE_LEVEL_DB = 6.0
 # ...but only if it is audible at all: a span that is just the noise floor is
 # not a competing caller, even when the call itself is faint.
 DEFAULT_OVERLAPPING_CALLER_MIN_AUDIBLE_SNR_DB = 6.0
+# A node's clip is measured only over frames it fully received (gaps are
+# zero-filled, and a zero frame would set the noise floor at the log floor).
+# Below half the clip received, the floor quantile rests on too few frames and
+# the classifier would hear more gap than audio, so the node is not a candidate.
+DEFAULT_MIN_CLIP_COVERED_FRAME_RATIO = 0.5
+# Two solves farther apart than the distinct-caller separation are still one
+# caller when their positions agree within their stated covariances at this
+# probability (chi-square gate): each reporter can deliver its own solve of one
+# call, and at hundreds of metres independent solves differ by tens of metres.
+DEFAULT_SAME_EVENT_GATE_PROBABILITY = 0.99
 # Localized calls are remembered long enough to overlap any later clip
 # (a classification window plus the largest cross-node lag), bounded in count.
 DEFAULT_LOCALIZED_CALL_RETENTION_SECONDS = 120.0
@@ -47,6 +57,8 @@ class PointNetworkClipConfig:
     noise_floor_energy_quantile: float = DEFAULT_NOISE_FLOOR_ENERGY_QUANTILE
     overlapping_caller_comparable_level_db: float = DEFAULT_OVERLAPPING_CALLER_COMPARABLE_LEVEL_DB
     overlapping_caller_min_audible_snr_db: float = DEFAULT_OVERLAPPING_CALLER_MIN_AUDIBLE_SNR_DB
+    min_clip_covered_frame_ratio: float = DEFAULT_MIN_CLIP_COVERED_FRAME_RATIO
+    same_event_gate_probability: float = DEFAULT_SAME_EVENT_GATE_PROBABILITY
     localized_call_retention_seconds: float = DEFAULT_LOCALIZED_CALL_RETENTION_SECONDS
     localized_call_max_records: int = DEFAULT_LOCALIZED_CALL_MAX_RECORDS
 

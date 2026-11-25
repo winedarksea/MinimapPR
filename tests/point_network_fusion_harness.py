@@ -2,7 +2,9 @@
 
 The classifier records every clip it is handed so tests can check what was
 classified; ``TruthLocalizer`` stands in for the solver on the Python-ingest
-path, where the solve itself is not under test.
+path, where the solve itself is not under test. A point-network Rust render's
+clip is classified on a classification worker, so ``stored_detections_by_solve``
+drains the stage queues before reading.
 """
 
 from __future__ import annotations
@@ -12,21 +14,26 @@ from pathlib import Path
 
 import numpy as np
 
+from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest, load_localized_render_manifest_bundle
 from minimappr.classifiers.heuristic import HeuristicClassifier
 from minimappr.config import Settings
 from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.fusion_node import EventCandidate, FusionNode
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.localization import LocalizationEngine
+from minimappr.core.localization_provenance import site_frame_id_for_coordinate_frame
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.tracking import TrackManager
 from minimappr.core.zones import ZoneMatcher
 from minimappr.models import GeoPoint, LocalizationResult, NodeSpec, NodeType, TimeQuality
+from minimappr.sim.sim_scenario_scoring import drain_fusion_queues
 from minimappr.storage.db import Storage
-from tests.point_network_scene import POINT_NODE_POSITIONS_M
+from tests.point_network_scene import POINT_NODE_POSITIONS_M, Caller, point_network_render_manifest
 
 # Wide enough for the network's ~85 m baselines.
 LOCALIZATION_ENGINE_MAX_TAU_SECONDS = 0.3
+SOLVE_WINDOW_SECONDS = 0.2
+RENDER_HALF_SPAN_SECONDS = 0.5
 
 
 class RecordingClassifier(HeuristicClassifier):
@@ -109,3 +116,30 @@ def python_ingest_candidate(
         time_quality=TimeQuality.GPS_LOCKED,
         source_observation_ids=[],
     )
+
+
+def point_network_render_request(
+    fusion: FusionNode, caller: Caller, *, reporting_node_id: str, solve_id: str
+) -> LocalizedClassifierRenderRequest:
+    manifest = point_network_render_manifest(
+        caller=caller,
+        reporting_node_id=reporting_node_id,
+        frame_id=site_frame_id_for_coordinate_frame(fusion.coordinate_frame),
+        solve_id=solve_id,
+        manifest_id=f"render-{solve_id}",
+        solve_window_seconds=SOLVE_WINDOW_SECONDS,
+        render_half_span_seconds=RENDER_HALF_SPAN_SECONDS,
+    )
+    return load_localized_render_manifest_bundle(manifest_payload=manifest).request
+
+
+async def stored_detections_by_solve(storage: Storage, fusion: FusionNode | None = None) -> dict[str, dict]:
+    """Stored detections keyed by their Rust solve id; drains ``fusion``'s stage queues first."""
+    if fusion is not None:
+        await drain_fusion_queues(fusion)
+    detections = await storage.list_detections(limit=20)
+    return {
+        detection["feature_summary"]["localization_solve"]["solve_id"]: detection
+        for detection in detections
+        if "localization_solve" in detection["feature_summary"]
+    }

@@ -174,7 +174,7 @@ from minimappr.core.site_origin import (
 from minimappr.core.zones import ZoneMatcher
 from minimappr.core import system_info
 from minimappr.calibration.bundle import build_ground_truth_payload, write_bundle_zip
-from minimappr.calibration.bundle_validation import validate_calibration_bundle
+from minimappr.calibration.bundle_validation import validate_calibration_artifact_directory
 from minimappr.calibration.embeddings import extract_embedding_npy
 from minimappr.models import (
     AlertStatus,
@@ -5529,12 +5529,12 @@ async def get_system_diagnostics(request: Request) -> dict:
                 "rules_drops_by_reason": (
                     fusion_status["metrics"].get("rules_drops_by_reason", {})
                 ),
-                # P8: sensors left out of synchronized windows (e.g. sample_rate_mismatch).
-                "buffer_synchronized_window_skips_by_reason": (
-                    fusion_status["metrics"].get("buffer_synchronized_window_skips_by_reason", {})
+                # P8: sensors left out of solves (e.g. sample_rate_mismatch), once per solve.
+                "localization_excluded_sensor_counts_by_reason": (
+                    fusion_status["metrics"].get("localization_excluded_sensor_counts_by_reason", {})
                 ),
-                "buffer_synchronized_window_skips_by_sensor": (
-                    fusion_status["metrics"].get("buffer_synchronized_window_skips_by_sensor", {})
+                "localization_excluded_sensor_recent_counts_by_sensor": (
+                    fusion_status["metrics"].get("localization_excluded_sensor_recent_counts_by_sensor", {})
                 ),
             },
         }
@@ -7340,10 +7340,16 @@ async def calibration_bundle_validation(session_id: str, request: Request):
     """Field-capture-protocol report for the session's bundle as exported now.
 
     Advisory only: export never depends on it (docs/field_capture_protocol.md).
+    Reads the artifact directory as the bundle would hold it: no zip is
+    rebuilt (re-deflating every capture WAV) and a concurrent download is
+    never raced.
     """
     storage: Storage = request.app.state.storage
-    bundle_path = await _write_calibration_bundle(storage, session_id)
-    report = await asyncio.to_thread(validate_calibration_bundle, bundle_path)
+    row = await _require_calibration_session(storage, session_id)
+    _load_calibration_manifest(row)  # raises 409 while processing
+    artifact_dir = Path(row["calibration_manifest_path"]).parent
+    ground_truth_payload = build_ground_truth_payload(await storage.list_calibration_ground_truth(session_id))
+    report = await asyncio.to_thread(validate_calibration_artifact_directory, artifact_dir, ground_truth_payload)
     return report.to_json_payload()
 
 

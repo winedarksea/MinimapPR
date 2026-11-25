@@ -30,6 +30,10 @@ class LocalizedCall:
     event_span_start_ns: int
     event_span_end_ns: int
     sound_speed_mps: float
+    # Site-frame position covariance (m^2) as the solve stated it; None when it stated none.
+    position_covariance_m2: np.ndarray | None = None
+    # The Rust solve's site cluster; None on the Python-ingest path.
+    cluster_id: str | None = None
 
     def arrival_offset_seconds_at(self, sensor_position_m: np.ndarray) -> float:
         """Arrival at ``sensor_position_m`` minus arrival at the alignment reference."""
@@ -51,20 +55,23 @@ def seconds_to_nanoseconds(seconds: float) -> int:
 
 class LocalizedCallRegistry:
     """Recent localized calls, newest last; re-registering a call id replaces it
-    (an event solve and the render covering it share one solve id)."""
+    (an event solve and the render covering it share one solve id).
+
+    Retention is measured back from the call being registered, never from the
+    newest span ever seen: one far-future span (a bad clock, an NTP jump) would
+    otherwise put the horizon past every later call, so each registration
+    would delete the call it just added. A future outlier ages out by count.
+    """
 
     def __init__(self, *, retention_seconds: float, max_records: int) -> None:
         self._retention_ns = seconds_to_nanoseconds(retention_seconds)
         self._max_records = max(1, int(max_records))
         self._calls: OrderedDict[str, LocalizedCall] = OrderedDict()
-        self._newest_span_end_ns: int | None = None
 
     def register(self, call: LocalizedCall) -> None:
         self._calls.pop(call.call_id, None)
         self._calls[call.call_id] = call
-        if self._newest_span_end_ns is None or call.event_span_end_ns > self._newest_span_end_ns:
-            self._newest_span_end_ns = call.event_span_end_ns
-        self._prune()
+        self._prune(horizon_ns=call.event_span_end_ns - self._retention_ns)
 
     def calls_other_than(self, call_id: str) -> list[LocalizedCall]:
         return [call for other_id, call in self._calls.items() if other_id != call_id]
@@ -72,11 +79,9 @@ class LocalizedCallRegistry:
     def __len__(self) -> int:
         return len(self._calls)
 
-    def _prune(self) -> None:
-        horizon_ns = None if self._newest_span_end_ns is None else self._newest_span_end_ns - self._retention_ns
-        if horizon_ns is not None:
-            for stale_id in [cid for cid, call in self._calls.items() if call.event_span_end_ns < horizon_ns]:
-                del self._calls[stale_id]
+    def _prune(self, *, horizon_ns: int) -> None:
+        for stale_id in [cid for cid, call in self._calls.items() if call.event_span_end_ns < horizon_ns]:
+            del self._calls[stale_id]
         while len(self._calls) > self._max_records:
             self._calls.popitem(last=False)
 

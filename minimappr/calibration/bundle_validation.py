@@ -4,7 +4,9 @@
 bundle zip (``calibration/bundle.py``) against it and returns structured
 findings with stable codes (``bundle_validation_findings.py``). It never
 raises on a bad bundle and never blocks extraction or export: run it on site
-before leaving, from the CLI or ``GET /api/v1/calibration/{session_id}/validation``.
+before leaving, from the CLI or ``GET /api/v1/calibration/{session_id}/validation``
+(which reads the session's artifact directory as the bundle it would export,
+``bundle_artifact_directory.py``, instead of writing the zip).
 
     python -m minimappr.calibration.bundle_validation path/to/bundle.zip [--json]
 
@@ -26,6 +28,7 @@ from typing import Any
 import numpy as np
 
 from minimappr.calibration.bundle import SCHEMA_VERSION as BUNDLE_SCHEMA_VERSION
+from minimappr.calibration.bundle_artifact_directory import ArtifactDirectoryBundleMembers
 from minimappr.calibration.bundle_frame_timing_checks import check_node_frame_timing
 from minimappr.calibration.bundle_ground_truth_checks import (
     check_ground_truth,
@@ -53,6 +56,9 @@ from minimappr.calibration.pipeline import BUNDLE_KIND
 NANOSECONDS_PER_SECOND = 1_000_000_000
 PCM16_SAMPLE_WIDTH_BYTES = 2
 _SEVERITY_ORDER = {FindingSeverity.ERROR: 0, FindingSeverity.WARNING: 1, FindingSeverity.INFO: 2}
+
+
+# ``bundle_zip`` below is a ``zipfile.ZipFile`` or an ``ArtifactDirectoryBundleMembers``.
 
 
 def _read_json_member(bundle_zip: zipfile.ZipFile, member_name: str) -> Any:
@@ -184,6 +190,24 @@ def validate_calibration_bundle(bundle_path: Path | str, config: BundleValidatio
             findings = _validate_open_bundle(bundle_zip, resolved_config)
     except (OSError, zipfile.BadZipFile) as exc:
         findings = [Finding(Code.BUNDLE_UNREADABLE, f"cannot open bundle: {exc}")]
+    return _report(path, findings)
+
+
+def validate_calibration_artifact_directory(
+    artifact_dir: Path | str, ground_truth_payload: dict, config: BundleValidationConfig | None = None
+) -> BundleValidationReport:
+    """The report for the bundle ``write_bundle_zip`` would export from
+    ``artifact_dir`` with ``ground_truth_payload``, without writing it."""
+    resolved_config = config if config is not None else BundleValidationConfig()
+    path = Path(artifact_dir)
+    try:
+        findings = _validate_open_bundle(ArtifactDirectoryBundleMembers(path, ground_truth_payload), resolved_config)
+    except OSError as exc:
+        findings = [Finding(Code.BUNDLE_UNREADABLE, f"cannot read artifact directory: {exc}")]
+    return _report(path, findings)
+
+
+def _report(path: Path, findings: list[Finding]) -> BundleValidationReport:
     ordered = sorted(findings, key=lambda finding: _SEVERITY_ORDER[finding.severity])
     return BundleValidationReport(bundle_path=str(path), findings=tuple(ordered))
 

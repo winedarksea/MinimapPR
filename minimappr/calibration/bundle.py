@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import tempfile
 import wave
 import zipfile
 from dataclasses import dataclass, field
@@ -137,7 +139,12 @@ def write_bundle_zip(
     *,
     expectations: dict | None = None,
 ) -> Path:
-    """Assemble a calibration bundle zip from a session artifact directory."""
+    """Assemble a calibration bundle zip from a session artifact directory.
+
+    Written to a temporary file beside ``out_path`` and moved into place, so a
+    concurrent reader (a download streaming the previous export) never sees a
+    truncated zip.
+    """
     session_artifact_dir = Path(session_artifact_dir)
     manifest_path = session_artifact_dir / "manifest.json"
     if not manifest_path.exists():
@@ -145,7 +152,25 @@ def write_bundle_zip(
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+    file_descriptor, temporary_name = tempfile.mkstemp(prefix=f".{out_path.name}.", suffix=".partial", dir=out_path.parent)
+    os.close(file_descriptor)
+    try:
+        _write_bundle_members(Path(temporary_name), session_artifact_dir, manifest_path, ground_truth_payload, expectations)
+        os.replace(temporary_name, out_path)
+    except BaseException:
+        Path(temporary_name).unlink(missing_ok=True)
+        raise
+    return out_path
+
+
+def _write_bundle_members(
+    zip_path: Path,
+    session_artifact_dir: Path,
+    manifest_path: Path,
+    ground_truth_payload: dict,
+    expectations: dict | None,
+) -> None:
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.write(manifest_path, "manifest.json")
         zf.writestr("ground_truth.json", json.dumps(ground_truth_payload, indent=2))
         detections_path = session_artifact_dir / "detections.json"
@@ -174,7 +199,6 @@ def write_bundle_zip(
             if wav_bytes is not None:
                 zf.writestr(f"reference_audio/{event['event_id']}.wav", wav_bytes)
         zf.writestr("reference_audio/README.txt", _REFERENCE_AUDIO_README)
-    return out_path
 
 
 @dataclass

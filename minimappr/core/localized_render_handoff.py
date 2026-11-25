@@ -3,8 +3,10 @@
 ``FusionNode.ingest_localized_render`` delegates here. A render arrives with
 the sidecar's localization already attached; this collaborator registers the
 node, resolves solve geometry and the position estimate, gates it exactly like
-the Python solver path, then classifies and reports synchronously so callers
-can observe the resulting detection as soon as ingest returns.
+the Python solver path, then classifies and reports (``LocalizedRenderReporter``).
+Most renders are reported synchronously, so callers observe the detection as
+soon as ingest returns; a point-network render's clip classification (P7) is
+queued on the classification stage instead, off the SSE consumer.
 
 The handoff reads FusionNode state through ``host`` at call time rather than
 copying it, so monkeypatched host helpers and late-bound collaborators (for
@@ -30,10 +32,6 @@ from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest
 from minimappr.api.rust_solve_contract_degradation import SOLVE_CONTRACT_VIOLATION_FALLBACK_REASON
 from minimappr.core.bounded_recent_ids import BoundedRecentIds
 from minimappr.core.fusion_stage_carriers import EventCandidate, LocalizationBranch, LocalizedCandidate
-from minimappr.core.localized_handoff_duplicate_merge import (
-    CrossReporterDuplicateMerger,
-    LocalizedClusterEmission,
-)
 from minimappr.core.localized_handoff_geometry import (
     SOLVE_REJECTED_LEGACY_SENSOR_MAP_UNAVAILABLE,
     legacy_pair_indices_exceed_registry_sensors,
@@ -45,7 +43,6 @@ from minimappr.core.localized_render_handoff_hooks import (
     LocalizationSeamCollaborators,
 )
 from minimappr.core.localized_render_handoff_solve_features import (
-    classify_render_audio,
     replace_estimate_with_node_position,
     rust_render_features,
     validated_mono_render_audio,
@@ -57,7 +54,12 @@ from minimappr.core.localized_render_localization import (
     python_cartesian_resolve_requested,
     resolve_handoff_estimate,
 )
-from minimappr.core.point_network_call_requests import classify_rust_render_call, localized_call_for_rust_solve
+from minimappr.core.localized_render_reporting import (
+    CROSS_REPORTER_DUPLICATE_MERGED_REASON,
+    LocalizedRenderReporter,
+    RenderReport,
+)
+from minimappr.core.point_network_call_requests import localized_call_for_rust_solve
 from minimappr.models import NodeSpec
 
 if TYPE_CHECKING:
@@ -65,7 +67,6 @@ if TYPE_CHECKING:
 
 RUST_CLASSIFIER_RENDER_AUDIO_QUALITY_SOURCE = "rust_classifier_render"
 BIRDNET_OMNI_FALLBACK_RENDER_KIND = "birdnet_omni_fallback"
-CROSS_REPORTER_DUPLICATE_MERGED_REASON = "cross_reporter_duplicate_merged"
 
 
 @dataclass(slots=True)
@@ -85,7 +86,7 @@ class LocalizedRenderHandoff:
     def __init__(self, host: "FusionNode", collaborators: LocalizationSeamCollaborators) -> None:
         self._host = host
         self.collaborators = collaborators
-        self._cross_reporter_duplicate_merger = CrossReporterDuplicateMerger()
+        self._reporter = LocalizedRenderReporter(host)
         # A covering render repeats its event's solve: its rejections count once.
         self._processed_solve_ids = BoundedRecentIds(host.settings.position_observation_solve_id_memory_max_entries)
         # One off-loop solve at a time: the solver's metric counters are not thread-safe.
@@ -116,22 +117,25 @@ class LocalizedRenderHandoff:
             reporting_modality=solve.reporting_modality,
             solve_origin=SOLVE_ORIGIN_RUST_CLASSIFIER_RENDER,
         )
-        self._register_localized_call(payload, solve, localized_product)
+        classification_worker_owns_product = False
         try:
-            await self._classify_and_report(
-                payload,
-                node=solve.node,
-                geometry=solve.geometry,
-                localized_product=localized_product,
-                reporting_modality=solve.reporting_modality,
-                reference_sensor=solve.geometry.reference_sensor,
-                capability_tier=solve.gating.capability_tier,
-                normalized_audio=normalized_audio,
-                rust_extra_features=solve.rust_extra_features,
+            self._register_localized_call(payload, solve, localized_product)
+            classification_worker_owns_product = await self._reporter.classify_and_report(
+                RenderReport(
+                    payload=payload,
+                    node=solve.node,
+                    geometry=solve.geometry,
+                    localized_product=localized_product,
+                    reporting_modality=solve.reporting_modality,
+                    capability_tier=solve.gating.capability_tier,
+                    normalized_audio=normalized_audio,
+                    rust_extra_features=solve.rust_extra_features,
+                )
             )
         finally:
-            # A held fix this render's classification never resolved (suppressed, failed).
-            await host._release_held_position_without_classification(localized_product)
+            if not classification_worker_owns_product:
+                # A held fix this render's classification never resolved (suppressed, failed, not queued).
+                await host._release_held_position_without_classification(localized_product)
 
     async def observe_event_solve(self, payload: LocalizedClassifierRenderRequest) -> None:
         """An event-only solve (no render): position only, never classified or reported.
@@ -389,129 +393,5 @@ class LocalizedRenderHandoff:
             extra_classification_features=rust_extra_features,
         )
 
-    async def _classify_and_report(
-        self,
-        payload: LocalizedClassifierRenderRequest,
-        *,
-        node: NodeSpec,
-        geometry: HandoffSolveGeometry,
-        localized_product: LocalizedCandidate,
-        reporting_modality: str,
-        reference_sensor: str,
-        capability_tier: str,
-        normalized_audio: np.ndarray,
-        rust_extra_features: dict[str, Any],
-    ) -> None:
-        host = self._host
-        if host._classification_chunking_policy is not None and payload.authoritative_classification is None:
-            if host._should_suppress_chunked_classification(localized_product):
-                host._metrics.birdnet_chunk_dispatches_suppressed += 1
-                return
 
-        # P7: a point-only solve is classified from its clearest node's aligned
-        # clip, not the render (an unaligned mix of every node).
-        classified = await classify_rust_render_call(
-            host,
-            payload=payload,
-            geometry=geometry,
-            localized_product=localized_product,
-            reporting_modality=reporting_modality,
-            default_classification=lambda: classify_render_audio(
-                host._classification_orchestrator, payload, normalized_audio
-            ),
-        )
-        classified.classification.features.update(rust_extra_features)
-        branch = localized_product.localization_branch
-        cluster_emission_key = self._localized_cluster_emission_key(
-            payload, reporting_modality=reporting_modality, label=classified.classification.label
-        )
-        if cluster_emission_key is not None and self._merges_into_earlier_reporter(
-            payload, cluster_emission_key=cluster_emission_key, position_m=branch.localization_position_m
-        ):
-            await host._label_track_of_unreported_classification(host._classification_tracker_feed(
-                product=localized_product, classified=classified, source_node_id=node.id, capability_tier=capability_tier,
-                reference_sensor=reference_sensor, tdoa_s={}, localization_position_m=branch.localization_position_m,
-                localization_position_covariance_m2=branch.localization_position_covariance_m2,
-            ))
-            return
-        await host._maybe_trigger_speech_capture(
-            node_id=node.id,
-            sensor_id=reference_sensor,
-            event_time_ns=payload.event_time_ns,
-            scores=classified.classification.scores,
-        )
-        detection_product = await host._assemble_reporting_branch(
-            product=localized_product,
-            classified=classified,
-            reporting_modality=reporting_modality,
-            localization_position_m=branch.localization_position_m,
-            localization_confidence=branch.localization_confidence,
-            localization_gdop=branch.localization_gdop,
-            localization_position_covariance_m2=branch.localization_position_covariance_m2,
-            localization_range_observability=branch.localization_range_observability,
-            localization_residual_rms_seconds=branch.localization_residual_rms_seconds,
-            localization_range_projection_mode=branch.localization_range_projection_mode,
-            reference_sensor=reference_sensor,
-            reference_signal=normalized_audio,
-            tdoa_s={},
-            capability_tier=capability_tier,
-            localization_method=branch.localization_method,
-        )
-        if detection_product is None:
-            return
-        if cluster_emission_key is not None:
-            cluster_id, label, report_window_start_ns = cluster_emission_key
-            self._cross_reporter_duplicate_merger.note_emission(
-                cluster_id=cluster_id,
-                label=label,
-                report_window_start_ns=report_window_start_ns,
-                report_window_ns=host.reporting_policy.reporting_window_ns,
-                emission=LocalizedClusterEmission(
-                    reporting_node_id=node.id,
-                    position_m=tuple(float(value) for value in branch.localization_position_m),
-                    solve_id=payload.localization_solve.provenance.solve_id,
-                ),
-            )
-        await host._process_rules_and_delivery(detection_product)
-
-    def _localized_cluster_emission_key(
-        self,
-        payload: LocalizedClassifierRenderRequest,
-        *,
-        reporting_modality: str,
-        label: str,
-    ) -> tuple[str, str, int] | None:
-        """(cluster, label, report window) for a localized cluster solve; else ``None``."""
-        solve = payload.localization_solve
-        if reporting_modality != "localized" or solve is None or solve.provenance.cluster_id is None:
-            return None
-        report_window_start_ns, _ = self._host.reporting_policy.report_window_bounds(payload.event_time_ns)
-        return solve.provenance.cluster_id, label, report_window_start_ns
-
-    def _merges_into_earlier_reporter(
-        self,
-        payload: LocalizedClassifierRenderRequest,
-        *,
-        cluster_emission_key: tuple[str, str, int],
-        position_m,
-    ) -> bool:
-        cluster_id, label, report_window_start_ns = cluster_emission_key
-        merge_target = self._cross_reporter_duplicate_merger.merge_target(
-            cluster_id=cluster_id,
-            label=label,
-            report_window_start_ns=report_window_start_ns,
-            reporting_node_id=payload.node.id,
-            position_m=position_m,
-            max_separation_m=self._host.settings.localized_handoff_duplicate_merge_max_separation_m,
-        )
-        if merge_target is None:
-            return False
-        self._host._record_silent_drop(
-            stage="classification",
-            reason=CROSS_REPORTER_DUPLICATE_MERGED_REASON,
-            event_time_ns=payload.event_time_ns,
-            source_node_id=payload.node.id,
-            merged_into_reporting_node_id=merge_target.reporting_node_id,
-            merged_into_solve_id=merge_target.solve_id,
-        )
-        return True
+__all__ = ["CROSS_REPORTER_DUPLICATE_MERGED_REASON", "LocalizedRenderHandoff"]
