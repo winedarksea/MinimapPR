@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import threading
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -299,6 +302,82 @@ class TestCalibrationGroundTruthApi:
             assert client.get(f"/api/v1/calibration/{SESSION_ID}/bundle").status_code == 200
 
             assert client.get("/api/v1/calibration/nope/validation").status_code == 404
+
+    def test_validation_reads_the_artifact_dir_and_concurrent_downloads_stay_whole(self, monkeypatch, tmp_path):
+        db_path = _configure_env(monkeypatch, tmp_path)
+        artifact_dir = tmp_path / "artifacts" / f"{SESSION_ID}_calibration"
+        _seed_calibration_session(db_path, artifact_dir)
+        bundle_path = artifact_dir / f"calibration_{SESSION_ID}.zip"
+        validation_url = f"/api/v1/calibration/{SESSION_ID}/validation"
+        bundle_url = f"/api/v1/calibration/{SESSION_ID}/bundle"
+
+        with TestClient(app) as client:
+            first_report = client.get(validation_url).json()
+            # Validation never builds the zip (no re-deflating every capture WAV).
+            assert not bundle_path.exists()
+
+            def download() -> bytes:
+                response = client.get(bundle_url)
+                assert response.status_code == 200
+                return response.content
+
+            def validate() -> dict:
+                response = client.get(validation_url)
+                assert response.status_code == 200
+                return response.json()
+
+            with ThreadPoolExecutor(max_workers=CONCURRENT_REQUESTS_PER_KIND * 2) as pool:
+                downloads = [pool.submit(download) for _ in range(CONCURRENT_REQUESTS_PER_KIND)]
+                validations = [pool.submit(validate) for _ in range(CONCURRENT_REQUESTS_PER_KIND)]
+                for future in downloads:
+                    with zipfile.ZipFile(io.BytesIO(future.result())) as zf:
+                        assert zf.testzip() is None
+                        assert {"manifest.json", "ground_truth.json", "audio/node-a.wav"} <= set(zf.namelist())
+                for future in validations:
+                    assert future.result()["findings"] == first_report["findings"]
+
+
+CONCURRENT_REQUESTS_PER_KIND = 4
+# Enough capture audio that one zip write takes long enough for a reader to land inside it.
+LARGE_CAPTURE_SECONDS = 20
+LARGE_CAPTURE_CHANNELS = 4
+ATOMIC_WRITE_REPEATS = 4
+
+
+def test_write_bundle_zip_replaces_the_zip_atomically(tmp_path):
+    artifact_dir = tmp_path / "artifact"
+    _write_fake_artifact_dir(artifact_dir)
+    noise = np.random.default_rng(5).uniform(-0.5, 0.5, size=(LARGE_CAPTURE_CHANNELS, LARGE_CAPTURE_SECONDS * 16_000))
+    write_multichannel_wav(artifact_dir / "audio" / "node-a.wav", noise.astype(np.float32), 16_000)
+    payload = build_ground_truth_payload([])
+    out_path = tmp_path / "bundle.zip"
+    write_bundle_zip(artifact_dir, payload, out_path)
+
+    writes_done = threading.Event()
+    torn_reads: list[str] = []
+
+    def keep_rewriting() -> None:
+        try:
+            for _ in range(ATOMIC_WRITE_REPEATS):
+                write_bundle_zip(artifact_dir, payload, out_path)
+        finally:
+            writes_done.set()
+
+    writer = threading.Thread(target=keep_rewriting)
+    writer.start()
+    reads = 0
+    while not writes_done.is_set() or reads == 0:
+        try:
+            with zipfile.ZipFile(out_path) as zf:
+                if zf.testzip() is not None:
+                    torn_reads.append("corrupt member")
+        except (zipfile.BadZipFile, EOFError) as exc:
+            torn_reads.append(repr(exc))
+        reads += 1
+    writer.join()
+    assert torn_reads == []
+    # No temporary files are left beside the export.
+    assert [path.name for path in tmp_path.iterdir() if path.name.endswith(".partial")] == []
 
 
 def test_write_and_load_bundle_pure(tmp_path):

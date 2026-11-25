@@ -7,6 +7,7 @@ coordinator, which imports those collaborators.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -56,6 +57,10 @@ class LocalizedCandidate:
     onset_attribution_context: Any = None
     # Closeout B2: parked by window label reconciliation; a sibling or the timeout emits it.
     held_for_window_label_reconciliation: bool = False
+    # P7: work a classification worker runs instead of the beamformed classification
+    # (a point-network Rust render's clip classification, ``localized_render_reporting``);
+    # returns the detections to deliver. None for every Python-ingest product.
+    deferred_classification: Callable[[], Awaitable[list["DetectionProduct"]]] | None = None
 
 
 @dataclass(slots=True)

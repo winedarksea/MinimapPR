@@ -267,6 +267,44 @@ def test_get_window_ending_at_returns_none_when_end_is_beyond_buffer() -> None:
     assert result is None
 
 
+@pytest.mark.parametrize("seconds_before_buffer_start", [0.0, 0.5])
+def test_get_window_ending_at_returns_none_when_end_is_at_or_before_buffer_start(seconds_before_buffer_start: float) -> None:
+    """A negative end offset once sliced ``samples[0:-k]``: unrelated audio from the buffer's head."""
+    sample_rate_hz = 16_000
+    buf = SensorStreamBuffer(sample_rate_hz=sample_rate_hz, max_duration_seconds=5.0)
+    start_time_ns = 1_000_000_000_000_000_000
+    buf.append(start_time_ns=start_time_ns, samples=np.arange(sample_rate_hz, dtype=np.float32))
+    end_time_ns = start_time_ns - int(seconds_before_buffer_start * 1_000_000_000)
+
+    assert buf.get_window_ending_at(end_time_ns=end_time_ns, window_seconds=0.25) is None
+    assert buf.get_window_ending_at_with_coverage(end_time_ns=end_time_ns, window_seconds=0.25) is None
+    assert buf.get_window_ending_at_coverage_stats(end_time_ns=end_time_ns, window_seconds=0.25) is None
+
+
+@pytest.mark.asyncio
+async def test_window_with_coverage_marks_zero_filled_gaps() -> None:
+    sample_rate_hz = 16_000
+    buffer = MultiSensorBuffer(max_duration_seconds=5.0)
+    start_time_ns = 1_000_000_000_000_000_000
+    packet = np.ones(800, dtype=np.float32)
+    # Packets 0 and 2 arrive; packet 1 (50 ms) is lost and zero-filled.
+    for packet_index in (0, 2):
+        await buffer.append(
+            sensor_id="s",
+            sample_rate_hz=sample_rate_hz,
+            start_time_ns=start_time_ns + packet_index * 50_000_000,
+            samples=packet,
+        )
+
+    windows = await buffer.get_synchronized_window_ending_at_with_coverage(
+        sensor_ids=["s"], end_time_ns=start_time_ns + 150_000_000, window_seconds=0.15, sample_rate_hz=sample_rate_hz
+    )
+    samples, coverage = windows["s"]
+    assert samples.shape == coverage.shape == (2400,)
+    assert not coverage[800:1600].any() and np.all(samples[800:1600] == 0.0)
+    assert coverage[:800].all() and coverage[1600:].all()
+
+
 def test_sensor_stream_buffer_resets_on_large_forward_jump() -> None:
     """Large forward jump (e.g. NTP sync correcting a stale build-timestamp epoch) must
     not allocate a huge zeros array.  The buffer should reset cleanly at the new position

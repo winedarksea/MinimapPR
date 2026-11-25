@@ -15,15 +15,21 @@ Here the clip is one point node's own audio, re-timed to that node:
   (render span, or the Python classification window) shifted by the solve's
   arrival-time difference between that sensor and the alignment reference
   (the node the solve window is centred on), from the solved position;
-- a node where another localized caller (at a distinct position) overlaps
-  the clip at a comparable level is masked (``point_network_overlapping_callers``);
+- a node where another localized caller overlaps the clip at a comparable
+  level is masked (``point_network_overlapping_callers``); another solve of
+  the same call is not another caller (``point_network_same_caller``);
 - the clearest unmasked node wins by in-band SNR (event-span level over the
-  clip's noise floor), ties going to the node nearest the source;
+  clip's noise floor, both over the frames the node received; a node that
+  received less than the configured share of the clip is not a candidate),
+  ties going to the node nearest the source;
 - provenance records the node, why, the alignment offset and the runner-up;
 - if every node is masked, the least-masked node's clip is classified but the
   species is left uncertain: label ``unknown`` with confidence 0 and the
   unattributed scores kept (the vocabulary of
-  ``onset_cluster_attribution_stage``), never a guess the clip may not hold.
+  ``onset_cluster_attribution_stage``), never a guess the clip may not hold;
+- if the clip classifier fails (timeout, error) and the path already holds a
+  label of its own (the sidecar's), that label stands: a backend failure is
+  not an abstention.
 
 The position was already observed (P5); this only decides the label. Audio
 comes from the in-memory per-sensor buffer (mirrored from the sidecar's
@@ -40,6 +46,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from minimappr.classifiers.base import ClassificationResult
+from minimappr.core.onset_cluster_attribution_stage import FAILED_CLASSIFICATION_REASONS
 from minimappr.core.point_network_clip_config import PointNetworkClipConfig, point_network_clip_config_from_settings
 from minimappr.core.point_network_clip_signal import FramedInBandEnergy, framed_in_band_energy
 from minimappr.core.point_network_localized_calls import (
@@ -54,6 +61,7 @@ from minimappr.core.point_network_overlapping_callers import (
     competing_callers_at_node,
     nearest_position_id,
 )
+from minimappr.core.point_network_same_caller import is_same_caller
 
 if TYPE_CHECKING:
     from minimappr.core.classification import ClassifiedResult
@@ -64,6 +72,8 @@ POINT_NETWORK_CLIP_CLASSIFICATION_PATH = "point_network_clip"
 SELECTION_REASON_HIGHEST_IN_BAND_SNR = "highest_in_band_snr"
 SELECTION_REASON_LEAST_MASKED = "every_node_masked_least_masked_chosen"
 UNAVAILABLE_REASON_NO_BUFFERED_CLIP = "no_point_node_clip_buffered"
+UNAVAILABLE_REASON_NO_COVERED_CLIP = "no_point_node_clip_sufficiently_received"
+UNAVAILABLE_REASON_CLIP_CLASSIFIER_FAILED = "clip_classifier_failed"
 UNCERTAINTY_REASON_OVERLAPPING_CALLER = "overlapping_localized_caller"
 # The abstention label (``taxonomy.ABSTENTION_LABELS``) the onset attributor
 # also uses when it cannot settle which caller owns a window.
@@ -102,6 +112,7 @@ class _PointNodeClip:
     alignment_offset_seconds: float
     clip_start_ns: int
     samples: np.ndarray | None = None
+    coverage: np.ndarray | None = None
     energy: FramedInBandEnergy | None = None
     signal_level_db: float | None = None
     noise_floor_db: float | None = None
@@ -149,9 +160,12 @@ class PointNetworkClipSelection:
             "clip_seconds": float(self.request.clip_seconds),
             "sample_rate_hz": int(self.request.sample_rate_hz),
             "in_band_snr_db_by_node": {
-                candidate.node_id: _rounded(candidate.snr_db) for candidate in self.candidates if candidate.samples is not None
+                candidate.node_id: _rounded(candidate.snr_db) for candidate in self.candidates if candidate.snr_db is not None
             },
             "unbuffered_node_ids": sorted(c.node_id for c in self.candidates if c.samples is None),
+            "covered_frame_ratio_by_node": {
+                c.node_id: _rounded(c.energy.covered_frame_ratio) for c in self.candidates if c.energy is not None
+            },
             "masked_node_ids": sorted(c.node_id for c in self.candidates if c.competing_callers),
             "species_uncertain": self.species_uncertain,
             "overlapping_callers": [
@@ -190,31 +204,53 @@ class PointNetworkCallClassifier:
             self._calls.register(call)
 
     async def classify(
-        self, request: PointNetworkCallRequest | None, *, default_classification: DefaultClassification
+        self,
+        request: PointNetworkCallRequest | None,
+        *,
+        default_classification: DefaultClassification,
+        keep_default_on_classifier_failure: bool = False,
     ) -> "ClassifiedResult | None":
         """Classify ``request``'s clip, or run ``default_classification`` when the
-        solve is not a point network (``request is None``) or P7 is off."""
+        solve is not a point network (``request is None``) or P7 is off.
+
+        ``keep_default_on_classifier_failure``: the default is a label the path
+        already holds (the sidecar's), so a failed clip classification returns
+        it instead of an abstention. Off where the default is another inference
+        on the same backend, which would only fail again.
+        """
         config = self.config
         if request is None or not config.enabled:
             return await default_classification()
         self.register_localized_call(request.call)
-        metrics = self._host._metrics
-        selection = await self._select_clip(request, config)
+        selection, unavailable_reason = await self._select_clip(request, config)
         if selection is None:
-            metrics.point_network_clip_unavailable_count += 1
-            classified = await default_classification()
-            if classified is not None:
-                classified.classification.features[POINT_NETWORK_CLIP_FEATURE_KEY] = {
-                    "unavailable_reason": UNAVAILABLE_REASON_NO_BUFFERED_CLIP,
-                    "candidate_node_ids": sorted(set(request.sensor_node_ids.values())),
-                }
-            return classified
-        metrics.point_network_clip_classified_count += 1
-        return await self._classify_selection(selection)
+            return await self._default_with_clip_unavailable(request, default_classification, unavailable_reason)
+        return await self._classify_selection(
+            selection,
+            default_classification=default_classification if keep_default_on_classifier_failure else None,
+        )
+
+    async def _default_with_clip_unavailable(
+        self,
+        request: PointNetworkCallRequest,
+        default_classification: DefaultClassification,
+        unavailable_reason: str,
+        **provenance: Any,
+    ) -> "ClassifiedResult | None":
+        self._host._metrics.point_network_clip_unavailable_count += 1
+        classified = await default_classification()
+        if classified is not None:
+            classified.classification.features[POINT_NETWORK_CLIP_FEATURE_KEY] = {
+                "unavailable_reason": unavailable_reason,
+                "candidate_node_ids": sorted(set(request.sensor_node_ids.values())),
+                **provenance,
+            }
+        return classified
 
     async def _select_clip(
         self, request: PointNetworkCallRequest, config: PointNetworkClipConfig
-    ) -> PointNetworkClipSelection | None:
+    ) -> tuple[PointNetworkClipSelection | None, str]:
+        """The selection, or None with the reason no node's clip could be used."""
         clip_sample_count = max(1, int(round(request.clip_seconds * request.sample_rate_hz)))
         clip_duration_ns = int(round(clip_sample_count * NANOSECONDS_PER_SECOND / request.sample_rate_hz))
         candidates = [self._aligned_candidate(request, sensor_id) for sensor_id in request.sensor_node_ids]
@@ -222,30 +258,31 @@ class PointNetworkCallClassifier:
         for candidate in candidates:
             # Ending-at keeps the clip's first sample at clip_start_ns exactly;
             # a clip the buffer only partly holds is not this node's clip.
-            windows = await buffer.get_synchronized_window_ending_at(
+            windows = await buffer.get_synchronized_window_ending_at_with_coverage(
                 sensor_ids=[candidate.sensor_id],
                 end_time_ns=candidate.clip_start_ns + clip_duration_ns,
                 window_seconds=request.clip_seconds,
                 sample_rate_hz=request.sample_rate_hz,
             )
-            samples = windows.get(candidate.sensor_id)
-            if samples is not None and samples.size == clip_sample_count:
-                candidate.samples = samples
+            window = windows.get(candidate.sensor_id)
+            if window is not None and window[0].size == clip_sample_count:
+                candidate.samples, candidate.coverage = window
         buffered = [candidate for candidate in candidates if candidate.samples is not None]
         if not buffered:
-            return None
+            return None, UNAVAILABLE_REASON_NO_BUFFERED_CLIP
         await asyncio.to_thread(self._measure_levels, buffered, request, config)
         measured = [candidate for candidate in buffered if candidate.snr_db is not None]
         if not measured:
-            return None
+            return None, UNAVAILABLE_REASON_NO_COVERED_CLIP
         await self._mark_competing_callers(measured, request, config, clip_duration_ns)
         ranked = sorted(measured, key=_PointNodeClip.ranking_key)
-        return PointNetworkClipSelection(
+        selection = PointNetworkClipSelection(
             request=request,
             chosen=ranked[0],
             runner_up=ranked[1] if len(ranked) > 1 else None,
             candidates=candidates,
         )
+        return selection, ""
 
     @staticmethod
     def _aligned_candidate(request: PointNetworkCallRequest, sensor_id: str) -> _PointNodeClip:
@@ -264,7 +301,9 @@ class PointNetworkCallClassifier:
         candidates: list[_PointNodeClip], request: PointNetworkCallRequest, config: PointNetworkClipConfig
     ) -> None:
         for candidate in candidates:
-            candidate.energy = framed_in_band_energy(candidate.samples, request.sample_rate_hz, config)
+            candidate.energy = framed_in_band_energy(candidate.samples, candidate.coverage, request.sample_rate_hz, config)
+            if candidate.energy.covered_frame_ratio < config.min_clip_covered_frame_ratio:
+                continue  # Mostly gap: its level and floor rest on too few frames.
             span_start_ns, span_end_ns = request.call.event_span_at(request.sensor_positions_m[candidate.sensor_id])
             start_sample, end_sample = _span_samples_in_clip(
                 candidate.clip_start_ns, span_start_ns, span_end_ns, request.sample_rate_hz, candidate.samples.size
@@ -314,30 +353,32 @@ class PointNetworkCallClassifier:
         at its nearest node of this network."""
         levels: list[CallerReferenceLevel] = []
         for other in self._calls.calls_other_than(request.call.call_id):
-            separation_m = float(np.linalg.norm(other.source_position_m - request.call.source_position_m))
-            if separation_m <= config.distinct_caller_min_separation_m:
-                continue  # Same caller (e.g. the next note of one perched bird).
+            if is_same_caller(request.call, other, config):
+                continue  # Another solve of this call, or the next note of one perched bird.
             if not _overlaps_any_clip(other, request, clip_spans_ns):
                 continue
             sensor_id = nearest_position_id(other.source_position_m, request.sensor_positions_m)
             position_m = request.sensor_positions_m[sensor_id]
             span_start_ns, span_end_ns = other.event_span_at(position_m)
-            windows = await self._host.buffer.get_synchronized_window_ending_at(
+            windows = await self._host.buffer.get_synchronized_window_ending_at_with_coverage(
                 sensor_ids=[sensor_id],
                 end_time_ns=span_end_ns,
                 window_seconds=(span_end_ns - span_start_ns) / NANOSECONDS_PER_SECOND,
                 sample_rate_hz=request.sample_rate_hz,
             )
-            samples = windows.get(sensor_id)
-            if samples is None or samples.size == 0:
+            window = windows.get(sensor_id)
+            if window is None or window[0].size == 0:
                 continue  # Not buffered here: its level cannot be measured.
-            energy = await asyncio.to_thread(framed_in_band_energy, samples, request.sample_rate_hz, config)
+            samples, coverage = window
+            energy = await asyncio.to_thread(framed_in_band_energy, samples, coverage, request.sample_rate_hz, config)
             level_db = energy.level_db(start_sample=0, end_sample=samples.size, quantile=config.signal_energy_quantile)
             if level_db is not None:
                 levels.append(CallerReferenceLevel(call=other, reference_position_m=position_m, level_db=level_db))
         return levels
 
-    async def _classify_selection(self, selection: PointNetworkClipSelection) -> "ClassifiedResult":
+    async def _classify_selection(
+        self, selection: PointNetworkClipSelection, *, default_classification: DefaultClassification | None
+    ) -> "ClassifiedResult | None":
         request = selection.request
         orchestrator = self._host._classification_orchestrator
         classified = await orchestrator.classify_omni_only(
@@ -346,6 +387,17 @@ class PointNetworkCallClassifier:
             event_time_ns=request.event_time_ns,
             path=POINT_NETWORK_CLIP_CLASSIFICATION_PATH,
         )
+        # Timeouts too, not only errors (``_classification_backend_failed`` sees errors only).
+        failure_reason = classified.classification.features.get("reason")
+        if default_classification is not None and failure_reason in FAILED_CLASSIFICATION_REASONS:
+            return await self._default_with_clip_unavailable(
+                request,
+                default_classification,
+                UNAVAILABLE_REASON_CLIP_CLASSIFIER_FAILED,
+                clip_node_id=selection.chosen.node_id,
+                failure_reason=failure_reason,
+            )
+        self._host._metrics.point_network_clip_classified_count += 1
         provenance = selection.provenance()
         if not selection.species_uncertain:
             classified.classification.features[POINT_NETWORK_CLIP_FEATURE_KEY] = provenance
@@ -392,7 +444,9 @@ __all__ = [
     "POINT_NETWORK_CLIP_FEATURE_KEY",
     "SELECTION_REASON_HIGHEST_IN_BAND_SNR",
     "SPECIES_UNCERTAIN_LABEL",
+    "UNAVAILABLE_REASON_CLIP_CLASSIFIER_FAILED",
     "UNAVAILABLE_REASON_NO_BUFFERED_CLIP",
+    "UNAVAILABLE_REASON_NO_COVERED_CLIP",
     "UNCERTAINTY_REASON_OVERLAPPING_CALLER",
     "PointNetworkCallClassifier",
     "PointNetworkCallRequest",

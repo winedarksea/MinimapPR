@@ -78,7 +78,11 @@ from minimappr.core.localized_render_handoff_hooks import (
 from minimappr.core.position_observation import position_observation_solve_id
 from minimappr.core.point_network_call_classification import PointNetworkCallClassifier
 from minimappr.core.point_network_call_requests import classify_python_ingest_call, register_python_ingest_call
-from minimappr.core.python_ingest_solve_exclusions import python_ingest_excluded_sensor_features
+from minimappr.core.python_ingest_solve_exclusions import (
+    SolveSensorExclusionLedger,
+    counts_by_reason,
+    python_ingest_excluded_sensor_features,
+)
 from minimappr.core.position_observation_pipeline import classified_solve_resolver
 from minimappr.core.localization import LocalizationError
 from minimappr.core.localization_uncertainty import (
@@ -277,9 +281,13 @@ class FusionMetrics:
     point_network_clip_classified_count: int = 0
     point_network_clip_unavailable_count: int = 0
     point_network_clip_species_uncertain_count: int = 0
-    # --- P8 synchronized-window skips (core/synchronized_window_skips.py), synced in status() ---
-    buffer_synchronized_window_skips_by_reason: dict[str, int] = field(default_factory=dict)
-    buffer_synchronized_window_skips_by_sensor: dict[str, dict[str, int]] = field(default_factory=dict)
+    # --- P8 sensors left out of Python-ingest solves, once per solve
+    # (core/python_ingest_solve_exclusions.py), synced in status(): totals and the recent window ---
+    localization_excluded_sensor_counts_by_reason: dict[str, int] = field(default_factory=dict)
+    localization_excluded_sensor_counts_by_sensor: dict[str, dict[str, int]] = field(default_factory=dict)
+    localization_excluded_sensor_recent_counts_by_reason: dict[str, int] = field(default_factory=dict)
+    localization_excluded_sensor_recent_counts_by_sensor: dict[str, dict[str, int]] = field(default_factory=dict)
+    localization_excluded_sensor_recent_window_seconds: float = 0.0
     # Hold rule: fixes held for their classification, and how each was resolved.
     position_observations_held_for_label: int = 0
     position_observations_held_applied_with_label: int = 0
@@ -596,6 +604,7 @@ class FusionNode:
         self._classification_workers: list[asyncio.Task] = []
         self._rules_workers: list[asyncio.Task] = []
         self._metrics = FusionMetrics()
+        self._solve_sensor_exclusions = SolveSensorExclusionLedger()
         # Phase 4: windowed multi-node bearing triangulation store (server-side,
         # feature-flagged off by default). Bounded + TTL-pruned.
         self._bearing_fusion_store = BearingFusionStore(
@@ -1039,7 +1048,7 @@ class FusionNode:
         now_ns = time.time_ns()
         realtime = self._realtime_tracker.snapshot(now_ns=now_ns)
         buffer_state = await self.buffer.snapshot_state()
-        self._sync_synchronized_window_skip_metrics(buffer_state)
+        self._sync_solve_sensor_exclusion_metrics()
         health = self._compute_health_snapshot(now_ns=now_ns)
         # Phase 3: cross-node track fusion telemetry (counter + live gauge).
         if hasattr(self.tracker, "multi_node_association_count"):
@@ -1083,18 +1092,14 @@ class FusionNode:
             "omni_scanner": self._omni_scanner.stats() if self._omni_scanner is not None else {"enabled": bool(self.settings.omni_scan_enabled), "running": False},
         }
 
-    def _sync_synchronized_window_skip_metrics(self, buffer_state: list[dict[str, Any]]) -> None:
-        skips_by_sensor = {
-            state["sensor_id"]: dict(state["synchronized_window_skips"])
-            for state in buffer_state
-            if state.get("synchronized_window_skips")
-        }
-        skips_by_reason: dict[str, int] = {}
-        for reasons in skips_by_sensor.values():
-            for reason, count in reasons.items():
-                skips_by_reason[reason] = skips_by_reason.get(reason, 0) + count
-        self._metrics.buffer_synchronized_window_skips_by_sensor = skips_by_sensor
-        self._metrics.buffer_synchronized_window_skips_by_reason = skips_by_reason
+    def _sync_solve_sensor_exclusion_metrics(self) -> None:
+        ledger, metrics = self._solve_sensor_exclusions, self._metrics
+        metrics.localization_excluded_sensor_counts_by_sensor = ledger.counts_by_sensor()
+        metrics.localization_excluded_sensor_counts_by_reason = counts_by_reason(ledger.counts_by_sensor())
+        recent_by_sensor = ledger.recent_counts_by_sensor()
+        metrics.localization_excluded_sensor_recent_counts_by_sensor = recent_by_sensor
+        metrics.localization_excluded_sensor_recent_counts_by_reason = counts_by_reason(recent_by_sensor)
+        metrics.localization_excluded_sensor_recent_window_seconds = ledger.recent_window_seconds
 
     def observe_firmware_runner_stats(
         self,
@@ -1215,16 +1220,21 @@ class FusionNode:
                         reporting_modality="localized" if product.localization_branch is not None else "omni",
                         solve_origin=SOLVE_ORIGIN_PYTHON_INGEST,
                     )
-                    # P7: remembered before classification so an earlier point-network clip can see it.
-                    await register_python_ingest_call(self, product)
-                    if self._classification_priority_enabled:
-                        product.classification_significance = (
-                            await self._score_classification_significance(product)
-                        )
-                    if await self._enqueue_stage(self._classification_queue, product):
-                        self._metrics.localization_stage_out += 1
-                    else:
-                        await self._release_held_position_without_classification(product)
+                    enqueued = False
+                    try:
+                        # P7: remembered before classification so an earlier point-network clip can see it.
+                        await register_python_ingest_call(self, product)
+                        if self._classification_priority_enabled:
+                            product.classification_significance = (
+                                await self._score_classification_significance(product)
+                            )
+                        enqueued = await self._enqueue_stage(self._classification_queue, product)
+                    finally:
+                        if enqueued:
+                            self._metrics.localization_stage_out += 1
+                        else:
+                            # Never reaches classification (dropped, or registration failed).
+                            await self._release_held_position_without_classification(product)
             except asyncio.TimeoutError:
                 self._metrics.stage_timeout_count += 1
                 self._last_error = f"Localization stage timed out after {timeout_s:.3f}s"
@@ -1279,6 +1289,9 @@ class FusionNode:
                         event_time_ns=product.candidate.event_time_ns,
                         source_node_id=product.candidate.source_node_id,
                     )
+                    continue
+                if product.deferred_classification is not None:
+                    await self._run_deferred_classification(product, timeout_s)
                     continue
                 classification_started_ns = time.perf_counter_ns()
                 detection_products = await asyncio.wait_for(
@@ -1365,6 +1378,30 @@ class FusionNode:
                     item_id=product.candidate.id,
                 )
                 self._classification_queue.task_done()
+
+    async def _run_deferred_classification(self, product: LocalizedCandidate, timeout_s: float) -> None:
+        """A product whose classification a collaborator queued (a point-network
+        render's P7 clip, ``localized_render_reporting``): it classifies and
+        assembles; this worker times it, records the chunk outcome and delivers.
+        Unlike a Python-ingest product, an empty result is not "found nothing":
+        the render merged into an earlier reporter's (which labelled its track)
+        or was not assembled, exactly as an inline render."""
+        classification_started_ns = time.perf_counter_ns()
+        detection_products = await asyncio.wait_for(product.deferred_classification(), timeout=timeout_s)
+        classification_elapsed_ms = (time.perf_counter_ns() - classification_started_ns) / 1_000_000.0
+        self._metrics.classification_stage_total_time_ms += classification_elapsed_ms
+        self._metrics.classification_stage_max_time_ms = max(
+            self._metrics.classification_stage_max_time_ms, classification_elapsed_ms
+        )
+        classification_failed = self._detection_products_had_backend_failure(detection_products)
+        self._record_chunk_dispatch_outcome(
+            product=product, detection_products=detection_products, classification_failed=classification_failed
+        )
+        if classification_failed:
+            self._metrics.classification_failures += 1
+        for detection_product in detection_products:
+            if await self._enqueue_stage(self._rules_queue, detection_product):
+                self._metrics.classification_stage_out += 1
 
     async def _rules_worker_loop(self, worker_id: int) -> None:
         del worker_id
@@ -1590,7 +1627,11 @@ class FusionNode:
         )
         # P8: a sensor buffered at another rate is excluded, not resampled; say so per solve.
         excluded_sensor_features = await python_ingest_excluded_sensor_features(
-            buffer=self.buffer, registry=self.registry, sensor_ids=sensor_ids, solve_sample_rate_hz=candidate.sample_rate_hz
+            buffer=self.buffer,
+            registry=self.registry,
+            sensor_ids=sensor_ids,
+            solve_sample_rate_hz=candidate.sample_rate_hz,
+            ledger=self._solve_sensor_exclusions,
         )
 
         tier = self.degradation_model.tier_for_sensor_count(len(selected_ids))

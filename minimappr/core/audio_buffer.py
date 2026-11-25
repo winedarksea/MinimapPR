@@ -11,7 +11,7 @@ from typing import Any, Optional
 import numpy as np
 
 from minimappr.core.capture_audio_buffer import ChunkedCaptureSessionBuffer
-from minimappr.core.synchronized_window_skips import SampleRateMismatch, SynchronizedWindowSkipLedger
+from minimappr.core.synchronized_window_skips import SampleRateMismatch
 
 logger = logging.getLogger(__name__)
 
@@ -407,25 +407,50 @@ class SensorStreamBuffer:
         state = self._state
         if state.start_time_ns is None or state.samples.size == 0:
             return None
+        offsets = self._ending_at_offsets(state, end_time_ns, window_seconds, state.samples.size)
+        if offsets is None:
+            return None
+        start_offset_samples, end_offset_samples = offsets
+        return state.samples[start_offset_samples:end_offset_samples].copy()
 
+    def get_window_ending_at_with_coverage(
+        self, end_time_ns: int, window_seconds: float
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        """``(samples, coverage)`` from one state snapshot, so a gap filled by a
+        late packet between two reads cannot pair zero-filled samples with
+        ``covered`` flags."""
+        state = self._state
+        if state.start_time_ns is None or state.samples.size == 0:
+            return None
+        offsets = self._ending_at_offsets(state, end_time_ns, window_seconds, state.samples.size)
+        if offsets is None:
+            return None
+        start_offset_samples, end_offset_samples = offsets
+        return (
+            state.samples[start_offset_samples:end_offset_samples].copy(),
+            state.coverage[start_offset_samples:end_offset_samples].copy(),
+        )
+
+    def _ending_at_offsets(
+        self, state: _BufferState, end_time_ns: int, window_seconds: float, buffered_samples: int
+    ) -> tuple[int, int] | None:
+        """``[start, end)`` buffer offsets of the window ending at ``end_time_ns``.
+
+        The start is clamped to the beginning of the buffer so partial windows
+        (e.g. when the buffer has less than classification_window_seconds of
+        history) return whatever audio IS available rather than None. Returning
+        None there caused every sensor to fall back to the 80 ms localization
+        window, which is far too short for BirdNET and produced only "unknown"
+        (0.0) classifications. The window is None when its end is beyond what
+        has been buffered (future samples) or at/before the buffer start (a
+        negative end would slice ``[0:-k]``: unrelated audio).
+        """
         window_samples = max(1, int(round(window_seconds * self.sample_rate_hz)))
         end_sample_index = self._time_to_sample_index(state, end_time_ns)
-        start_sample_index = end_sample_index - window_samples
         end_offset_samples = end_sample_index - state.buffer_start_sample_index
-        start_offset_samples = start_sample_index - state.buffer_start_sample_index
-
-        # Clamp the start to the beginning of the buffer so partial windows (e.g.
-        # when the buffer has less than classification_window_seconds of history) return
-        # whatever audio IS available rather than None.  Returning None here caused every
-        # sensor to fall back to the 80 ms localization window, which is far too short
-        # for BirdNET and produced only "unknown" (0.0) classifications.
-        # We still return None when the end is beyond what has been buffered because
-        # that would require future samples.
-        if end_offset_samples > state.samples.size:
+        if end_offset_samples <= 0 or end_offset_samples > buffered_samples:
             return None
-        start_offset_samples = max(0, start_offset_samples)
-
-        return state.samples[start_offset_samples:end_offset_samples].copy()
+        return max(0, end_offset_samples - window_samples), end_offset_samples
 
     def get_window_ending_at_coverage_stats(
         self,
@@ -463,14 +488,10 @@ class SensorStreamBuffer:
         state = self._state
         if state.start_time_ns is None or state.coverage.size == 0:
             return None
-        window_samples = max(1, int(round(window_seconds * self.sample_rate_hz)))
-        end_sample_index = self._time_to_sample_index(state, end_time_ns)
-        start_sample_index = end_sample_index - window_samples
-        end_offset_samples = end_sample_index - state.buffer_start_sample_index
-        start_offset_samples = start_sample_index - state.buffer_start_sample_index
-        if end_offset_samples > state.coverage.size:
+        offsets = self._ending_at_offsets(state, end_time_ns, window_seconds, state.coverage.size)
+        if offsets is None:
             return None
-        start_offset_samples = max(0, start_offset_samples)
+        start_offset_samples, end_offset_samples = offsets
         return state.coverage[start_offset_samples:end_offset_samples].copy()
 
     def _time_to_sample_index(self, state: _BufferState, time_ns: int) -> int:
@@ -516,30 +537,17 @@ class MultiSensorBuffer:
         # silently discards prior audio. Survives the buffer replacement
         # because it's on the wrapper, unlike SensorStreamBuffer.reanchor_count.
         self._rate_mismatch_wipes: dict[str, int] = {}
-        # P8: sensors a synchronized read left out (e.g. buffered at another rate).
-        self._synchronized_window_skips = SynchronizedWindowSkipLedger()
 
     def _buffer_for_synchronized_read(self, sensor_id: str, sample_rate_hz: int) -> SensorStreamBuffer | None:
         """The sensor's buffer when it holds ``sample_rate_hz`` audio; a
-        mismatched rate is excluded (no resampling yet) and counted. Call with
-        ``_lock`` held."""
+        mismatched rate is excluded (no resampling yet). Exclusions are counted
+        once per solve by the solve (``python_ingest_solve_exclusions``), not
+        here: one solve reads a sensor several times, and so do the omni scanner
+        and audio debug. Call with ``_lock`` held."""
         buffer = self._buffers.get(sensor_id)
-        if buffer is None:
-            return None
-        if buffer.sample_rate_hz != sample_rate_hz:
-            self._synchronized_window_skips.record_sample_rate_mismatch(
-                sensor_id,
-                SampleRateMismatch(
-                    buffered_sample_rate_hz=int(buffer.sample_rate_hz), requested_sample_rate_hz=int(sample_rate_hz)
-                ),
-            )
+        if buffer is None or buffer.sample_rate_hz != sample_rate_hz:
             return None
         return buffer
-
-    async def synchronized_window_skip_counts(self) -> dict[str, dict[str, int]]:
-        """``{sensor_id: {reason: count}}`` of sensors left out of synchronized reads."""
-        async with self._lock:
-            return self._synchronized_window_skips.counts_by_sensor()
 
     async def sample_rate_mismatched_sensors(
         self, sensor_ids: list[str], sample_rate_hz: int
@@ -923,7 +931,6 @@ class MultiSensorBuffer:
                         "end_time_ns": end_time_ns,
                         "reanchor_count": int(buffer.reanchor_count),
                         "rate_mismatch_wipes": int(self._rate_mismatch_wipes.get(sensor_id, 0)),
-                        "synchronized_window_skips": self._synchronized_window_skips.counts_for_sensor(sensor_id),
                         "pin_protected_from_ns": pin_ns,
                     }
                 )
@@ -964,6 +971,26 @@ class MultiSensorBuffer:
                 if buffer is None:
                     continue
                 window = buffer.get_window_ending_at(end_time_ns=end_time_ns, window_seconds=window_seconds)
+                if window is not None:
+                    result[sensor_id] = window
+            return result
+
+    async def get_synchronized_window_ending_at_with_coverage(
+        self,
+        sensor_ids: list[str],
+        end_time_ns: int,
+        window_seconds: float,
+        sample_rate_hz: int,
+    ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        """``{sensor_id: (samples, coverage)}``: coverage marks which samples were
+        received (gaps are zero-filled)."""
+        async with self._lock:
+            result: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+            for sensor_id in sensor_ids:
+                buffer = self._buffer_for_synchronized_read(sensor_id, sample_rate_hz)
+                if buffer is None:
+                    continue
+                window = buffer.get_window_ending_at_with_coverage(end_time_ns=end_time_ns, window_seconds=window_seconds)
                 if window is not None:
                     result[sensor_id] = window
             return result

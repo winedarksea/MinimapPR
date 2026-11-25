@@ -3,6 +3,8 @@
 Rust path: point-only cluster renders through ``FusionNode.ingest_localized_render``
 to the stored detection, with the per-sensor audio already mirrored into the
 fusion buffer (as ``api/stream_consumer.py`` does from ``raw_audio_frame``).
+The clip classification runs on a classification worker, so detections are
+read after the stage queues drain.
 Python-ingest path: ``_localize_candidate`` (with a truth localizer, since the
 solve itself is not under test) then ``_classify_and_assemble``.
 """
@@ -14,9 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from minimappr.api.rust_dsp_manifests import load_localized_render_manifest_bundle
 from minimappr.core.fusion_node import FusionNode
-from minimappr.core.localization_provenance import site_frame_id_for_coordinate_frame
 from minimappr.core.point_network_call_classification import (
     POINT_NETWORK_CLIP_CLASSIFICATION_PATH,
     POINT_NETWORK_CLIP_FEATURE_KEY,
@@ -28,12 +28,15 @@ from minimappr.core.point_network_call_classification import (
 from minimappr.core.point_network_call_requests import register_python_ingest_call
 from minimappr.storage.db import Storage
 from tests.point_network_fusion_harness import (
+    RENDER_HALF_SPAN_SECONDS,
     RecordingClassifier,
     TruthLocalizer,
+    point_network_render_request,
     python_ingest_candidate,
     register_point_nodes,
     started_point_network_fusion,
 )
+from tests.point_network_fusion_harness import stored_detections_by_solve as _stored_detections_by_solve
 from tests.point_network_scene import (
     NANOSECONDS_PER_SECOND,
     POINT_NODE_POSITIONS_M,
@@ -42,14 +45,11 @@ from tests.point_network_scene import (
     Caller,
     append_captures,
     clip_onset_sample,
-    point_network_render_manifest,
     point_sensor_id,
     render_point_node_captures,
 )
 
 HEURISTIC_BIRD_LABEL = "bird_like"
-SOLVE_WINDOW_SECONDS = 0.2
-RENDER_HALF_SPAN_SECONDS = 0.5
 # Caller A sits by pt-a; pt-d (farthest) reports, so pt-a's clip is moved earlier.
 CALLER_NEAR_A = Caller(position_m=(8.0, 6.0, 3.0), emission_offset_seconds=0.5, seed=11)
 # Caller B sits by pt-c, 34 m from A, loud enough to be within a few dB of A at pt-a,
@@ -72,26 +72,7 @@ def _caller_b_overlapping_a_at_pt_a(caller_a: Caller = CALLER_NEAR_A) -> Caller:
     )
 
 
-def _render_request(fusion: FusionNode, caller: Caller, *, reporting_node_id: str, solve_id: str):
-    manifest = point_network_render_manifest(
-        caller=caller,
-        reporting_node_id=reporting_node_id,
-        frame_id=site_frame_id_for_coordinate_frame(fusion.coordinate_frame),
-        solve_id=solve_id,
-        manifest_id=f"render-{solve_id}",
-        solve_window_seconds=SOLVE_WINDOW_SECONDS,
-        render_half_span_seconds=RENDER_HALF_SPAN_SECONDS,
-    )
-    return load_localized_render_manifest_bundle(manifest_payload=manifest).request
-
-
-async def _stored_detections_by_solve(storage: Storage) -> dict[str, dict]:
-    detections = await storage.list_detections(limit=20)
-    return {
-        detection["feature_summary"]["localization_solve"]["solve_id"]: detection
-        for detection in detections
-        if "localization_solve" in detection["feature_summary"]
-    }
+_render_request = point_network_render_request
 
 
 async def test_rust_point_network_render_classifies_the_clearest_nodes_aligned_clip(tmp_path: Path) -> None:
@@ -100,7 +81,7 @@ async def test_rust_point_network_render_classifies_the_clearest_nodes_aligned_c
         await append_captures(fusion.buffer, render_point_node_captures([CALLER_NEAR_A]))
         await fusion.ingest_localized_render(_render_request(fusion, CALLER_NEAR_A, reporting_node_id="pt-d", solve_id="solve-a"))
 
-        detection = (await _stored_detections_by_solve(storage))["solve-a"]
+        detection = (await _stored_detections_by_solve(storage, fusion))["solve-a"]
         clip = detection["feature_summary"][POINT_NETWORK_CLIP_FEATURE_KEY]
         assert detection["label"] == HEURISTIC_BIRD_LABEL
         assert detection["feature_summary"]["classification_path"] == POINT_NETWORK_CLIP_CLASSIFICATION_PATH
@@ -141,7 +122,7 @@ async def test_overlapping_callers_leave_the_masked_callers_species_uncertain(tm
         await fusion.ingest_localized_render(request_a)
         await fusion.ingest_localized_render(request_b)
 
-        detections = await _stored_detections_by_solve(storage)
+        detections = await _stored_detections_by_solve(storage, fusion)
         clip_a = detections["solve-a"]["feature_summary"][POINT_NETWORK_CLIP_FEATURE_KEY]
         clip_b = detections["solve-b"]["feature_summary"][POINT_NETWORK_CLIP_FEATURE_KEY]
         # A's clearest node (pt-a) also hears B at a comparable level: no species is asserted.
@@ -170,7 +151,7 @@ async def test_a_later_render_alone_still_sees_an_earlier_overlapping_caller(tmp
         await fusion.ingest_localized_render(_render_request(fusion, caller_b, reporting_node_id="pt-c", solve_id="solve-b"))
         await fusion.ingest_localized_render(_render_request(fusion, CALLER_NEAR_A, reporting_node_id="pt-d", solve_id="solve-a"))
 
-        detections = await _stored_detections_by_solve(storage)
+        detections = await _stored_detections_by_solve(storage, fusion)
         assert detections["solve-a"]["label"] == SPECIES_UNCERTAIN_LABEL
         assert detections["solve-b"]["label"] == HEURISTIC_BIRD_LABEL
     finally:
@@ -184,7 +165,7 @@ async def test_point_network_clip_off_keeps_the_render_classification(tmp_path: 
         await append_captures(fusion.buffer, render_point_node_captures([CALLER_NEAR_A]))
         await fusion.ingest_localized_render(_render_request(fusion, CALLER_NEAR_A, reporting_node_id="pt-d", solve_id="solve-a"))
 
-        detection = (await _stored_detections_by_solve(storage))["solve-a"]
+        detection = (await _stored_detections_by_solve(storage, fusion))["solve-a"]
         assert POINT_NETWORK_CLIP_FEATURE_KEY not in detection["feature_summary"]
         assert detection["feature_summary"]["classification_path"] == "omni"
     finally:
@@ -197,7 +178,7 @@ async def test_unbuffered_point_network_keeps_the_render_and_says_why(tmp_path: 
     try:
         await fusion.ingest_localized_render(_render_request(fusion, CALLER_NEAR_A, reporting_node_id="pt-d", solve_id="solve-a"))
 
-        detection = (await _stored_detections_by_solve(storage))["solve-a"]
+        detection = (await _stored_detections_by_solve(storage, fusion))["solve-a"]
         assert detection["feature_summary"]["classification_path"] == "omni"
         assert detection["feature_summary"][POINT_NETWORK_CLIP_FEATURE_KEY] == {
             "unavailable_reason": UNAVAILABLE_REASON_NO_BUFFERED_CLIP,

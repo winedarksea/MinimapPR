@@ -42,6 +42,11 @@ def _site_position(value) -> np.ndarray:
     return np.asarray(value, dtype=np.float64).reshape(3)
 
 
+def _stated_covariance(branch) -> np.ndarray | None:
+    covariance = branch.localization_position_covariance_m2
+    return None if covariance is None else np.asarray(covariance, dtype=np.float64)
+
+
 # -- Rust classifier render / event-only solve -----------------------------------
 
 
@@ -99,6 +104,8 @@ def localized_call_for_rust_solve(
         event_span_start_ns=span_start_ns,
         event_span_end_ns=span_end_ns,
         sound_speed_mps=float(sound_speed_mps),
+        position_covariance_m2=_stated_covariance(branch),
+        cluster_id=None if solve is None else solve.provenance.cluster_id,
     )
 
 
@@ -145,22 +152,16 @@ async def classify_rust_render_call(
     host: "FusionNode",
     *,
     payload: "LocalizedClassifierRenderRequest",
-    geometry: "HandoffSolveGeometry",
-    localized_product: "LocalizedCandidate",
-    reporting_modality: str,
+    request: PointNetworkCallRequest,
     default_classification: DefaultClassification,
 ) -> "ClassifiedResult":
-    """The render's classification: the aligned point-node clip for a point
-    network, else ``default_classification`` (the render itself)."""
-    request = await point_network_request_for_rust_render(
-        host,
-        payload=payload,
-        geometry=geometry,
-        localized_product=localized_product,
-        reporting_modality=reporting_modality,
-    )
+    """A point-network render's classification: the aligned point-node clip,
+    else ``default_classification`` (the render itself: the sidecar's label
+    when it sent one, which also stands if the clip classifier fails)."""
     classified = await host._point_network_call_classifier.classify(
-        request, default_classification=default_classification
+        request,
+        default_classification=default_classification,
+        keep_default_on_classifier_failure=payload.authoritative_classification is not None,
     )
     clip_provenance = classified.classification.features.get(POINT_NETWORK_CLIP_FEATURE_KEY)
     authoritative = payload.authoritative_classification
@@ -174,18 +175,21 @@ async def classify_rust_render_call(
 # -- Python ingest -----------------------------------------------------------------
 
 
-def _python_alignment_reference(
-    product: "LocalizedCandidate", sensor_node_ids: dict[str, str], source_position_m: np.ndarray
-) -> str:
-    """The triggering node's selected sensor, else the selected sensor nearest the source."""
+async def _python_alignment_reference(
+    host: "FusionNode", product: "LocalizedCandidate", sensor_node_ids: dict[str, str]
+) -> tuple[str, np.ndarray] | None:
+    """The triggering node's sensor (its selected one, else its first registered
+    one), whether or not the solve selected it: ``event_time_ns`` is on that
+    node's timeline, so any other node would shift every clip by the
+    propagation difference. None when the registry has no sensor for it."""
     triggering_node_id = product.candidate.source_node_id
     for sensor_id in product.selected_sensor_ids:
         if sensor_node_ids.get(sensor_id) == triggering_node_id:
-            return sensor_id
-    return min(
-        product.selected_sensor_ids,
-        key=lambda sensor_id: float(np.linalg.norm(_site_position(product.selected_positions[sensor_id]) - source_position_m)),
-    )
+            return sensor_id, _site_position(product.selected_positions[sensor_id])
+    descriptors = await host.registry.sensors_for_node(triggering_node_id)
+    if not descriptors:
+        return None
+    return descriptors[0].sensor_id, _site_position(descriptors[0].position_m)
 
 
 async def _python_localized_call_and_nodes(
@@ -196,17 +200,21 @@ async def _python_localized_call_and_nodes(
         return None
     sensor_node_ids = await host.registry.sensor_node_ids(list(product.selected_sensor_ids))
     source_position_m = _site_position(branch.localization_position_m)
-    reference_sensor_id = _python_alignment_reference(product, sensor_node_ids, source_position_m)
+    reference = await _python_alignment_reference(host, product, sensor_node_ids)
+    if reference is None:
+        return None
+    reference_sensor_id, reference_position_m = reference
     half_window_ns = seconds_to_nanoseconds(host.localization_config.localization_window_seconds / 2.0)
     event_time_ns = product.candidate.event_time_ns
     call = LocalizedCall(
         call_id=position_observation_solve_id(product),
         source_position_m=source_position_m,
         alignment_reference_sensor_id=reference_sensor_id,
-        alignment_reference_position_m=_site_position(product.selected_positions[reference_sensor_id]),
+        alignment_reference_position_m=reference_position_m,
         event_span_start_ns=event_time_ns - half_window_ns,
         event_span_end_ns=event_time_ns + half_window_ns,
         sound_speed_mps=float(host.environment_provider.get_speed_of_sound(branch.localization_position_m)),
+        position_covariance_m2=_stated_covariance(branch),
     )
     return call, sensor_node_ids
 
