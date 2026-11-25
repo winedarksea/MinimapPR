@@ -103,6 +103,31 @@ def resolve_default_handoff_estimate(
     return estimate if solved is None else solved
 
 
+def solve_timing_sample_rate_hz(payload: LocalizedClassifierRenderRequest) -> int:
+    """The rate the solve's TDOAs were measured at. A render's own
+    ``sample_rate_hz`` is its audio's, so an event and its covering render
+    would otherwise give one solve two timing-noise covariances."""
+    solve = payload.localization_solve
+    return solve.provenance.solve_sample_rate_hz if solve is not None else payload.sample_rate_hz
+
+
+def resolve_handoff_estimate(
+    host: "FusionNode",
+    solution_resolver: Any,
+    payload: LocalizedClassifierRenderRequest,
+    geometry: "HandoffSolveGeometry",
+    reporting_modality: str,
+) -> HandoffLocalizationEstimate:
+    """The solution seam's estimate, else the default one. Synchronous and free
+    of event-loop state, so the handoff may run it in a worker thread."""
+    estimate = solution_resolver.resolve_handoff_solution(
+        payload=payload, geometry=geometry, reporting_modality=reporting_modality
+    )
+    if estimate is None:
+        estimate = resolve_default_handoff_estimate(host, payload, geometry, reporting_modality)
+    return estimate
+
+
 def python_cartesian_resolve_requested(
     host: "FusionNode",
     payload: LocalizedClassifierRenderRequest,
@@ -152,7 +177,7 @@ def python_cartesian_estimate_from_rust_tdoas(
         pair_tdoas=pair_tdoas,
         steering_direction=steering_direction,
         sound_speed_mps=payload.localization_sound_speed_mps,
-        sample_rate_hz=payload.sample_rate_hz,
+        sample_rate_hz=solve_timing_sample_rate_hz(payload),
         interpolation_factor=host.settings.gcc_phat_interp_factor,
         far_field_default_range_m=far_field_range_m,
         far_field_prior_radial_std_m=far_field_prior_radial_std_m,
@@ -183,12 +208,15 @@ def gate_handoff_localization(
     estimate: HandoffLocalizationEstimate,
     reporting_modality: str,
     source_node_id: str,
+    records_rejections: bool = True,
 ) -> HandoffGatingOutcome:
     """Apply the same reportability gates the solver path applies.
 
     This ingress carries precomputed positions from the Rust sidecar and is the
     path production actually uses, so it must gate as strictly as
     ``_build_localization_branch``. Mutates ``estimate`` in place.
+    ``records_rejections`` False gates without counting (a covering render
+    repeating a solve its event already gated and counted).
     """
     selected_positions = geometry.selected_positions
     contributing_centroid_m = (
@@ -206,8 +234,9 @@ def gate_handoff_localization(
     if rejected_out_of_range:
         # Keep the classification as an omni observation at its node rather than
         # letting a bogus geographic position into a localized track.
-        host._metrics.localization_rejected_out_of_range_count += 1
-        host._record_silent_drop(stage="localization", reason=LOCALIZATION_REJECTED_OUT_OF_RANGE_REASON)
+        if records_rejections:
+            host._metrics.localization_rejected_out_of_range_count += 1
+            host._record_silent_drop(stage="localization", reason=LOCALIZATION_REJECTED_OUT_OF_RANGE_REASON)
         reporting_modality = "omni"
 
     # Angular resolution degrades when the dominant frequency falls well below the
@@ -237,7 +266,8 @@ def gate_handoff_localization(
     # far-field single-node estimate cannot pass through over-confident.
     raw_range_projection_mode = estimate.range_projection_mode
     estimate.range_projection_mode = normalize_range_mode(raw_range_projection_mode)
-    host._record_range_projection_metrics(raw_range_projection_mode)
+    if records_rejections:
+        host._record_range_projection_metrics(raw_range_projection_mode)
     estimate.confidence, estimate.range_observability = apply_unobservable_range_haircut(
         mode=estimate.range_projection_mode,
         confidence=estimate.confidence,
@@ -251,15 +281,16 @@ def gate_handoff_localization(
             gdop=estimate.gdop,
         )
         if rejected_low_quality_reason is not None:
-            host._metrics.localization_rejected_low_quality_count += 1
-            host._record_silent_drop(
-                stage="localization",
-                reason=rejected_low_quality_reason,
-                source_node_id=source_node_id,
-                range_projection_mode=estimate.range_projection_mode,
-                localization_confidence=estimate.confidence,
-                gdop=estimate.gdop,
-            )
+            if records_rejections:
+                host._metrics.localization_rejected_low_quality_count += 1
+                host._record_silent_drop(
+                    stage="localization",
+                    reason=rejected_low_quality_reason,
+                    source_node_id=source_node_id,
+                    range_projection_mode=estimate.range_projection_mode,
+                    localization_confidence=estimate.confidence,
+                    gdop=estimate.gdop,
+                )
             reporting_modality = "omni"
     # Resolved before the covariance clamp so the clamp knows whether altitude
     # was actually observable on this solve.

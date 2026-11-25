@@ -198,12 +198,18 @@ async def test_two_same_label_callers_in_one_cluster_at_the_same_time_both_updat
             SOLVE_ORIGIN_RUST_CLASSIFIER_RENDER,
         )
     await pipeline.drain()
+    # Perched (stationary_hold) tracks: each fix waits for its own label (hold rule).
+    assert metrics.position_observations_held_for_label == 2
+    for solve_id, position in (("solve-a", (0.5, 0.0, 2.0)), ("solve-b", (40.5, 0.0, 2.0))):
+        kwargs = _classified_kwargs(position, label="robin", label_category="wildlife")
+        kwargs["source_node_id"] = "node-a" if solve_id == "solve-a" else "node-b"
+        await pipeline.track_for_classified_solve(solve_id=solve_id, classified_update_kwargs=kwargs)
 
     tracks = {track.id: track for track in await tracker.snapshot()}
     assert tracks[first_caller.id].update_count == 2
     assert tracks[second_caller.id].update_count == 2
     assert "node-b" in tracks[second_caller.id].contributor_node_ids
-    assert metrics.position_observations_applied == 2
+    assert metrics.position_observations_held_applied_with_label == 2
 
 
 async def test_fix_gated_by_two_tracks_waits_for_its_label_aware_update() -> None:
@@ -308,8 +314,8 @@ async def test_classification_that_finds_nothing_retracts_only_a_lone_provisiona
     )
     await pipeline.drain()
 
-    await pipeline.retract_provisional_track_started_by("evt-noise")
-    await pipeline.retract_provisional_track_started_by("evt-a")  # another fix joined it: kept
+    await pipeline.classification_found_nothing_trackable("evt-noise")
+    await pipeline.classification_found_nothing_trackable("evt-a")  # another fix joined it: kept
 
     [kept] = await tracker.snapshot(include_hidden=True)
     assert kept.update_count == 2
@@ -397,14 +403,14 @@ async def test_classification_contradicting_the_geometric_match_updates_its_own_
     assert {track.id: track.label for track in await tracker.snapshot()}[bird.id] == "robin"
 
 
-async def test_absorbed_entity_bout_of_an_observed_solve_attaches_without_moving_the_track() -> None:
+async def test_absorbed_entity_bout_of_an_observed_solve_resolves_its_held_fix_once() -> None:
     tracker, metrics = TrackManager(Settings(tracking_partial_constraint_binding_enabled=True)), FusionMetrics()
     pipeline = _pipeline(tracker, metrics)
     existing = await _visible_track(tracker, (10.0, 0.0, 2.0), label="robin", label_category="wildlife")
     await _observe(pipeline, _localized_product(candidate_id="evt-bout", position_m=(10.5, 0.0, 2.0)), SOLVE_ORIGIN_PYTHON_INGEST)
     await pipeline.drain()
     [after_observation] = await tracker.snapshot()
-    position_after_observation = after_observation.position_m
+    assert after_observation.update_count == 1  # held for its label: a perched robin track
 
     resolution = await resolve_detection_track(
         tracker=tracker,
@@ -432,7 +438,7 @@ async def test_absorbed_entity_bout_of_an_observed_solve_attaches_without_moving
     )
     assert resolution.track is not None and resolution.track.id == existing.id
     assert resolution.track.update_count == 2
-    assert resolution.track.position_m == position_after_observation
+    assert metrics.position_observations_held_applied_with_label == 1
 
 
 # -- FusionNode wiring ----------------------------------------------------------

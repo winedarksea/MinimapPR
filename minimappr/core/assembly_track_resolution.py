@@ -20,7 +20,10 @@ solve's position has already reached the tracker before classification, so a
 classified detection never moves a track a second time: the pipeline attaches
 the label to the track that solve updated (``track_for_classified_solve``).
 The same holds for an absorbed entity bout whose solve was observed: it
-attaches its label instead of nudging the track through partial binding.
+attaches its label instead of nudging the track through partial binding, and
+for a classification reporting suppresses
+(``label_observed_solve_track_without_report``), so a hidden track is still
+revealed and a held fix still resolved by its label.
 """
 
 from __future__ import annotations
@@ -37,6 +40,8 @@ from minimappr.models import LabelId, TrackState
 if TYPE_CHECKING:
     from minimappr.core.position_observation_pipeline import PositionObservationPipeline
 
+# An observed solve passed the tracker-eligibility check (a localized fix) when it was observed.
+_OBSERVED_SOLVE_SPATIAL_DISPLAY_MODE = "localized"
 # Written into classification features by the onset stage (Field Mode W3-attribution).
 NODE_BAND_SNR_FEATURE_KEY = "onset_cluster_node_band_snr_db"
 AUDIBLE_SNR_FEATURE_KEY = "onset_cluster_audible_snr_db"
@@ -89,43 +94,37 @@ async def resolve_detection_track(
     field_mode = getattr(tracker, "field_mode", None)
     below_display = detection_is_below_display_threshold(classification_features)
     resolution = TrackResolution(track=None, below_display_threshold=below_display)
-    belief_applies = field_mode is not None and field_mode.belief_applies(label_category)
+    classified_update_kwargs = _classified_update_kwargs(
+        field_mode=field_mode,
+        event_time_ns=event_time_ns,
+        localization_position_m=localization_position_m,
+        localization_position_covariance_m2=localization_position_covariance_m2,
+        classification_label=classification_label,
+        classification_confidence=classification_confidence,
+        classification_scores=classification_scores,
+        classification_features=classification_features,
+        label_category=label_category,
+        iff_category=iff_category,
+        label_id=label_id,
+        selected_sensor_ids=selected_sensor_ids,
+        capability_tier=capability_tier,
+        source_node_id=source_node_id,
+    )
+    species_evidence = classified_update_kwargs.get("species_evidence")
+    if suppressed_by_zone and position_observations is not None and position_observations.solve_fix_is_held(solve_id):
+        # Zone suppression hides the report, not the source: a held fix is
+        # still resolved by the classifier's label (hold rule).
+        await position_observations.track_for_classified_solve(
+            solve_id=solve_id, classified_update_kwargs=classified_update_kwargs
+        )
     # Nothing could ever lift a track over the display threshold without a belief.
-    if suppressed_by_zone or (below_display and not belief_applies):
+    if suppressed_by_zone or _finds_nothing_trackable(field_mode, label_category, below_display):
         if position_observations is not None:
             # The classification found nothing to track here, so a provisional
             # track that only this solve's fix started must not linger and
             # capture a later source.
-            await position_observations.retract_provisional_track_started_by(solve_id)
+            await position_observations.classification_found_nothing_trackable(solve_id)
         return resolution
-
-    species_evidence = None
-    if field_mode is not None:
-        species_evidence = field_mode.detection_evidence(
-            label=classification_label,
-            confidence=classification_confidence,
-            classifier_scores=classification_scores,
-            species_evidence=None,
-            winner_member=classification_features.get("winner_member"),
-        )
-
-    classified_update_kwargs: dict[str, Any] = {
-        "timestamp_ns": event_time_ns,
-        "position_m": localization_position_m,
-        "measurement_covariance_m2": localization_position_covariance_m2,
-        "label": classification_label,
-        "label_category": label_category,
-        "iff_category": iff_category,
-        "label_id": label_id,
-        "confidence": classification_confidence,
-        "sensor_count": len(selected_sensor_ids),
-        "capability_tier": capability_tier,
-        "source_node_id": source_node_id,
-        "classifier_scores": classification_scores,
-    }
-    if species_evidence is not None:
-        classified_update_kwargs["species_evidence"] = species_evidence
-        classified_update_kwargs["below_display_threshold"] = below_display
 
     track: TrackState | None = None
     if spatial_display_mode == "localized" and capability_tier in TRACKER_LOCALIZABLE_CAPABILITY_TIERS:
@@ -175,3 +174,82 @@ async def resolve_detection_track(
         return resolution
     resolution.track = track
     return resolution
+
+
+def _finds_nothing_trackable(field_mode: Any, label_category: str, below_display: bool) -> bool:
+    belief_applies = field_mode is not None and field_mode.belief_applies(label_category)
+    return below_display and not belief_applies
+
+
+def _classified_update_kwargs(
+    *,
+    field_mode: Any,
+    event_time_ns: int,
+    localization_position_m: tuple[float, float, float],
+    localization_position_covariance_m2: list[list[float]] | None,
+    classification_label: str,
+    classification_confidence: float,
+    classification_scores: dict[str, float],
+    classification_features: dict[str, Any],
+    label_category: str,
+    iff_category: str,
+    label_id: LabelId | None,
+    selected_sensor_ids: list[str],
+    capability_tier: str,
+    source_node_id: str | None,
+) -> dict[str, Any]:
+    """The ``TrackManager.update`` keywords of one classified solve."""
+    classified_update_kwargs: dict[str, Any] = {
+        "timestamp_ns": event_time_ns,
+        "position_m": localization_position_m,
+        "measurement_covariance_m2": localization_position_covariance_m2,
+        "label": classification_label,
+        "label_category": label_category,
+        "iff_category": iff_category,
+        "label_id": label_id,
+        "confidence": classification_confidence,
+        "sensor_count": len(selected_sensor_ids),
+        "capability_tier": capability_tier,
+        "source_node_id": source_node_id,
+        "classifier_scores": classification_scores,
+    }
+    species_evidence = None
+    if field_mode is not None:
+        species_evidence = field_mode.detection_evidence(
+            label=classification_label,
+            confidence=classification_confidence,
+            classifier_scores=classification_scores,
+            species_evidence=None,
+            winner_member=classification_features.get("winner_member"),
+        )
+    if species_evidence is not None:
+        classified_update_kwargs["species_evidence"] = species_evidence
+        classified_update_kwargs["below_display_threshold"] = detection_is_below_display_threshold(
+            classification_features
+        )
+    return classified_update_kwargs
+
+
+async def label_observed_solve_track_without_report(
+    *,
+    tracker: Any,
+    registry: NodeRegistry,
+    solve_id: str | None,
+    position_observations: "PositionObservationPipeline | None",
+    **resolve_kwargs: Any,
+) -> None:
+    """A classification reporting will not surface still resolves its observed
+    solve: labels (and reveals) the track the position moved, resolves a held
+    fix, or makes the label-aware update of a fix that never reached a track.
+    Solves the pipeline never observed keep the pre-P5 behaviour: no tracker work."""
+    if position_observations is None or not position_observations.knows_solve(solve_id):
+        return
+    await resolve_detection_track(
+        tracker=tracker,
+        registry=registry,
+        spatial_display_mode=_OBSERVED_SOLVE_SPATIAL_DISPLAY_MODE,
+        suppressed_by_zone=False,
+        solve_id=solve_id,
+        position_observations=position_observations,
+        **resolve_kwargs,
+    )
