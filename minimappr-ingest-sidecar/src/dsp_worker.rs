@@ -422,15 +422,20 @@ impl DspWorker {
             let ingested_payload = self.ingest_one(manifest, pending_backlog_depth).await;
             // A newer candidate can supersede (and so release) a parked one.
             let ready_payloads = self.take_ready_deferred_localizations(false).await;
-            for mut payload in ingested_payload.into_iter().chain(ready_payloads) {
-                self.prepare_dispatch(&mut payload).await;
-                dispatch(payload);
+            for payload in ingested_payload.into_iter().chain(ready_payloads) {
+                for ready in self.prepare_dispatch(payload).await {
+                    dispatch(ready);
+                }
             }
         }
         // Batch boundary (also the idle poll tick): decide parked windows.
-        for mut payload in self.take_ready_deferred_localizations(true).await {
-            self.prepare_dispatch(&mut payload).await;
-            dispatch(payload);
+        for payload in self.take_ready_deferred_localizations(true).await {
+            for ready in self.prepare_dispatch(payload).await {
+                dispatch(ready);
+            }
+        }
+        for ready in self.release_held_renders_at_batch_boundary().await {
+            dispatch(ready);
         }
     }
 
@@ -448,13 +453,6 @@ impl DspWorker {
                 owned_segments.len(),
             )
             .await;
-        }
-
-        if self
-            .should_skip_stale_manifest_for_live_buffer(owned_segments.first()?)
-            .await
-        {
-            return None;
         }
 
         // The node's own array failed the geometry gate (too many mics, or
@@ -558,12 +556,22 @@ impl DspWorker {
     }
 
     /// Last step before a payload leaves for compute, in dispatch order: a
-    /// covering render takes over the event solve, then attempts are counted.
-    async fn prepare_dispatch(&mut self, payload: &mut ComputePayload) {
-        let buffers = self.buffers.get(&payload.stream_key).map(Vec::as_slice);
-        self.recent_event_trigger_solves
-            .remember_or_attach(payload, buffers);
-        self.note_stage_attempts(payload).await;
+    /// covering render takes over the event solve (or waits for a parked
+    /// one), then attempts are counted. Returns what to dispatch now.
+    async fn prepare_dispatch(&mut self, payload: ComputePayload) -> Vec<ComputePayload> {
+        let ready = self.route_through_covered_event_solves(payload);
+        for payload in &ready {
+            self.note_stage_attempts(payload).await;
+        }
+        ready
+    }
+
+    async fn release_held_renders_at_batch_boundary(&mut self) -> Vec<ComputePayload> {
+        let ready = self.release_every_held_render_no_longer_waiting();
+        for payload in &ready {
+            self.note_stage_attempts(payload).await;
+        }
+        ready
     }
 
     async fn note_stage_attempts(&self, payload: &ComputePayload) {

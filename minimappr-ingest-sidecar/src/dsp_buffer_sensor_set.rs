@@ -115,6 +115,30 @@ impl BufferSensorSet {
         self.sensors.len() != before
     }
 
+    /// Exactly channels `0..channel_count` of the node are registered, each
+    /// refreshed within `stale_after_ns`.
+    pub(crate) fn node_sensors_fresh(
+        &self,
+        node_id: &str,
+        channel_count: usize,
+        now_ns: u128,
+        stale_after_ns: u128,
+    ) -> bool {
+        let mut registered_channel_count = 0;
+        for ((sensor_node_id, channel_index, _), sensor) in &self.sensors {
+            if sensor_node_id != node_id {
+                continue;
+            }
+            if *channel_index >= channel_count
+                || now_ns.saturating_sub(sensor.last_refreshed_ns) > stale_after_ns
+            {
+                return false;
+            }
+            registered_channel_count += 1;
+        }
+        registered_channel_count == channel_count
+    }
+
     /// Drops every trace of a node (it lost its trusted position).
     pub(crate) fn remove_node(&mut self, node_id: &str) -> bool {
         let before = self.sensors.len();

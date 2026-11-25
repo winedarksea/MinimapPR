@@ -59,6 +59,22 @@ async def test_node_registry_applies_pinned_position_overrides() -> None:
     assert positions["node-registry-override:ch0"].tolist() == [11.0, 20.0, 30.0]
 
 
+@pytest.mark.asyncio
+async def test_stored_non_finite_override_is_ignored_without_blocking_other_nodes() -> None:
+    registry = NodeRegistry()
+    await registry.load_overrides(
+        {
+            "node-nan-override": {"position_m": [float("nan"), 0.0, 0.0]},
+            "node-registry-override": {"position_m": [10.0, 20.0, 30.0]},
+        }
+    )
+    spec = NodeSpec(id="node-registry-override", node_type=NodeType.POINT, position_m=(0.0, 0.0, 0.0))
+
+    runtime = await registry.upsert(spec, last_seen_ns=1)
+
+    assert runtime.spec.position_m == (10.0, 20.0, 30.0)
+
+
 def test_node_spec_strips_unknown_capabilities_into_metadata() -> None:
     spec = NodeSpec(
         id="node-capabilities",

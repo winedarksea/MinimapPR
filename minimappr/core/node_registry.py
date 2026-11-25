@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 
 import numpy as np
+from pydantic import ValidationError
 
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.sensor_world_position import sensor_world_position_m
 from minimappr.models import NodeOverrides, NodeSpec, SyncGrade, Vec3
+
+logger = logging.getLogger(__name__)
 
 
 def operator_override_position_m(
@@ -127,7 +131,12 @@ class NodeRegistry:
         for node_id, payload in overrides_by_node_id.items():
             if not isinstance(payload, dict) or not payload:
                 continue
-            parsed[node_id] = NodeOverrides.model_validate(payload)
+            try:
+                parsed[node_id] = NodeOverrides.model_validate(payload)
+            except ValidationError as exc:
+                # A row stored before overrides were validated (e.g. a NaN
+                # position) must not stop every other node from loading.
+                logger.warning("Ignoring unusable stored overrides for node %s: %s", node_id, exc)
         async with self._lock:
             self._overrides = parsed
 

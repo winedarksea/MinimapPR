@@ -211,6 +211,17 @@ def _orientation_only_placement(node_row: Mapping[str, Any]) -> SiteNodePlacemen
     )
 
 
+def _placement_is_finite(placement: SiteNodePlacement) -> bool:
+    # Rust rejects a push holding any non-finite number, and at launch that
+    # refusal stops the sidecar, so one bad node must not reach the body.
+    numbers = [
+        *(placement.position_m or ()),
+        *(() if placement.position_std_m is None else (placement.position_std_m,)),
+        *(placement.body_to_world_quaternion_wxyz or ()),
+    ]
+    return all(math.isfinite(value) for value in numbers)
+
+
 def build_site_geometry_snapshot(
     *,
     node_rows: list[Mapping[str, Any]],
@@ -239,8 +250,12 @@ def build_site_geometry_snapshot(
             # geometry; the node simply stays on raw GPS until it is fixed.
             logger.warning("Site geometry: skipping node %s with unusable placement data: %s", node_id, exc)
             continue
-        if placement is not None:
-            placements[node_id] = placement
+        if placement is None:
+            continue
+        if not _placement_is_finite(placement):
+            logger.warning("Site geometry: skipping node %s with a non-finite placement: %s", node_id, placement)
+            continue
+        placements[node_id] = placement
     return SiteGeometrySnapshot(
         site_frame_id=site_frame_id_for_coordinate_frame(coordinate_frame),
         site_origin=coordinate_frame.origin,

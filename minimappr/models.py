@@ -6,7 +6,7 @@ from enum import Enum
 from math import isfinite
 from typing import Any, Literal, TypeAlias
 
-from pydantic import AliasChoices, BaseModel, Field, field_serializer, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 
 Vec3 = tuple[float, float, float]
@@ -198,6 +198,10 @@ class NodeSafetyConfig(BaseModel):
 
 
 class NodeOverrides(BaseModel):
+    # A non-finite position or accuracy is solve geometry the sidecar refuses
+    # (Starlette accepts NaN/Infinity in JSON bodies).
+    model_config = ConfigDict(allow_inf_nan=False)
+
     position_m: Vec3 | None = None
     position_geo: GeoPoint | None = None
     # 1-sigma accuracy (m) of the entered position; it widens the solve error
