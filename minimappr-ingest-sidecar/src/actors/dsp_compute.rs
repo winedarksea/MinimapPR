@@ -13,8 +13,8 @@ use crate::{
     },
     localization_solve_provenance::{localization_manifest_payload, localization_result_manifest},
     srp_phat::{
-        estimate_tetrahedral_steering_with_pair_filter, SrpPhatConfig, SrpPhatEvaluation,
-        SrpPhatLocalization,
+        estimate_tetrahedral_steering_with_solve_constraints, SolveChannelConstraints,
+        SrpPhatConfig, SrpPhatEvaluation, SrpPhatLocalization,
     },
 };
 
@@ -75,6 +75,10 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
             } else {
                 (None, None)
             };
+        // Only the reporter's admitted, connected sensors: a timeline-rejected
+        // node's channels would otherwise stay in the centroid, aperture and
+        // grid although none of its pairs with the reporter is measured.
+        let solve_channels = payload.pair_admission.solve_sensor_indices();
         let srp_config = SrpPhatConfig {
             localization_band_hz: payload.config.localization_band_hz,
             grid_resolution_m: payload.config.localization_srp_grid_resolution_m,
@@ -84,12 +88,10 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
             far_field_max_range_m: payload.config.localization_far_field_max_range_m,
             range_prior_m,
             range_prior_std_m,
-            half_space: payload
-                .sensor_layout
-                .solve_half_space(&payload.active_channels),
+            half_space: payload.sensor_layout.solve_half_space(solve_channels),
             reference_channel_floor: solver_reference_channel_floor(
                 &payload.sensor_layout,
-                &payload.active_channels,
+                solve_channels,
                 &payload.channel_states,
                 &payload.node_noise_floor_rms,
                 payload
@@ -100,14 +102,17 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
             ..SrpPhatConfig::default()
         };
         let admits_pair = |ch_a: usize, ch_b: usize| payload.pair_admission.admits_pair(ch_a, ch_b);
-        estimate_tetrahedral_steering_with_pair_filter(
+        estimate_tetrahedral_steering_with_solve_constraints(
             windows.as_slice(),
-            &payload.active_channels,
+            solve_channels,
             payload.sensor_layout.positions_m.as_slice(),
             payload.sr,
             payload.effective_sound_speed_mps,
             srp_config,
-            Some(&admits_pair),
+            SolveChannelConstraints {
+                admitted_pair_filter: Some(&admits_pair),
+                channel_clock_offsets: Some(payload.pair_admission.channel_clock_offsets()),
+            },
         )
     } else {
         let skipped_reason = if payload.run_srp {
@@ -136,8 +141,7 @@ pub fn run_math(payload: ComputePayload) -> ComputeMathResult {
     };
 
     let pair_tdoas = localization_evaluation.pair_tdoas;
-    let mut localization = localization_evaluation.localization;
-    inflate_covariance_for_pair_timing(&payload, &mut localization, &pair_tdoas);
+    let localization = localization_evaluation.localization;
 
     let fallback_reason = if let Some(ref reason) = payload.omni_fallback_reason {
         Some(reason.clone())
@@ -405,25 +409,6 @@ pub async fn run_io(result: ComputeMathResult) {
                 st.recent_results.remove(0);
             }
         }
-    }
-}
-
-/// Widens the published covariance by the clock error of the cross-node
-/// pairs the solve used (see `SolvePairAdmission::cross_node_timing_variance_m2`).
-fn inflate_covariance_for_pair_timing(
-    payload: &ComputePayload,
-    localization: &mut SrpPhatLocalization,
-    correlated_pairs: &[PairTdoa],
-) {
-    let Some(covariance_m2) = localization.position_covariance_m2.as_mut() else {
-        return;
-    };
-    let timing_variance_m2 = payload
-        .pair_admission
-        .cross_node_timing_variance_m2(correlated_pairs, payload.effective_sound_speed_mps)
-        as f32;
-    for (axis, row) in covariance_m2.iter_mut().enumerate() {
-        row[axis] += timing_variance_m2;
     }
 }
 

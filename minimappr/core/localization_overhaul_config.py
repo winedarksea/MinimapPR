@@ -22,6 +22,13 @@ DEFAULT_LOCALIZATION_MIN_PAIR_BASELINE_M = 0.02
 # A node whose measured timeline residual exceeds this is known to be wrong
 # (not merely uncertain), so its cross-node pairs are dropped.
 DEFAULT_LOCALIZATION_CROSS_NODE_MAX_TIMELINE_RESIDUAL_SECONDS = 0.010
+# The residual compared with that limit is a percentile over the node's last
+# few frames, with hysteresis on the flag, so one late-stamped frame (jitter)
+# cannot drop a node's cross-node pairs for the solve that snapshots it.
+DEFAULT_LOCALIZATION_TIMELINE_RESIDUAL_WINDOW_FRAMES = 16
+DEFAULT_LOCALIZATION_TIMELINE_RESIDUAL_PERCENTILE = 50.0
+# Once over the limit, the flag clears only at limit * ratio.
+DEFAULT_LOCALIZATION_TIMELINE_RESIDUAL_OVER_LIMIT_CLEAR_RATIO = 0.8
 # Applied when a node reports no recognisable time_quality. Conservative but
 # not exclusionary: weak clocks widen the error, they never drop a pair.
 DEFAULT_LOCALIZATION_CLOCK_UNKNOWN_UNCERTAINTY_SECONDS = 0.005
@@ -89,6 +96,9 @@ RUST_FORWARDED_LOCALIZATION_SETTING_KEYS: tuple[str, ...] = (
     "localization_max_solve_sensors",
     "localization_min_pair_baseline_m",
     "localization_cross_node_max_timeline_residual_seconds",
+    "localization_timeline_residual_window_frames",
+    "localization_timeline_residual_percentile",
+    "localization_timeline_residual_over_limit_clear_ratio",
     "localization_clock_class_uncertainty_seconds",
     "localization_clock_unknown_uncertainty_seconds",
     "localization_timestamp_step_threshold_seconds",
@@ -163,6 +173,14 @@ def localization_overhaul_setting_errors(settings) -> list[str]:
         errors.append("localization_trigger_noise_floor_relative_db must be a finite value > 0")
     if not math.isfinite(settings.localization_solver_floor_relative_db):
         errors.append("localization_solver_floor_relative_db must be finite")
+    if settings.localization_timeline_residual_window_frames < 1:
+        errors.append("localization_timeline_residual_window_frames must be >= 1")
+    percentile = settings.localization_timeline_residual_percentile
+    if not (math.isfinite(percentile) and 0.0 <= percentile <= 100.0):
+        errors.append("localization_timeline_residual_percentile must be in [0, 100]")
+    clear_ratio = settings.localization_timeline_residual_over_limit_clear_ratio
+    if not (math.isfinite(clear_ratio) and 0.0 < clear_ratio <= 1.0):
+        errors.append("localization_timeline_residual_over_limit_clear_ratio must be in (0, 1]")
     if settings.position_observation_queue_max_items < 1:
         errors.append("position_observation_queue_max_items must be >= 1")
     errors.extend(_clock_class_uncertainty_errors(settings.localization_clock_class_uncertainty_seconds))

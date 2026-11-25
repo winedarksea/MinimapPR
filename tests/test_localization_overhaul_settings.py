@@ -24,6 +24,9 @@ def test_defaults_match_the_shared_contract() -> None:
     assert settings.localization_max_solve_sensors == 16
     assert settings.localization_min_pair_baseline_m == pytest.approx(0.02)
     assert settings.localization_cross_node_max_timeline_residual_seconds == pytest.approx(0.010)
+    assert settings.localization_timeline_residual_window_frames == 16
+    assert settings.localization_timeline_residual_percentile == pytest.approx(50.0)
+    assert settings.localization_timeline_residual_over_limit_clear_ratio == pytest.approx(0.8)
     assert settings.localization_clock_unknown_uncertainty_seconds == pytest.approx(0.005)
     assert settings.localization_timestamp_step_threshold_seconds == pytest.approx(0.002)
     assert settings.localization_timestamp_step_recovery_holdoff_seconds == pytest.approx(30.0)
@@ -85,6 +88,10 @@ def test_from_env_parses_json_dict_and_scalars(monkeypatch) -> None:
         ({"localization_clock_class_uncertainty_seconds": {"sundial": 1.0}}, "unknown time_quality"),
         ({"localization_clock_class_uncertainty_seconds": {"gps_locked": -1.0}}, "gps_locked"),
         ({"localization_timestamp_step_recovery_holdoff_seconds": -1.0}, "holdoff"),
+        ({"localization_timeline_residual_window_frames": 0}, "residual_window_frames"),
+        ({"localization_timeline_residual_percentile": 101.0}, "residual_percentile"),
+        ({"localization_timeline_residual_over_limit_clear_ratio": 0.0}, "clear_ratio"),
+        ({"localization_timeline_residual_over_limit_clear_ratio": 1.5}, "clear_ratio"),
         ({"tracking_mode_by_category": {"wildlife": "stationary_hold"}}, "'default' entry"),
         ({"tracking_mode_by_category": {"default": "hover"}}, "tracking_mode_by_category"),
         ({"position_observation_queue_max_items": 0}, "position_observation_queue_max_items"),

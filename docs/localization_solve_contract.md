@@ -183,7 +183,7 @@ Every exclusion carries one `reason`:
 | `sample_rate_mismatch` | sensor, pair | Sensor rate differs from `solve_sample_rate_hz`. |
 | `pair_baseline_below_minimum` | pair | Separation under `localization_min_pair_baseline_m`. |
 | `coverage_below_threshold` | sensor, pair | Window coverage under the minimum ratio. |
-| `timeline_residual_over_limit` | pair | A node's measured timeline residual exceeds `localization_cross_node_max_timeline_residual_seconds`; that node's cross-node pairs are dropped, its own channels still solve. |
+| `timeline_residual_over_limit` | pair | A node's measured timeline residual exceeds `localization_cross_node_max_timeline_residual_seconds`; that node's cross-node pairs are dropped; its intra-node pairs stay admitted (they solve when it is the reporter, section 6.1). |
 | `node_position_untrusted_no_override` | sensor | `fallback_static` node with no pushed placement. |
 | `node_array_geometry_unusable` | sensor | The node's own offsets fail validation for its channel count. |
 | `max_solve_sensors_exceeded` | sensor | Beyond `localization_max_solve_sensors`. |
@@ -216,6 +216,15 @@ over the limit is also left out of the beamformed classifier render (it
 cannot be delay-aligned with other nodes); when that node is the reporter,
 the render uses only its own channels.
 
+SRP solves only the active sensors connected to the reporting node through
+admitted pairs (its reference fit, centroid, aperture and grid assume one
+connected array). So a timeline-rejected node that is not the reporter takes
+no part in the solve: its intra-node pairs stay admitted (not listed in
+`excluded_pairs`) but are not correlated and are absent from `pair_tdoas`,
+and its sensors stay in `active_sensor_indices` (they were covered). When
+the rejected node is the reporter, only its own channels solve. A reporter
+with no covered sensor solves on the largest connected group.
+
 ```json
 {"sensor_index": 3, "sensor_id": "point-c:ch0", "reason": "sample_rate_mismatch"}
 {"sensor_index_a": 0, "sensor_index_b": 2, "reason": "timeline_residual_over_limit"}
@@ -228,7 +237,7 @@ the render uses only its own channels.
 | `node_id` | string | |
 | `time_quality` | enum string | Section 3.6. |
 | `clock_offset_std_s` | number, nullable | Node timing uncertainty (seconds): max of class default, reported holdover error, \|measured residual\|, active step penalty. |
-| `timeline_residual_ns` | integer, nullable | Signed packet timestamp minus the node's buffer timeline at the latest frame; `null` until measured. |
+| `timeline_residual_ns` | integer, nullable | Signed packet timestamp minus the node's buffer timeline, aggregated over the node's last `localization_timeline_residual_window_frames` frames (the frame residual at `localization_timeline_residual_percentile` of their magnitudes, sign kept; 50 = median); `null` until measured, or while the node is off packet time. |
 | `last_timestamp_step_ns` | integer, nullable | Signed size of the most recent detected timestamp step (positive = clock jumped ahead); `null` if none. |
 | `timestamp_step_count` | integer | Steps detected since the node was first heard (tracker entries are evicted after `localization_sensor_registry_stale_seconds` of silence). |
 
@@ -244,6 +253,10 @@ reports the snapshot it triggered with). Rules (Rust `dsp_node_clock_quality.rs`
   `unknown`, or a class missing from the map, takes
   `localization_clock_unknown_uncertainty_seconds` (widened, never excluded).
   A node in the layout that has not streamed yet reports `unknown` with that default.
+- **Off packet time.** A node whose latest segment carried no node timestamp
+  (its audio sits on server or receipt time) reports `unknown` with
+  `localization_clock_unknown_uncertainty_seconds`, a `null` residual and no
+  gate, whatever class its frames claim, until a segment is on packet time again.
 - **Step.** Between consecutive frames of one boot session (within or across
   uploads), packet-time advance minus sample-index advance / rate beyond
   `localization_timestamp_step_threshold_seconds`. It raises the node's
@@ -257,8 +270,12 @@ reports the snapshot it triggered with). Rules (Rust `dsp_node_clock_quality.rs`
   placed the audio on (anchored at that buffer's first packet), only when the
   buffer runs on packet time. A step the buffer did not re-anchor on, or
   accumulated crystal drift, therefore stays visible here; there is no drift
-  correction. Over `localization_cross_node_max_timeline_residual_seconds` the
-  node's cross-node pairs are excluded (`timeline_residual_over_limit`).
+  correction or re-anchoring. When the windowed residual exceeds
+  `localization_cross_node_max_timeline_residual_seconds` the node's
+  cross-node pairs are excluded (`timeline_residual_over_limit`); the flag
+  clears only once the windowed residual is back under that limit times
+  `localization_timeline_residual_over_limit_clear_ratio` (hysteresis), so a
+  single jittery frame never flips it.
 
 ## 8. `localization.pair_tdoas[]` additions
 
@@ -273,13 +290,16 @@ optional for legacy manifests):
 | `is_cross_node` | bool | The two sensors belong to different nodes. |
 | `timing_uncertainty_seconds` | number | 1-sigma timing uncertainty of this pair: `0` for two sensors of one node (one clock); for a cross-node pair the two nodes' timing uncertainties in quadrature, `sqrt(u_a^2 + u_b^2)`. A node's uncertainty is its clock assessment (largest of class default, holdover error, measured residual, step penalty); a node without one is timed with `localization_clock_unknown_uncertainty_seconds`. The Python re-solve weights the pair by it and inflates covariance to match. |
 
-**Published covariance.** The Rust SRP solver weights every pair equally, so
-`localization.position_covariance_m2` is widened instead: `(c * u_max)^2` is
-added to each diagonal entry, where `c` is `sound_speed_mps` and `u_max` the
-largest `timing_uncertainty_seconds` among the solve's `pair_tdoas`. The worst
-pair is used, not an average, because a node's clock offset shifts all of its
-cross-node TDOAs together (it does not average out) and the unweighted solve
-cannot discount that node. A solve with only same-node pairs is unchanged.
+**Published covariance.** The Rust SRP solver weights every pair equally;
+`localization.position_covariance_m2` adds the clock offsets' effect on the
+solved position, propagated through the solve's Jacobian (least-squares
+sandwich `G R G^T`, `G = (J^T J)^-1 J^T` over the reference TDOAs). `R` is
+the per-node correlated timing noise: node `k`'s offset (1-sigma = its
+`clock_offset_std_s`) shifts every reference TDOA between node `k` and the
+reference channel's node together, so each pair's variance is `u_pair^2` and
+pairs sharing a node co-vary. This grows with geometric dilution (about r/b
+laterally and r^2/b in range for a node spread b at range r), unlike a flat
+per-axis term. A solve with only same-node pairs is unchanged.
 
 ## 9. Example `solve_provenance`
 

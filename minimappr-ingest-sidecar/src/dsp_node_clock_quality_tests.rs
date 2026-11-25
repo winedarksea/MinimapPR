@@ -74,15 +74,30 @@ fn observe(
     extra_ns: impl Fn(i64) -> i128,
     timeline: Option<NominalSampleTimeline>,
 ) {
+    observe_segment(tracker, upload, extra_ns, timeline, true);
+}
+
+fn observe_segment(
+    tracker: &mut NodeClockQualityTracker,
+    upload: &Upload,
+    extra_ns: impl Fn(i64) -> i128,
+    timeline: Option<NominalSampleTimeline>,
+    segment_on_packet_time: bool,
+) {
     let frame_timing = upload.frame_timing(extra_ns);
     tracker.observe(NodeFrameTimingObservation {
         node_id: NODE,
         frame_timing: &frame_timing,
         segment_start_sample_index: Some(upload.first_frame * FRAME_SAMPLES as i64),
         sample_rate_hz: RATE_HZ,
+        segment_on_packet_time,
         buffer_timeline: timeline,
         now_ns: NOW_NS,
     });
+}
+
+fn residual_window_frames() -> usize {
+    config().localization_timeline_residual_window_frames
 }
 
 fn on_time(_: i64) -> i128 {
@@ -198,16 +213,17 @@ fn residual_over_the_hard_limit_is_flagged_only_when_measured_over_it() {
     let limit_ns =
         (defaults.localization_cross_node_max_timeline_residual_seconds * 1e9).round() as i128;
     let mut tracker = NodeClockQualityTracker::new(&defaults);
+    let window = residual_window_frames();
     observe(
         &mut tracker,
-        &Upload::gps(0, 2),
+        &Upload::gps(0, window),
         on_time,
         Some(timeline_anchored_at(0, -(limit_ns - 1_000_000))),
     );
     assert!(!tracker.assessment(NODE).residual_over_hard_limit);
     observe(
         &mut tracker,
-        &Upload::gps(2, 2),
+        &Upload::gps(window as i64, window),
         on_time,
         Some(timeline_anchored_at(0, -(limit_ns + 2_000_000))),
     );
@@ -236,11 +252,12 @@ fn a_step_inside_one_upload_on_an_unmoved_buffer_timeline_stays_over_the_limit()
         on_time,
         Some(timeline_anchored_at(0, 0)),
     );
-    // 21 ms step at frame 25 of one upload; sample indices stay contiguous.
+    // 21 ms step at frame 25 of one upload; sample indices stay contiguous,
+    // and the upload runs on long enough to fill the residual window.
     let step_at_25 = |frame: i64| if frame >= 25 { STEP_NS } else { 0 };
     observe(
         &mut tracker,
-        &Upload::gps(20, 10),
+        &Upload::gps(20, 5 + residual_window_frames()),
         step_at_25,
         Some(timeline_anchored_at(0, 0)),
     );
@@ -421,4 +438,104 @@ fn snapshot_covers_every_layout_node_and_stale_nodes_are_evicted() {
     assert_eq!(tracker.tracked_node_count(), 1);
     tracker.evict_stale(NOW_NS + stale_after_ns + 1);
     assert_eq!(tracker.tracked_node_count(), 0);
+}
+
+#[test]
+fn a_single_late_frame_does_not_flip_the_hard_limit_gate() {
+    let defaults = config();
+    let late_ns =
+        (defaults.localization_cross_node_max_timeline_residual_seconds * 1.5e9).round() as i128;
+    let mut tracker = NodeClockQualityTracker::new(&defaults);
+    observe(
+        &mut tracker,
+        &Upload::gps(0, 20),
+        on_time,
+        Some(timeline_anchored_at(0, 0)),
+    );
+    // Frame 20 is stamped 15 ms late (network or firmware jitter); the
+    // solve snapshotting right after it must not lose this node's pairs.
+    let one_late_frame = move |frame: i64| if frame == 20 { late_ns } else { 0 };
+    observe(
+        &mut tracker,
+        &Upload::gps(20, 1),
+        one_late_frame,
+        Some(timeline_anchored_at(0, 0)),
+    );
+    let assessment = tracker.assessment(NODE);
+    assert!(!assessment.residual_over_hard_limit);
+    assert_eq!(assessment.timeline_residual_seconds, Some(0.0));
+}
+
+#[test]
+fn the_hard_limit_flag_clears_only_under_the_hysteresis_ratio() {
+    let defaults = config();
+    let limit_seconds = defaults.localization_cross_node_max_timeline_residual_seconds;
+    let clear_seconds =
+        limit_seconds * defaults.localization_timeline_residual_over_limit_clear_ratio;
+    let residual_ns = |seconds: f64| (seconds * 1e9).round() as i128;
+    let window = residual_window_frames();
+    let mut tracker = NodeClockQualityTracker::new(&defaults);
+    let mut next_frame = 0_i64;
+    let mut fill_window_at = |tracker: &mut NodeClockQualityTracker, residual_seconds: f64| {
+        observe(
+            tracker,
+            &Upload::gps(next_frame, window),
+            on_time,
+            Some(timeline_anchored_at(0, -residual_ns(residual_seconds))),
+        );
+        next_frame += window as i64;
+        tracker.assessment(NODE).residual_over_hard_limit
+    };
+    assert!(fill_window_at(&mut tracker, limit_seconds * 1.2));
+    let between_clear_and_limit_seconds = (clear_seconds + limit_seconds) * 0.5;
+    assert!(
+        fill_window_at(&mut tracker, between_clear_and_limit_seconds),
+        "under the limit but over the clear level: still flagged"
+    );
+    assert!(!fill_window_at(&mut tracker, clear_seconds * 0.5));
+    assert!(
+        !fill_window_at(&mut tracker, between_clear_and_limit_seconds),
+        "rising back under the limit does not set it"
+    );
+}
+
+#[test]
+fn a_segment_off_packet_time_is_assessed_as_an_unknown_clock() {
+    let defaults = config();
+    let window = residual_window_frames();
+    let mut tracker = NodeClockQualityTracker::new(&defaults);
+    observe(
+        &mut tracker,
+        &Upload::gps(0, window),
+        on_time,
+        Some(timeline_anchored_at(0, -2 * STEP_NS)),
+    );
+    assert!(tracker.assessment(NODE).residual_over_hard_limit);
+    // No node timestamp: the audio sits on server/receipt time, whatever
+    // class (binary code 0 = gps_locked) the frames still claim.
+    observe_segment(
+        &mut tracker,
+        &Upload::gps(window as i64, 2),
+        on_time,
+        None,
+        false,
+    );
+    let assessment = tracker.assessment(NODE);
+    assert_eq!(assessment.time_quality, NodeTimeQuality::Unknown);
+    assert_eq!(
+        assessment.timing_uncertainty_seconds,
+        defaults.localization_clock_unknown_uncertainty_seconds
+    );
+    assert_eq!(assessment.timeline_residual_seconds, None);
+    assert!(!assessment.residual_over_hard_limit);
+
+    observe(
+        &mut tracker,
+        &Upload::gps(window as i64 + 2, 2),
+        on_time,
+        Some(timeline_anchored_at(window as i64 + 2, 0)),
+    );
+    let back_on_packet_time = tracker.assessment(NODE);
+    assert_eq!(back_on_packet_time.time_quality, NodeTimeQuality::GpsLocked);
+    assert_eq!(back_on_packet_time.timeline_residual_seconds, Some(0.0));
 }

@@ -283,12 +283,17 @@ async fn a_residual_over_the_hard_limit_drops_only_that_nodes_cross_node_pairs()
                 );
             }
         }
+        // SRP solves only the reporter's connected array: node b's own
+        // pairs stay admitted, but they solve only when node b reports
+        // (`a_timeline_rejected_far_node_leaves_the_solve_geometry`).
         let pair_tdoas = &manifest.localization.as_ref().unwrap().pair_tdoas;
+        let reporter = provenance.reporting_node_id.as_str();
         assert!(
-            pair_tdoas
-                .iter()
-                .any(|pair| node_of(pair.ch_a) == NODE_B && node_of(pair.ch_b) == NODE_B),
-            "node b's own channels still solve"
+            !pair_tdoas.is_empty()
+                && pair_tdoas
+                    .iter()
+                    .all(|pair| node_of(pair.ch_a) == reporter && node_of(pair.ch_b) == reporter),
+            "{reporter} solves on its own channels only"
         );
     }
     assert!(solves_with_both_nodes_active > 0);

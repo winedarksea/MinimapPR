@@ -9,9 +9,19 @@
 //! Holdoff time runs on the node's own sample clock (sample index / rate), so
 //! it is immune to the timestamp steps it is recovering from and to replay
 //! speed. Entries are evicted with the sensor registry's stale window.
+//!
+//! The reported residual is a percentile over the last few frames, and the
+//! hard-limit flag has hysteresis: a single late-stamped frame (network or
+//! firmware jitter) must not drop a node's cross-node pairs for whichever
+//! solve happens to snapshot at that moment. Measure and gate only: buffer
+//! timelines are never re-anchored or offset here.
+//!
+//! A node whose latest segment is not on packet time (no node timestamp, so
+//! its audio sits on server or receipt time) is assessed as an unknown clock:
+//! its frames' claimed class says nothing about where its audio landed.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     sync::Arc,
 };
 
@@ -35,6 +45,9 @@ struct NodeClockPolicy {
     step_threshold_seconds: f64,
     step_recovery_holdoff_seconds: f64,
     max_timeline_residual_seconds: f64,
+    residual_window_frames: usize,
+    residual_percentile: f64,
+    residual_over_limit_clear_ratio: f64,
     stale_after_ns: u128,
 }
 
@@ -51,6 +64,13 @@ impl NodeClockPolicy {
                 .localization_timestamp_step_recovery_holdoff_seconds,
             max_timeline_residual_seconds: config
                 .localization_cross_node_max_timeline_residual_seconds,
+            residual_window_frames: config.localization_timeline_residual_window_frames.max(1),
+            residual_percentile: config
+                .localization_timeline_residual_percentile
+                .clamp(0.0, 100.0),
+            residual_over_limit_clear_ratio: config
+                .localization_timeline_residual_over_limit_clear_ratio
+                .clamp(0.0, 1.0),
             stale_after_ns: (config.localization_sensor_registry_stale_seconds.max(0.0)
                 * NANOSECONDS_PER_SECOND_F64) as u128,
         }
@@ -87,10 +107,15 @@ struct NodeClockState {
     detector: TimestampStepDetector,
     time_quality: NodeTimeQuality,
     reported_holdover_error_seconds: Option<f64>,
+    /// Signed per-frame residuals, newest last, at most the policy window.
+    recent_residuals_seconds: VecDeque<f64>,
+    /// Robust aggregate of `recent_residuals_seconds` (`None` when empty).
     timeline_residual_seconds: Option<f64>,
+    residual_over_hard_limit: bool,
     last_timestamp_step_ns: Option<i64>,
     timestamp_step_count: u32,
     step_penalty: Option<StepPenalty>,
+    latest_segment_on_packet_time: bool,
     last_heard_ns: u128,
 }
 
@@ -100,11 +125,46 @@ impl NodeClockState {
             detector: TimestampStepDetector::new(policy.step_threshold_seconds),
             time_quality: NodeTimeQuality::Unknown,
             reported_holdover_error_seconds: None,
+            recent_residuals_seconds: VecDeque::new(),
             timeline_residual_seconds: None,
+            residual_over_hard_limit: false,
             last_timestamp_step_ns: None,
             timestamp_step_count: 0,
             step_penalty: None,
+            latest_segment_on_packet_time: true,
             last_heard_ns: 0,
+        }
+    }
+
+    /// Forgets the measured residual: it was measured against a timeline
+    /// that no longer describes this node's audio.
+    fn clear_residual(&mut self) {
+        self.recent_residuals_seconds.clear();
+        self.timeline_residual_seconds = None;
+        self.residual_over_hard_limit = false;
+    }
+
+    /// Adds one frame's residual and re-evaluates the aggregate and the
+    /// flag: it sets above the hard limit and clears only once the aggregate
+    /// is back under `limit * clear_ratio`.
+    fn record_residual(&mut self, residual_seconds: f64, policy: &NodeClockPolicy) {
+        if self.recent_residuals_seconds.len() == policy.residual_window_frames {
+            self.recent_residuals_seconds.pop_front();
+        }
+        self.recent_residuals_seconds.push_back(residual_seconds);
+        let aggregate_seconds =
+            residual_at_percentile(&self.recent_residuals_seconds, policy.residual_percentile);
+        self.timeline_residual_seconds = aggregate_seconds;
+        let Some(aggregate_seconds) = aggregate_seconds else {
+            return;
+        };
+        let magnitude_seconds = aggregate_seconds.abs();
+        if magnitude_seconds > policy.max_timeline_residual_seconds {
+            self.residual_over_hard_limit = true;
+        } else if magnitude_seconds
+            <= policy.max_timeline_residual_seconds * policy.residual_over_limit_clear_ratio
+        {
+            self.residual_over_hard_limit = false;
         }
     }
 
@@ -166,14 +226,14 @@ impl NodeClockState {
             Some(TimingDiscontinuity::BootSessionChange) => {
                 // The old session's residual says nothing about the new clock,
                 // and a reboot has no step size: hold the unknown default.
-                self.timeline_residual_seconds = None;
+                self.clear_residual();
                 self.raise_step_penalty(policy.unknown_uncertainty_seconds);
             }
             None => {}
         }
         if let Some(timeline) = observation.buffer_timeline {
             let residual_seconds = timeline.residual_ns(&point) as f64 / NANOSECONDS_PER_SECOND_F64;
-            self.timeline_residual_seconds = Some(residual_seconds);
+            self.record_residual(residual_seconds, policy);
             self.advance_step_recovery(
                 residual_seconds,
                 point.start_sample_index,
@@ -184,6 +244,17 @@ impl NodeClockState {
     }
 
     fn assessment(&self, node_id: &str, policy: &NodeClockPolicy) -> NodeClockAssessment {
+        if !self.latest_segment_on_packet_time {
+            return NodeClockAssessment {
+                node_id: node_id.to_string(),
+                time_quality: NodeTimeQuality::Unknown,
+                timing_uncertainty_seconds: policy.unknown_uncertainty_seconds,
+                timeline_residual_seconds: None,
+                last_timestamp_step_ns: self.last_timestamp_step_ns,
+                timestamp_step_count: self.timestamp_step_count,
+                residual_over_hard_limit: false,
+            };
+        }
         let measured_residual_seconds = self.timeline_residual_seconds.map(f64::abs);
         let timing_uncertainty_seconds = [
             Some(policy.class_default_seconds(self.time_quality)),
@@ -201,10 +272,21 @@ impl NodeClockState {
             timeline_residual_seconds: self.timeline_residual_seconds,
             last_timestamp_step_ns: self.last_timestamp_step_ns,
             timestamp_step_count: self.timestamp_step_count,
-            residual_over_hard_limit: measured_residual_seconds
-                .is_some_and(|residual| residual > policy.max_timeline_residual_seconds),
+            residual_over_hard_limit: self.residual_over_hard_limit,
         }
     }
+}
+
+/// The residual whose magnitude sits at `percentile` (nearest rank) of the
+/// window, sign kept: 50 is the median, so one outlier frame never decides it.
+fn residual_at_percentile(residuals_seconds: &VecDeque<f64>, percentile: f64) -> Option<f64> {
+    let mut by_magnitude: Vec<f64> = residuals_seconds.iter().copied().collect();
+    if by_magnitude.is_empty() {
+        return None;
+    }
+    by_magnitude.sort_by(|left, right| left.abs().total_cmp(&right.abs()));
+    let rank = ((percentile / 100.0) * (by_magnitude.len() - 1) as f64).round() as usize;
+    Some(by_magnitude[rank.min(by_magnitude.len() - 1)])
 }
 
 /// One buffered segment of one node.
@@ -214,6 +296,10 @@ pub(crate) struct NodeFrameTimingObservation<'a> {
     /// `None` when the segment's sample indices are incomplete: steps need them.
     pub(crate) segment_start_sample_index: Option<i64>,
     pub(crate) sample_rate_hz: u32,
+    /// Whether this segment's audio was placed by node packet time. When it
+    /// was not (no node timestamp: server or receipt time), the node is
+    /// assessed as an unknown clock until a segment is on packet time again.
+    pub(crate) segment_on_packet_time: bool,
     /// The node's buffer timeline after this segment was appended; `None`
     /// when that buffer is not on packet time (receipt-time alignment).
     pub(crate) buffer_timeline: Option<NominalSampleTimeline>,
@@ -259,6 +345,10 @@ impl NodeClockQualityTracker {
             .entry(observation.node_id.to_string())
             .or_insert_with(|| NodeClockState::new(policy));
         state.last_heard_ns = observation.now_ns;
+        if !observation.segment_on_packet_time {
+            state.clear_residual();
+        }
+        state.latest_segment_on_packet_time = observation.segment_on_packet_time;
         for frame in observation.frame_timing {
             let point = observation
                 .segment_start_sample_index

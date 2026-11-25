@@ -98,19 +98,6 @@ fn exclusions(admission: &SolvePairAdmission) -> Vec<(usize, usize, SolveExclusi
         .collect()
 }
 
-fn pair_tdoa(ch_a: usize, ch_b: usize) -> PairTdoa {
-    PairTdoa {
-        ch_a,
-        ch_b,
-        tdoa: minimappr_core::gcc_phat::TdoaResult {
-            delay_samples: 0.0,
-            lag_seconds: 0.0,
-            peak_value: 1.0,
-            confidence: 1.0,
-        },
-    }
-}
-
 #[test]
 fn short_baseline_pair_is_excluded_and_rate_mismatched_sensor_contributes_no_pairs() {
     let admission = SolvePairAdmission::compute(
@@ -171,7 +158,7 @@ fn residual_over_limit_drops_only_that_nodes_cross_node_pairs() {
     );
     assert!(
         admission.admits_pair(0, 1),
-        "own intra-node pair still solves"
+        "own intra-node pair stays admitted"
     );
     assert_eq!(admission.render_excluded_sensor_indices(&layout), [0, 1]);
 }
@@ -245,7 +232,7 @@ fn a_node_without_clock_evidence_is_timed_as_an_unknown_clock() {
 }
 
 #[test]
-fn covariance_inflation_uses_the_worst_correlated_cross_node_pair() {
+fn per_channel_clock_offsets_follow_the_layout_nodes() {
     let mut node_clock = gps_locked_clocks();
     node_clock.insert(
         "point-c".to_string(),
@@ -257,20 +244,211 @@ fn covariance_inflation_uses_the_worst_correlated_cross_node_pair() {
         &node_clock,
         &LocalizationSolveConfig::default(),
     );
-    assert_eq!(
-        admission.cross_node_timing_variance_m2(&[pair_tdoa(0, 1)], SOUND_SPEED_MPS),
-        0.0,
-        "intra-node pairs share one clock"
+    let clocks = admission.channel_clock_offsets();
+    assert_eq!(clocks.clock_index_by_channel, [0, 0, 1, 2, 3]);
+    assert_eq!(clocks.clock_offset_std_seconds, [1e-6, 1e-6, 0.002, 1e-6]);
+}
+
+const FAR_NODE_SPREAD_M: f64 = 100.0;
+/// Sirith tetra offsets about the node origin.
+const TETRA_OFFSETS_M: [[f64; 3]; 4] = [
+    [-0.016238, 0.025000, -0.010205],
+    [0.027063, 0.000000, -0.010205],
+    [-0.016238, -0.025000, -0.010205],
+    [0.005413, 0.000000, 0.030615],
+];
+
+/// Reporter tetra-a at the origin (channels 0-3), tetra-b 100 m east (4-7).
+fn far_two_tetra_layout(reporting_node_id: &str) -> SolveSensorLayout {
+    let tetra = |node_id: &str, origin_x_m: f64| {
+        TETRA_OFFSETS_M
+            .iter()
+            .enumerate()
+            .map(|(channel, offset)| {
+                sensor(
+                    node_id,
+                    channel,
+                    [offset[0] + origin_x_m, offset[1], offset[2]],
+                    RATE_HZ,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut sensors = tetra("tetra-a", 0.0);
+    sensors.extend(tetra("tetra-b", FAR_NODE_SPREAD_M));
+    SolveSensorLayout::from_parts(SolveSensorLayoutParts {
+        sensors,
+        layout_revision: 1,
+        geometry_push_revision: None,
+        coordinate_frame: SolveCoordinateFrame {
+            frame_id: None,
+            kind: CoordinateFrameKind::ExplicitClusterPositions,
+            origin: None,
+            projection: None,
+        },
+        buffer_scope: SolveBufferScope::ExplicitCluster,
+        cluster_id: Some("cluster".to_string()),
+        reporting_node_id: reporting_node_id.to_string(),
+        node_local_routing_reason: None,
+        solve_sample_rate_hz: RATE_HZ,
+        half_space_by_node: BTreeMap::new(),
+        geometry_unusable_node_id: None,
+        max_solve_sensors: 16,
+    })
+}
+
+const BOTH_TETRAS: [usize; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
+
+fn far_tetra_b_over_the_limit() -> NodeClockAssessments {
+    clocks(&[
+        assessment("tetra-a", NodeTimeQuality::GpsLocked, 1e-6, false),
+        assessment("tetra-b", NodeTimeQuality::NtpDisciplined, 0.03, true),
+    ])
+}
+
+#[test]
+fn a_timeline_rejected_far_node_leaves_the_solve_geometry() {
+    let config = LocalizationSolveConfig::default();
+    let admission = SolvePairAdmission::compute(
+        &far_two_tetra_layout("tetra-a"),
+        &BOTH_TETRAS,
+        &far_tetra_b_over_the_limit(),
+        &config,
     );
-    let worst_seconds = admission.pair_timing_uncertainty_seconds(0, 3);
-    let variance_m2 = admission.cross_node_timing_variance_m2(
-        &[pair_tdoa(0, 1), pair_tdoa(0, 2), pair_tdoa(0, 3)],
+    assert_eq!(admission.solve_sensor_indices(), [0, 1, 2, 3]);
+    let timeline_exclusions = exclusions(&admission)
+        .into_iter()
+        .filter(|(_, _, reason)| *reason == SolveExclusionReason::TimelineResidualOverLimit)
+        .count();
+    assert_eq!(timeline_exclusions, 16, "provenance keeps every a-b pair");
+    assert!(admission.admits_pair(4, 5), "b's own pairs stay admitted");
+
+    let admission_reported_by_b = SolvePairAdmission::compute(
+        &far_two_tetra_layout("tetra-b"),
+        &BOTH_TETRAS,
+        &far_tetra_b_over_the_limit(),
+        &config,
+    );
+    assert_eq!(admission_reported_by_b.solve_sensor_indices(), [4, 5, 6, 7]);
+
+    let healthy = SolvePairAdmission::compute(
+        &far_two_tetra_layout("tetra-a"),
+        &BOTH_TETRAS,
+        &NodeClockAssessments::new(),
+        &config,
+    );
+    assert_eq!(healthy.solve_sensor_indices(), BOTH_TETRAS);
+}
+
+#[test]
+fn a_reporter_without_coverage_solves_on_the_largest_connected_group() {
+    let admission = SolvePairAdmission::compute(
+        &far_two_tetra_layout("tetra-a"),
+        &[4, 5, 6, 7],
+        &far_tetra_b_over_the_limit(),
+        &LocalizationSolveConfig::default(),
+    );
+    assert_eq!(admission.solve_sensor_indices(), [4, 5, 6, 7]);
+}
+
+/// White noise from `source_m`, delayed to every channel of `positions_m`.
+fn point_source_windows(source_m: [f32; 3], positions_m: &[[f32; 3]]) -> Vec<Vec<f32>> {
+    const WINDOW_SAMPLES: usize = 4_096;
+    let delays: Vec<f32> = positions_m
+        .iter()
+        .map(|position| {
+            let distance_m = (0..3)
+                .map(|axis| (source_m[axis] - position[axis]).powi(2))
+                .sum::<f32>()
+                .sqrt();
+            distance_m / SOUND_SPEED_MPS * RATE_HZ as f32
+        })
+        .collect();
+    let earliest = delays.iter().copied().fold(f32::INFINITY, f32::min);
+    let latest = delays.iter().copied().fold(0.0_f32, f32::max);
+    let mut seed = 0x1357_9bdf_u32;
+    let source: Vec<f32> = (0..WINDOW_SAMPLES + (latest - earliest).ceil() as usize + 2)
+        .map(|_| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed as i32 as f32) / (i32::MAX as f32)
+        })
+        .collect();
+    delays
+        .iter()
+        .map(|delay| {
+            let shift = delay - earliest;
+            (0..WINDOW_SAMPLES)
+                .map(|index| {
+                    let position = index as f32 - shift;
+                    if position < 0.0 {
+                        return 0.0;
+                    }
+                    let lower = position.floor() as usize;
+                    let fraction = position - lower as f32;
+                    source[lower] * (1.0 - fraction) + source[lower + 1] * fraction
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn srp_on_the_reporter_component_solves_around_the_reporter_not_the_node_midpoint() {
+    use crate::srp_phat::{
+        estimate_tetrahedral_steering_with_solve_constraints, SolveChannelConstraints,
+        SrpPhatConfig,
+    };
+    let layout = far_two_tetra_layout("tetra-a");
+    let admission = SolvePairAdmission::compute(
+        &layout,
+        &BOTH_TETRAS,
+        &far_tetra_b_over_the_limit(),
+        &LocalizationSolveConfig::default(),
+    );
+    let source_m = [-3.0_f32, 4.0, 0.5];
+    // Tetra b's audio is irrelevant to the solve; it hears the same source
+    // on a clock that is known to be wrong.
+    let windows = point_source_windows(source_m, &layout.positions_m);
+    let admits_pair = |a: usize, b: usize| admission.admits_pair(a, b);
+    let evaluation = estimate_tetrahedral_steering_with_solve_constraints(
+        &windows,
+        admission.solve_sensor_indices(),
+        &layout.positions_m,
+        RATE_HZ,
         SOUND_SPEED_MPS,
+        SrpPhatConfig {
+            half_space: layout.solve_half_space(admission.solve_sensor_indices()),
+            ..SrpPhatConfig::default()
+        },
+        SolveChannelConstraints {
+            admitted_pair_filter: Some(&admits_pair),
+            channel_clock_offsets: Some(admission.channel_clock_offsets()),
+        },
     );
-    let expected_m2 = (f64::from(SOUND_SPEED_MPS) * worst_seconds).powi(2);
-    assert!((variance_m2 - expected_m2).abs() < 1e-9);
     assert!(
-        variance_m2 > 0.4,
-        "2 ms of NTP error is ~0.7 m of range difference"
+        evaluation
+            .pair_tdoas
+            .iter()
+            .all(|pair| pair.ch_a < 4 && pair.ch_b < 4),
+        "only the reporter's pairs are correlated"
+    );
+    let localization = evaluation.localization;
+    let position_m = localization
+        .position_m
+        .expect("the reporter's array solves");
+    let source_norm = (source_m.iter().map(|axis| axis * axis).sum::<f32>()).sqrt();
+    let bearing_cosine = (0..3)
+        .map(|axis| localization.steering_direction[axis] * source_m[axis] / source_norm)
+        .sum::<f32>();
+    assert!(
+        bearing_cosine > 0.95,
+        "steering measured from the reporter, got {:?}",
+        localization.steering_direction
+    );
+    let covariance = localization.position_covariance_m2.expect("covariance");
+    let lateral_std_m = covariance[0][0].max(covariance[1][1]).sqrt();
+    assert!(
+        lateral_std_m < 25.0,
+        "aperture no longer spans the 100 m node spread: {lateral_std_m} m at {position_m:?}"
     );
 }

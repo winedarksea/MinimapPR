@@ -13,7 +13,8 @@ use minimappr_core::localization_sensor_entry::SiteGeometryPush;
 /// microsecond-class; NTP is millisecond-class; a free-running clock is only
 /// bounded by how long ago it was last set, so it gets a deliberately wide
 /// default that still admits its pairs (weak clocks widen, never exclude).
-const DEFAULT_CLOCK_CLASS_UNCERTAINTY_JSON: &str = r#"{"gps_locked":1e-6,"gps_holdover":1e-4,"ntp_disciplined":0.002,"free_running":0.05}"#;
+const DEFAULT_CLOCK_CLASS_UNCERTAINTY_JSON: &str =
+    r#"{"gps_locked":1e-6,"gps_holdover":1e-4,"ntp_disciplined":0.002,"free_running":0.05}"#;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClockClassUncertaintySeconds(pub BTreeMap<String, f64>);
@@ -23,6 +24,15 @@ pub struct LocalizationSolveConfig {
     pub localization_max_solve_sensors: usize,
     pub localization_min_pair_baseline_m: f32,
     pub localization_cross_node_max_timeline_residual_seconds: f64,
+    /// Frames of per-frame timeline residual the node clock tracker keeps;
+    /// the reported residual is a percentile over them, so one jittery frame
+    /// cannot flip the hard-limit gate.
+    pub localization_timeline_residual_window_frames: usize,
+    /// Percentile (0-100, nearest rank) of the windowed |residual|; 50 is the median.
+    pub localization_timeline_residual_percentile: f64,
+    /// Hysteresis: once over the hard limit, the flag clears only when the
+    /// windowed residual falls to `limit * ratio` (in 0-1; 1 = no hysteresis).
+    pub localization_timeline_residual_over_limit_clear_ratio: f64,
     /// Replaces (does not merge with) the defaults; a class missing from the
     /// map uses `localization_clock_unknown_uncertainty_seconds`.
     pub localization_clock_class_uncertainty_seconds: ClockClassUncertaintySeconds,
@@ -46,6 +56,9 @@ impl Default for LocalizationSolveConfig {
             localization_max_solve_sensors: 16,
             localization_min_pair_baseline_m: 0.02,
             localization_cross_node_max_timeline_residual_seconds: 0.010,
+            localization_timeline_residual_window_frames: 16,
+            localization_timeline_residual_percentile: 50.0,
+            localization_timeline_residual_over_limit_clear_ratio: 0.8,
             localization_clock_class_uncertainty_seconds: parse_clock_class_uncertainty_json(
                 DEFAULT_CLOCK_CLASS_UNCERTAINTY_JSON,
             )
@@ -84,6 +97,27 @@ pub struct LocalizationSolveArgs {
         default_value_t = 0.010
     )]
     localization_cross_node_max_timeline_residual_seconds: f64,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_TIMELINE_RESIDUAL_WINDOW_FRAMES",
+        default_value_t = 16
+    )]
+    localization_timeline_residual_window_frames: usize,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_TIMELINE_RESIDUAL_PERCENTILE",
+        default_value_t = 50.0
+    )]
+    localization_timeline_residual_percentile: f64,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_TIMELINE_RESIDUAL_OVER_LIMIT_CLEAR_RATIO",
+        default_value_t = 0.8
+    )]
+    localization_timeline_residual_over_limit_clear_ratio: f64,
 
     #[arg(
         long,
@@ -155,6 +189,12 @@ impl LocalizationSolveArgs {
             localization_min_pair_baseline_m: self.localization_min_pair_baseline_m,
             localization_cross_node_max_timeline_residual_seconds: self
                 .localization_cross_node_max_timeline_residual_seconds,
+            localization_timeline_residual_window_frames: self
+                .localization_timeline_residual_window_frames,
+            localization_timeline_residual_percentile: self
+                .localization_timeline_residual_percentile,
+            localization_timeline_residual_over_limit_clear_ratio: self
+                .localization_timeline_residual_over_limit_clear_ratio,
             localization_clock_class_uncertainty_seconds: self
                 .localization_clock_class_uncertainty_seconds,
             localization_clock_unknown_uncertainty_seconds: self
