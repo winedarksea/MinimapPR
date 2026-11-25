@@ -220,9 +220,6 @@ pub fn finalize_cartesian_solution(
         ),
         None => Matrix3::identity() * unobservable_position_std_m.powi(2),
     };
-    if let Some(node_position_term_m2) = node_position_covariance_m2(inputs) {
-        covariance_m2 += node_position_term_m2;
-    }
     let radial_axis = (best_position - inputs.centroid_m) / solved_range_m.max(EPSILON);
     let radial_outer = radial_axis * radial_axis.transpose();
     if let Some(radial_std_m) = inputs.radial_refinement_std_m {
@@ -325,6 +322,12 @@ pub fn finalize_cartesian_solution(
     } else {
         f64::INFINITY
     };
+    // Added last (Python `solve_cartesian_tdoa` does the same): a rigid
+    // placement error carries no range information, so it must not raise the
+    // eigenvalue-ratio observability above.
+    if let Some(node_position_term_m2) = node_position_covariance_m2(inputs) {
+        covariance_m2 += node_position_term_m2;
+    }
     Ok(CartesianTdoaSolve {
         position_m: best_position,
         covariance_m2,

@@ -120,7 +120,7 @@ DEFAULT_DIAGONAL_CELL_IDS = (
     "10m-single_planar-ntp_timed-hand_measured",
     "10m-planar_point_coplanar-gps_locked-gps",
     "10m-four_node_spread-ntp_timed-gps",
-    "100m-four_node_spread-gps_locked-hand_measured",
+    "100m-single_tetra-gps_locked-hand_measured",
     "1000m-four_node_spread-gps_locked-gps",
 )
 
@@ -131,8 +131,18 @@ DEFAULT_DIAGONAL_CELL_IDS = (
 # Every reason below is an open defect, not pending milestone-2 work: remove an
 # entry when the fix lands (strict: an unexpected pass fails).
 _AFTER_M2 = "open after milestone 2 (R4/R5/R7/P9 on base)"
-_HAND_POSITION_NOT_WIDENED = (
-    f"{_AFTER_M2}: a hand-measured position_std_m of 0.3 m does not widen the cross-node solve covariance"
+# M4 made position_std_m widen the published covariance (both solvers); the
+# hand-measured cells below still fail, but no longer for an overconfident
+# covariance.
+_AFTER_M4 = "open after M4 (position_std_m widens the covariance)"
+_HAND_MEASURED_RANGE_CLAIM = (
+    f"{_AFTER_M4}: the stated covariance now contains the truth, but the solve still reports range_refined "
+    "with range observability over the weak threshold, a range claim the oracle allows only as heard "
+    "(0.3 m placement errors at 1 m); the range-claim rule ignores the stated position accuracy"
+)
+_HAND_MEASURED_SPREAD_RANGE = (
+    f"{_AFTER_M4}: the four-node solve on 0.3 m hand-measured positions at 10 m keeps the bearing but reports "
+    "weak range observability (a bearing-only claim) where the oracle guarantees a 3-D fix"
 )
 _NTP_CROSS_NODE_UNUSABLE = f"{_AFTER_M2}: the NTP-timed (2 ms class) cross-node solve is still unusable or overconfident"
 _PLANAR_FAR_FIELD = (
@@ -158,10 +168,6 @@ KNOWN_PIPELINE_GAPS: dict[str, str] = {
     "10m-four_node_spread-ntp_timed-gps": _gap(
         _NTP_CROSS_NODE_UNUSABLE, "stored omni (render fallback); earlier 6.8 m off at 6.2 deg; oracle guarantees a 3-D fix"
     ),
-    "100m-four_node_spread-gps_locked-hand_measured": _gap(
-        _SPREAD_FAR_FIELD + "; also " + _HAND_POSITION_NOT_WIDENED,
-        "stored omni; earlier 85 m off with bearing 45 deg wrong vs stated angular std 17 deg",
-    ),
     "1000m-four_node_spread-gps_locked-gps": _gap(
         _SPREAD_FAR_FIELD,
         "bearing right (0.03 deg) but 458 m short; stated angular std 0.01 deg vs 0.77 deg elevation error "
@@ -169,13 +175,11 @@ KNOWN_PIPELINE_GAPS: dict[str, str] = {
     ),
     # -- near range, cross-node, weak clock / hand-measured --
     "1m-planar_point_coplanar-gps_locked-hand_measured": _gap(
-        _HAND_POSITION_NOT_WIDENED, "claims a 3-D fix (0.28 m off) the oracle allows only as heard"
+        _HAND_MEASURED_RANGE_CLAIM,
+        "claims RANGE_RESOLVED (0.28 m off, contained); before M4 it claimed a 3-D fix on a 0.05 m covariance",
     ),
     "1m-planar_point_coplanar-ntp_timed-gps": _gap(
         _COMPACT_PLANAR_POINT_WEAK_CLOCK, "1.74 m off vs stated std [0.20, 0.14, 0.25] m (Mahalanobis^2 47 > 16.3)"
-    ),
-    "1m-four_node_spread-gps_locked-hand_measured": _gap(
-        _HAND_POSITION_NOT_WIDENED, "0.31 m off vs stated std 0.05 m (Mahalanobis^2 39 > 16.3)"
     ),
     "1m-four_node_spread-ntp_timed-gps": _gap(
         _NTP_CROSS_NODE_UNUSABLE, "no stored detection covers the event (twice); earlier 1.5 m off vs stated 0.05 m"
@@ -184,7 +188,7 @@ KNOWN_PIPELINE_GAPS: dict[str, str] = {
         _COMPACT_PLANAR_POINT_WEAK_CLOCK, "9.4 m off vs stated std [0.18, 0.13, 0.24] m, claims a 3-D fix"
     ),
     "10m-four_node_spread-gps_locked-hand_measured": _gap(
-        _HAND_POSITION_NOT_WIDENED, "2.1 m off, bearing-only; oracle guarantees a 3-D fix"
+        _HAND_MEASURED_SPREAD_RANGE, "2.1 m off, bearing 0.3 deg, bearing-only claim (3 of 3 runs on the M4 head)"
     ),
     "10m-four_node_spread-ntp_timed-hand_measured": _gap(
         _NTP_CROSS_NODE_UNUSABLE, "stored omni (render fallback); oracle guarantees a 3-D fix"
@@ -215,15 +219,17 @@ KNOWN_PIPELINE_GAPS: dict[str, str] = {
     "100m-four_node_spread-gps_locked-gps": _gap(_SPREAD_FAR_FIELD, "no stored detection covers the event"),
     "100m-four_node_spread-ntp_timed-gps": _gap(_SPREAD_FAR_FIELD, "stored omni"),
     "100m-four_node_spread-ntp_timed-hand_measured": _gap(_SPREAD_FAR_FIELD, "stored omni"),
-    "1000m-four_node_spread-gps_locked-hand_measured": _gap(
-        _SPREAD_FAR_FIELD, "948 m off; elevation error 9.8 deg vs stated angular std 1.2-14 deg (Mahalanobis^2 116)"
-    ),
     "1000m-four_node_spread-ntp_timed-gps": _gap(_SPREAD_FAR_FIELD, "stored omni"),
     "1000m-four_node_spread-ntp_timed-hand_measured": _gap(_SPREAD_FAR_FIELD, "stored omni"),
 }
 # Cells that both passed and failed across full-matrix runs (opt-in only):
 # non-strict, so they neither hide nor break the run.
 KNOWN_FLAKY_CELLS: dict[str, str] = {
+    "100m-four_node_spread-gps_locked-hand_measured": (
+        f"flaky after M4 ({_SPREAD_FAR_FIELD}): passes when tetra-b reports (65 m off, bearing right, inside the "
+        "now-widened covariance), stored omni (render fallback) when tetra-d reports; 1 of 3 runs on the M4 head "
+        "passed, so it left the default diagonal (100m-single_tetra-gps_locked-hand_measured took its place)"
+    ),
     "1m-planar_point_coplanar-gps_locked-gps": "flaky: the 6-sensor solve's range claim comes and goes run to run",
     "1m-four_node_spread-ntp_timed-hand_measured": (
         "flaky: sometimes stored omni (passes), sometimes a 0.4-1.2 m-off 3-D fix with stated std 0.05-0.08 m"

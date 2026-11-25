@@ -261,3 +261,55 @@ async def test_registry_states_the_same_accuracy_the_geometry_push_sends() -> No
         "hand-default:ch0": DEFAULT_OPERATOR_PLACEMENT_POSITION_STD_M,
         "estimated:ch0": 0.7,
     }
+
+
+def test_stated_accuracy_widens_the_error_but_never_changes_the_claim() -> None:
+    """The term is added after observability and confidence, as the sidecar
+    adds it after its SRP observability: a near-isotropic placement error
+    carries no range information, so it must not lift the eigenvalue-ratio
+    range observability and turn a bearing into a range claim (E5's 1 m
+    planar + point cell did exactly that before)."""
+    sensor_ids = [f"{node_id}:ch0" for node_id in POINT_NODE_POSITIONS_M]
+    positions = {f"{node_id}:ch0": np.asarray(position) for node_id, position in POINT_NODE_POSITIONS_M.items()}
+    source_m = np.asarray([30.0, 25.0, 4.0])
+    pair_tdoas = [
+        {
+            "ch_a": index_a,
+            "ch_b": index_b,
+            "lag_seconds": float(
+                (np.linalg.norm(source_m - positions[sensor_a]) - np.linalg.norm(source_m - positions[sensor_b]))
+                / SOUND_SPEED_MPS
+            ),
+            "confidence": 0.9,
+            "timing_uncertainty_seconds": 1.4e-6,
+        }
+        for (index_a, sensor_a), (index_b, sensor_b) in itertools.combinations(enumerate(sensor_ids), 2)
+    ]
+
+    def solve(uncertainty):
+        return solve_localization_from_rust_tdoas(
+            sensor_positions=positions,
+            ordered_sensor_ids=sensor_ids,
+            pair_tdoas=pair_tdoas,
+            steering_direction=None,
+            sound_speed_mps=SOUND_SPEED_MPS,
+            sample_rate_hz=SAMPLE_RATE_HZ,
+            interpolation_factor=INTERPOLATION_FACTOR,
+            far_field_default_range_m=50.0,
+            node_position_uncertainty=uncertainty,
+        )
+
+    timing_only = solve(None)
+    widened = solve(
+        NodePositionUncertainty.from_sensor_position_std(
+            {sensor_id: sensor_id.split(":")[0] for sensor_id in sensor_ids},
+            {sensor_id: HAND_MEASURED_STD_M for sensor_id in sensor_ids},
+        )
+    )
+    assert widened.position_m == timing_only.position_m
+    assert widened.range_projection_mode == timing_only.range_projection_mode
+    assert widened.range_observability == timing_only.range_observability
+    assert widened.confidence == timing_only.confidence
+    assert np.trace(np.asarray(widened.position_covariance_m2)) > np.trace(
+        np.asarray(timing_only.position_covariance_m2)
+    ) + HAND_MEASURED_STD_M**2

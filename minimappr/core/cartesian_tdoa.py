@@ -512,6 +512,7 @@ def solve_cartesian_tdoa(
         minimum_position_std_m=minimum_position_std_m,
         unobservable_position_std_m=unobservable_position_std_m,
     )
+    node_position_term_m2 = None
     if node_position_uncertainty is not None and has_tdoa_measurements:
         constraint_jacobian = jacobian[len(measurements) :]
         node_position_term_m2 = pair_measurement_node_position_covariance_m2(
@@ -522,8 +523,6 @@ def solve_cartesian_tdoa(
             sound_speed_mps=sound_speed_mps,
             uncertainty=node_position_uncertainty,
         )
-        if node_position_term_m2 is not None:
-            covariance_m2 = covariance_m2 + node_position_term_m2
     radial_axis = (best_position - centroid_m) / max(solved_range_m, EPSILON)
     if radial_refinement_std_m is not None:
         radial_variance_m2 = float(radial_axis @ covariance_m2 @ radial_axis)
@@ -621,6 +620,12 @@ def solve_cartesian_tdoa(
         if sv > EPSILON
     ]
     gdop = float(math.sqrt(sum(inverse_squared))) if len(inverse_squared) == 3 else float("inf")
+    # Added last, as the sidecar adds it after its SRP observability: a rigid
+    # placement error widens the error but carries no range information, and
+    # its near-isotropic shape would otherwise inflate the eigenvalue-ratio
+    # observability and turn a bearing into a range claim.
+    if node_position_term_m2 is not None:
+        covariance_m2 = covariance_m2 + node_position_term_m2
     return CartesianTdoaSolve(
         position_m=best_position,
         covariance_m2=covariance_m2,
