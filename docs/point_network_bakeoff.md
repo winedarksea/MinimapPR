@@ -192,20 +192,24 @@ The bake-off changed no production behaviour. These findings come from it:
 1. **The GCC-PHAT front-end loses most point-network calls.** The repaired
    front-end raises recall from 0.302 to 0.453 and cuts single-bird p90 error
    from 66.6 m to 7.8 m with the same solver. Lifting the lag cap alone does
-   little (0.313), so the gain comes from the two causes below. A
-   default-suite `#[ignore]`d test,
-   `easy_scene_is_localized_by_production`, reproduces both on six surveyed
-   GPS nodes over a 60 m site with one loud FM sweep.
+   little (0.313), so the gain comes from the two causes below. Both were
+   diagnosed during development on a scene with six surveyed GPS nodes over
+   a 60 m site and one loud 0.44 s FM sweep, longer than the 0.3 s event
+   window. The `#[ignore]`d test `easy_scene_is_localized_by_production`
+   keeps that configuration. On its current scene, the production fix lands
+   10 m off, outside the 6 m gate, while the repaired front-end and onset
+   clustering both pass.
    - **Band ceiling.** The band is 50–3430 Hz (`localization_band_hz`, chosen
      to stop PHAT reversing bearings on the compact tetra). It discards most
-     of the energy of a 3.4–7 kHz call. On that scene every pair lag came out
-     wrong. With the band widened to 11 kHz and the window tapered, the
-     Cartesian solve landed 0.4 m from the truth.
+     of the energy of a 3.4–7 kHz call. On the development scene every pair
+     lag came out wrong, and the re-solve diverged. With the band widened to
+     11 kHz and the window tapered, the same Cartesian solve landed 0.4 m
+     from the truth.
    - **Zero-lag bias from a rectangular cut.** The event window is centred on
      the trigger, so it often ends while a call is still loud at every node.
      That cut is the same broadband step at the same sample index on every
-     channel, and PHAT whitening makes it the strongest feature. On the easy
-     scene with the full band, every cross-node pair read a lag of under
+     channel, and PHAT whitening makes it the strongest feature. On the
+     development scene with the full band, every cross-node pair read a lag of under
      0.2 ms against true lags of 3–70 ms. A plain time-domain
      cross-correlation found the true lags, and so did a 20 % Tukey taper.
      A compact array never shows this, because its true lags are near zero
