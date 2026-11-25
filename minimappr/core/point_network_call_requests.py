@@ -17,6 +17,7 @@ Base clip (what the path classifies without P7, on the reference timeline):
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -36,6 +37,8 @@ if TYPE_CHECKING:
     from minimappr.core.fusion_node import FusionNode
     from minimappr.core.fusion_stage_carriers import LocalizedCandidate
     from minimappr.core.localized_render_handoff_hooks import HandoffSolveGeometry
+
+logger = logging.getLogger(__name__)
 
 
 def _site_position(value) -> np.ndarray:
@@ -109,6 +112,34 @@ def localized_call_for_rust_solve(
     )
 
 
+async def _rust_render_sensor_node_ids(
+    host: "FusionNode", payload: "LocalizedClassifierRenderRequest", geometry: "HandoffSolveGeometry"
+) -> dict[str, str]:
+    """Each selected sensor's node: the solve's provenance, else (no solve) the registry.
+
+    The manifest geometry resolver selects only provenance sensors, so a
+    selected sensor missing from them means a geometry seam broke that
+    invariant. It is left out, counted and logged rather than raising (which
+    lost the render); the caller then declines P7, as the Python path does for
+    a sensor the registry does not know: it could be a second sensor of a
+    listed node, so the solve is not provably a point network.
+    """
+    selected_sensor_ids = list(geometry.selected_sensor_ids)
+    solve = payload.localization_solve
+    if solve is None:
+        resolved = await host.registry.sensor_node_ids(selected_sensor_ids)
+    else:
+        resolved = {sensor.sensor_id: sensor.node_id for sensor in solve.provenance.sensors}
+    unresolved_sensor_ids = [sensor_id for sensor_id in selected_sensor_ids if sensor_id not in resolved]
+    if unresolved_sensor_ids:
+        host._metrics.point_network_request_unresolved_sensor_count += len(unresolved_sensor_ids)
+        logger.warning(
+            "Rust render selected a sensor with no known node; not classified as a point network",
+            extra={"manifest_id": payload.manifest_id, "unresolved_sensor_ids": unresolved_sensor_ids},
+        )
+    return {sensor_id: resolved[sensor_id] for sensor_id in selected_sensor_ids if sensor_id in resolved}
+
+
 async def point_network_request_for_rust_render(
     host: "FusionNode",
     *,
@@ -127,11 +158,7 @@ async def point_network_request_for_rust_render(
     if call is None:
         return None
     solve = payload.localization_solve
-    if solve is not None:
-        node_id_by_sensor = {sensor.sensor_id: sensor.node_id for sensor in solve.provenance.sensors}
-        sensor_node_ids = {sensor_id: node_id_by_sensor[sensor_id] for sensor_id in geometry.selected_sensor_ids}
-    else:
-        sensor_node_ids = await host.registry.sensor_node_ids(list(geometry.selected_sensor_ids))
+    sensor_node_ids = await _rust_render_sensor_node_ids(host, payload, geometry)
     if len(sensor_node_ids) != len(geometry.selected_sensor_ids) or not is_point_network(sensor_node_ids):
         return None
     base_start_ns, base_end_ns = _rust_base_clip_span_ns(payload)

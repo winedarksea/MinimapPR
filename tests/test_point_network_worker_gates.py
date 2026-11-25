@@ -1,16 +1,22 @@
-"""P7 point-network renders on the classification worker keep the inline gates.
+"""P7 point-network Rust renders: the classification worker's gates and the
+sensor-to-node resolution.
 
 Moving the clip classification onto a classification worker must not change
 which renders are reported: a render carrying the sidecar's label is never
 chunk-suppressed (as inline), and no Rust render is under the localized
-report-window cap.
+report-window cap. A selected sensor missing from the solve's provenance must
+not lose the render.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
+
 from minimappr.classifiers.base import ClassificationResult
+from minimappr.core.point_network_call_classification import POINT_NETWORK_CLIP_CLASSIFICATION_PATH
 from tests.point_network_fusion_harness import started_point_network_fusion, stored_detections_by_solve
 from tests.point_network_scene import append_captures, render_point_node_captures
 from tests.test_point_network_review_fixes import (
@@ -87,3 +93,37 @@ async def test_a_point_network_render_is_not_under_the_report_window_cap(tmp_pat
     )
     assert RENDER_SOLVE_ID in detections
     assert metrics.classification_pregate_skipped_count == 0
+
+
+# -- a selected sensor missing from the solve's provenance --------------------------
+
+UNKNOWN_SENSOR_ID = "pt-unlisted-s0"
+UNKNOWN_SENSOR_POSITION_M = (30.0, 30.0, 1.5)
+
+
+def _geometry_seam_selecting_an_unlisted_sensor(fusion) -> None:
+    """A geometry resolver that breaks the manifest resolver's invariant (every
+    selected sensor is a provenance sensor)."""
+    resolver = fusion._localization_seam_collaborators.geometry_resolver
+    resolve = resolver.resolve_handoff_geometry
+
+    def resolve_with_an_unlisted_sensor(**kwargs):
+        geometry = resolve(**kwargs)
+        return replace(
+            geometry,
+            selected_sensor_ids=[*geometry.selected_sensor_ids, UNKNOWN_SENSOR_ID],
+            selected_positions={**geometry.selected_positions, UNKNOWN_SENSOR_ID: np.asarray(UNKNOWN_SENSOR_POSITION_M)},
+        )
+
+    resolver.resolve_handoff_geometry = resolve_with_an_unlisted_sensor
+
+
+async def test_a_selected_sensor_without_a_known_node_is_counted_and_the_render_still_reports(tmp_path: Path) -> None:
+    detections, metrics = await _report_render(
+        tmp_path,
+        prepare_fusion=lambda fusion, request: _geometry_seam_selecting_an_unlisted_sensor(fusion),
+        prepare_request=lambda request: request,
+    )
+    detection = detections[RENDER_SOLVE_ID]
+    assert detection["feature_summary"]["classification_path"] != POINT_NETWORK_CLIP_CLASSIFICATION_PATH
+    assert metrics.point_network_request_unresolved_sensor_count == 1

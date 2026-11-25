@@ -282,6 +282,7 @@ class FusionMetrics:
     point_network_clip_classified_count: int = 0
     point_network_clip_unavailable_count: int = 0
     point_network_clip_species_uncertain_count: int = 0
+    point_network_request_unresolved_sensor_count: int = 0
     # --- P8 sensors left out of Python-ingest solves, once per solve
     # (core/python_ingest_solve_exclusions.py), synced in status(): totals and the recent window ---
     localization_excluded_sensor_counts_by_reason: dict[str, int] = field(default_factory=dict)
