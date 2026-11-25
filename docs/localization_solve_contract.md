@@ -240,6 +240,8 @@ with no covered sensor solves on the largest connected group.
 | `timeline_residual_ns` | integer, nullable | Signed packet timestamp minus the node's buffer timeline, aggregated over the node's last `localization_timeline_residual_window_frames` frames (the frame residual at `localization_timeline_residual_percentile` of their magnitudes, sign kept; 50 = median); `null` until measured, or while the node is off packet time. |
 | `last_timestamp_step_ns` | integer, nullable | Signed size of the most recent detected timestamp step (positive = clock jumped ahead); `null` if none. |
 | `timestamp_step_count` | integer | Steps detected since the node was first heard (tracker entries are evicted after `localization_sensor_registry_stale_seconds` of silence). |
+| `timeline_step_reanchor_count` | integer | Confirmed steps the node's buffer timeline was re-anchored on, same lifetime. Absent in older manifests (read as 0). |
+| `timeline_drift_slew_count` | integer | Drift slews of the node's buffer timeline origin, same lifetime. Absent in older manifests (read as 0). |
 
 One row per node in `sensors[]`, in sensor order, from the clock snapshot
 taken when the solve was **triggered** (a parked / coverage-deferred solve
@@ -262,20 +264,54 @@ reports the snapshot it triggered with). Rules (Rust `dsp_node_clock_quality.rs`
   `localization_timestamp_step_threshold_seconds`. It raises the node's
   uncertainty to `|step|` until the residual has stayed within the threshold
   for `localization_timestamp_step_recovery_holdoff_seconds` of the node's own
-  sample time.
+  sample time. The penalty is independent of the re-anchor below: a
+  re-anchored node's cross-node pairs come back at once, but carry the step's
+  widened uncertainty until the holdoff clears.
 - **Boot-session change.** Not counted as a step (no step size exists: sample
   indices restart); clears the residual and holds
   `localization_clock_unknown_uncertainty_seconds` under the same recovery rule.
 - **Residual.** Measured against the nominal-rate timeline the solve buffer
-  placed the audio on (anchored at that buffer's first packet), only when the
-  buffer runs on packet time. A step the buffer did not re-anchor on, or
-  accumulated crystal drift, therefore stays visible here; there is no drift
-  correction or re-anchoring. When the windowed residual exceeds
+  placed the audio on (its current anchor extrapolated by sample count), only
+  when the buffer runs on packet time. Both terms come from the node itself
+  (its packet clock against its own sample clock), so the residual carries no
+  acoustic delay and no other node. When the windowed residual exceeds
   `localization_cross_node_max_timeline_residual_seconds` the node's
   cross-node pairs are excluded (`timeline_residual_over_limit`); the flag
   clears only once the windowed residual is back under that limit times
   `localization_timeline_residual_over_limit_clear_ratio` (hysteresis), so a
-  single jittery frame never flips it.
+  single jittery frame never flips it. With the timeline discipline on (the
+  default) only an unconfirmed step or a clock flapping faster than the
+  discipline can follow reaches the gate.
+- **Timeline discipline (owner decision 2026-11-25).** Two corrections move
+  the node's buffer timeline origin, on every channel of the node, on both
+  ingest paths (Rust `minimappr-core/src/timeline_discipline.rs` driven by
+  `dsp_node_clock_quality.rs`; Python `minimappr/core/timeline_discipline.py`
+  driven by `SensorStreamBuffer.append`; decisions pinned by
+  `tests/fixtures/timeline_discipline_parity_cases.json`). The mapping stays
+  one straight line over the sample index, so no buffered audio is dropped or
+  zero-filled; every buffered sample, pre-step ones included, is retimed onto
+  the corrected clock (the sample clock never jumped, and a step is usually a
+  re-sync correcting an offset the earlier packets already carried).
+  - *Step re-anchor* (`localization_timeline_step_reanchor_enabled`): a
+    flagged step is confirmed once `localization_timestamp_step_confirm_frames`
+    frames (the flagged one included) agree with the stepped clock within the
+    step threshold; the origin then shifts by their lower-median residual. A
+    frame back on the pre-step timeline first cancels it (jitter), and a
+    reboot cancels it too.
+  - *Drift slew* (`localization_timeline_drift_slew_fraction`, 0 = off): when
+    the windowed residual magnitude is above that fraction of the hard limit
+    and not above the limit itself, the origin shifts by the windowed residual
+    (recorded residuals shift with it), so steady crystal drift (20 ppm passes
+    10 ms in about 8 minutes) never reaches the gate. Never while a step is
+    pending; above the limit is not drift and is left to the gate.
+  - A full buffer reset (correction beyond the buffer length, or an
+    out-of-bounds frame) still clears the audio and counts in
+    `reanchor_count` / `total_buffer_reanchors`; the discipline's origin
+    shifts are counted apart (`timeline_step_reanchor_count`,
+    `timeline_drift_slew_count` here and per Python sensor buffer;
+    `total_timeline_step_reanchors`, `total_timeline_drift_slews` in
+    `/api/v1/dsp/status`). Python has no step penalty or residual gate; only
+    its timeline is corrected, and receipt-time frames skip the discipline.
 
 ## 8. `localization.pair_tdoas[]` additions
 
@@ -362,9 +398,11 @@ the geometry push (operator override, else stationary estimate).
   ],
   "node_timing": [
     {"node_id": "planar-a", "time_quality": "gps_locked", "clock_offset_std_s": 1e-6,
-     "timeline_residual_ns": 1200, "last_timestamp_step_ns": null, "timestamp_step_count": 0},
+     "timeline_residual_ns": 1200, "last_timestamp_step_ns": null, "timestamp_step_count": 0,
+     "timeline_step_reanchor_count": 0, "timeline_drift_slew_count": 0},
     {"node_id": "point-b", "time_quality": "ntp_disciplined", "clock_offset_std_s": 0.002,
-     "timeline_residual_ns": 15000000, "last_timestamp_step_ns": -21000000, "timestamp_step_count": 1}
+     "timeline_residual_ns": 15000000, "last_timestamp_step_ns": -21000000, "timestamp_step_count": 1,
+     "timeline_step_reanchor_count": 0, "timeline_drift_slew_count": 2}
   ],
   "window_center_time_ns": 1764000000016000000,
   "window_seconds": 0.032,

@@ -32,6 +32,7 @@ from tests.mixed_cluster_acceptance_scene import (
 from tests.replay_realism_bundles import (
     FRAMES_PER_UPLOAD,
     PRE_ROLL_SECONDS,
+    PacketClockDrift,
     PacketTimestampStep,
     ReplayNodePlan,
     build_replay_scene,
@@ -195,7 +196,8 @@ def run_replay_scenario(
     node_plans: Sequence[ReplayNodePlan],
     *,
     arrival_order: Sequence[str],
-    step: PacketTimestampStep | None = None,
+    step: PacketTimestampStep | PacketClockDrift | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> ReplayRunResult:
     scene = build_replay_scene(node_plans)
     bundle_path = write_replay_bundle(
@@ -212,6 +214,7 @@ def run_replay_scenario(
         scene=scene,
         node_order=arrival_order,
         awaited_detection_node_ids=arrival_order,
+        extra_env=extra_env,
     )
 
 
