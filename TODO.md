@@ -12,7 +12,7 @@ Status and detail in [docs/field_mode_progress/summary.md](docs/field_mode_progr
 - [ ] **SRP coverage is set by the pooling multiplier** — at k = 1.25 coverage is 0.955–0.963 whatever the temperature, so the 0.945 target is unreachable and the gate ceiling was widened (F2). Refit k (with T) on ≥ 2000 training trials when `srp_layout` gets a production caller.
 - [ ] **World-frame coverage sits low in band** — mean 0.928 (sd 0.013), fails ~2 % of nightly runs; heavier-than-Gaussian anchor tail (closeout C3/F2). Revisit with real-session recalibration.
 - [ ] **Bluefin live trial** — A3 baseline and B4 per-trigger check done 2026-11-23 (indoor, speaker too quiet: 2 bird detections/h); A4 trial-flags window still to run (bluefin_live_trial.md).
-- [ ] **Operator position overrides ignored in Rust ingest** — the sidecar uses firmware-reported node positions only; `PATCH /api/v1/nodes/{id}` `overrides.position_m` is stored but never reaches sidecar localization or the live registry (seen on Bluefin 2026-11-23, both GPS-less nodes at one point). Push overrides to the sidecar like `node_audio_overrides`.
+- [x] **Operator position overrides ignored in Rust ingest** — fixed by the localization core overhaul (branch `localization-core-overhaul`): Python pushes a full site-geometry snapshot (overrides, filtered stationary estimates, `position_std_m`, orientation) to `POST /api/v1/dsp/geometry` at launch, on node PATCH/delete, origin rebind and estimate moves; the sidecar solves in that frame (`sidecar_site_geometry.py`, `dsp_geometry_config.rs`). Not yet verified on Bluefin.
 - [ ] **Fixture speech check** — listen to the 22 `bluefin_bird_snippets_v1` clips, then set `speech_checked = true`.
 - [ ] **Phase 1 chirp sync, relay rate limiting and deploy, replay-window persistence, speaker→mic clock bias** — deferred.
 
@@ -251,6 +251,53 @@ Items worth tracking but not yet assigned to a phase. May be incorporated as pri
 - [ ] **Teensy Footprint Support** — validate Sirith compatibility with the Teensy pinout (dedicated I2S/PDM/TDM pins) and quad-channel USB audio.
 - [ ] **Node-side store-and-forward buffering** — the server reconnect-sync endpoint (idempotent batched frame replay, monotonic liveness) exists; node firmware local buffering/flush on disconnect does not (verify per platform).
 - [ ] **FLAC-on-core1 uplink compression spike** — only if uplink loss reappears; sample-rate drop is the first lever. See [docs/audio_uplink_bandwidth_review.md](docs/audio_uplink_bandwidth_review.md).
+
+### Localization core overhaul — open after 2026-11-25
+
+Branch `localization-core-overhaul`, not merged to main and not deployed. All five milestones are done:
+- mixed-node solve to stored detection;
+- shared site geometry;
+- per-node clock evidence and pair admission;
+- relative trigger;
+- one tracker observation per solve;
+- tracking modes;
+- point-network clip classification;
+- E5–E10 evaluation harnesses.
+
+Contract: `docs/localization_solve_contract.md`; tracking: `docs/tracking.md`; capture: `docs/field_capture_protocol.md`; bake-off: `docs/point_network_bakeoff.md`.
+
+- [ ] **Clock steps and drift (owner decision)** — buffer timelines are anchored at the first packet and never re-anchored below `max_buffer_seconds`.
+  - At about 20 ppm drift a node passes the 10 ms residual hard limit after about 8 min and loses its cross-node pairs until its stream goes stale.
+  - A single 10 ms–buffer-length timestamp step (for example an SNTP re-sync) does the same.
+  - Recommendation: re-anchor a node's timeline when a step is detected, or once the residual passes a fraction of the limit.
+- [ ] **Kilometre-range cross-node events need settings** — `localization_coverage_total_cap_seconds` ≥ 3 s, and a trigger cooldown longer than the cross-node lag. The default 1 s cap limits the event span to about 340 m.
+- [ ] **GCC-PHAT front end loses point-network calls** (E8):
+  - the 50–3430 Hz band discards most of a 3.4–7 kHz call;
+  - the rectangular event window makes PHAT pull every pair toward zero lag.
+  - Band plus taper took point-network recall from 0.30 to 0.45. Reconcile with the measured array bearing reversal behind the 3430 Hz ceiling before changing it (memory: localization band PHAT ceiling).
+- [ ] **3-node point networks never localize** — SRP needs 4 channels and `rust_tdoa_solve.py` 4 sensors (35 of 200 E8 held-out sites).
+- [ ] **Covariance calibration** — stated 95 % regions cover about 0.73 on E8 point networks (0.54 before the position-accuracy term). Correlation structure on coplanar and collinear layouts blocks starting the stationary filter from the fix covariance (`docs/tracking.md`, branch `loc/m3-hold-filter-init`, which also carries a relocation-gate double-fusion fix). `onset_overlap_two_species` stays at 0.44 m (was 0.33 m) until then.
+- [ ] **Re-solve radial divergence** — `radial_range_refinement.py` doubles the radius while the cost falls and can return 10⁸–10⁹ m as `range_bearing_projected`; only the handoff gate keeps it out of storage.
+- [ ] **`solve_3x3` / `invert_3x3` absolute 1e-9 pivot** (`srp_phat.rs`) — near-field normal-matrix entries are 1e-5 to 1e-10, so the base covariance often falls back or comes out non-symmetric.
+- [ ] **E5 open cells** (25 strict xfails, reasons in `tests/test_localization_range_matrix_realistic.py`):
+  - a compact planar array plus one weak-clock point collapses near the array with too small a covariance;
+  - NTP cross-node solves;
+  - planar arrays at 100 m and beyond;
+  - the four-node spread at 100 m and beyond;
+  - a hand-measured planar-plus-point cell claims a range the oracle allows only as heard.
+- [ ] **Python 2-D path** — NTP-mixed solves can stall at the centroid; `localize_2d` lacks the node-position covariance term.
+- [ ] **Rust perched tracker ignores `tracking_mode_by_category`** — the enum and parity exist, but the tracker always runs `stationary_hold`.
+- [ ] **Point-network clip label replaces the sidecar label** — the Python classifier may be a different model or vocabulary from the sidecar's BirdNET; the replaced label is kept in provenance.
+- [ ] **Bundle format gaps** (`docs/field_capture_protocol.md` §12):
+  - replay ignores `position_std_m`, position source and orientation;
+  - ground truth can't hold trajectories or truth accuracy;
+  - there is no per-frame boot session or holdover;
+  - an unmeasured mount still looks recorded;
+  - there is no `cluster_id`;
+  - the 120 s session cap.
+- [ ] **E10 blind spots** — detection count and classification metrics are info-only, so a Python render-handoff regression would not fail the gate.
+- [ ] **File size** — `fusion_node.py` is about 3,580 lines and `dsp_worker.rs` over 600.
+- [ ] **Bluefin deploy and live check** — needs approval.
 
 ## Release Criteria & Near-Term Work
 Core release requirements live in [AGENTS.md](AGENTS.md) ("Core Release Requirements"); items below are the open work not covered there.

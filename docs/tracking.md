@@ -70,6 +70,38 @@ holds at most `dormant_max_records` (`64`) records and evicts the oldest first.
 Revivals are counted in `track_dormant_reacquired_count` (`FusionMetrics`), which appears
 on the tracking card of the `/settings/pipeline` graph.
 
+## Tracking modes
+
+`tracking_mode_by_category` (`minimappr/core/tracking_mode_config.py`) picks the dynamics a track
+runs once it has a label:
+
+| Mode | Default for | Behaviour |
+|------|-------------|-----------|
+| `stationary_hold` | `wildlife` | Perched filter: zero velocity, fixes averaged in, relocation gate, ghost revert and concurrent-perch guard (the `tracking_perched_*` keys tune it) |
+| `continuous_motion` | every other category | Constant-velocity Kalman filter |
+| `none` | — | The category is not tracked; `TrackManager.update` returns `None` |
+
+An unlabelled track runs `continuous_motion`. When a label arrives or changes,
+`apply_label_category_tracking_mode` switches the track's dynamics under the tracker lock. A
+label of `unknown` keeps the track's current dynamics. `unknown` can't be configured as a key.
+The mapping replaces the old `tracking_perched_filter_enabled` and
+`tracking_perched_label_categories` flags. It is PATCHable, and a change takes effect on restart.
+Rust mirrors the enum and defaults in `minimappr-core/src/wildlife_tracking/tracking_mode.rs`,
+checked by `tests/test_wildlife_tracking_cross_language_parity.py`. The Rust perched tracker does
+not read the mode yet; it always runs the `stationary_hold` path.
+
+`entity_reporting_enabled` defaults to on.
+
+## Continuous sources (drone update-gap gate)
+
+`tests/test_continuous_source_tracking.py` (E6) feeds sidecar manifests for a drone fly-by, a
+hover, two crossing drones and a drone with birds calling nearby through a real `FusionNode`. The
+gate requires every drone solve to update exactly one track, once, stamped with the solve's
+window-centre time. The largest gap between a drone's updates must stay within 1.5 × the solve
+cadence (1.2 s at the default 0.8 s trigger cooldown). Each drone stays on one track and no other
+source updates it. Before this work a drone track moved once per 28 s render (1 of 24 solves).
+The 120 s scenes run with `MINIMAPPR_ENABLE_CONTINUOUS_TRACKING_LONG_SCENES=1`.
+
 ## One observation per solve
 
 Each localized solve updates the tracker once, before classification, so nothing on the
@@ -179,6 +211,14 @@ This is expected: the extra recall came from a misassociation that P5 removed.
 milestone 3. Before milestone 3, an abstaining classification (`unknown`, confidence 0) founded
 a track, and the tanager's first call joined it. Abstentions no longer found or move tracks, so
 the tanager's track now starts from its own first fix. That fix is poorly conditioned in height
-(variance 211 m²), but the stationary_hold filter restarts at it with its default variance, not
-the fix's. Starting a track's filter from the first fix's covariance (P4's filters) would fix
-this.
+(variance 211 m²), but the stationary_hold filter restarts at it with its default isotropic
+4 m² variance, not the fix's.
+
+Starting the filter from the founding fix's covariance was tried (branch
+`loc/m3-hold-filter-init`, not merged). It brings this scene to 0.34 m, but makes
+`gate_countersinging_pair` worse (0.32 → 0.51 m) and `gate_collinear_trail` worse
+(0.08 → 0.21 m). In those coplanar and collinear layouts the solver's fix covariances have long
+axes (up to 900 m²) that are tilted, so a later fix's height correction drags the horizontal
+position along the tilt. The real fix is calibrating the correlation structure of the solver
+covariance. The same branch also carries a separate, smaller fix: a relocation-gate hop fused
+the same fix twice.
