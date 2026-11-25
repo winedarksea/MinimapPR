@@ -29,6 +29,7 @@ struct RecentEventTriggerSolve {
     active_channels: Vec<usize>,
     sensor_layout: Arc<SolveSensorLayout>,
     pair_admission: SolvePairAdmission,
+    node_clock_assessments: Arc<NodeClockAssessments>,
 }
 
 /// One entry per buffer key, dropped with the buffer.
@@ -62,6 +63,7 @@ fn remembered_solve_of(payload: &ComputePayload) -> RecentEventTriggerSolve {
         active_channels: payload.active_channels.clone(),
         sensor_layout: payload.sensor_layout.clone(),
         pair_admission: payload.pair_admission.clone(),
+        node_clock_assessments: payload.node_clock_assessments.clone(),
     }
 }
 
@@ -131,7 +133,8 @@ impl RecentEventTriggerSolves {
             payload.pair_admission = SolvePairAdmission::compute(
                 &payload.sensor_layout,
                 &payload.active_channels,
-                &NodeClockAssessments::new(), // R5 seam: the render payload's clock snapshot
+                // A new solve of the window: the render's own (current) clock snapshot.
+                &payload.node_clock_assessments,
                 &payload.config.localization_solve,
             );
             self.by_buffer_key
@@ -143,6 +146,7 @@ impl RecentEventTriggerSolves {
         payload.active_channels = event.active_channels.clone();
         payload.sensor_layout = event.sensor_layout.clone();
         payload.pair_admission = event.pair_admission.clone();
+        payload.node_clock_assessments = event.node_clock_assessments.clone();
     }
 
     pub(crate) fn forget(&mut self, buffer_key: &str) {

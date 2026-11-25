@@ -14,7 +14,7 @@ use crate::{
         channel_coverage_ending_at, channel_windows_ending_at,
         channel_windows_ending_at_with_gap_concealment, classifier_render_bounds_from_windows,
         eligible_localization_channels, localization_channel_states_centered, new_solve_id,
-        ComputePayload, NodeClockAssessments, SolvePairAdmission,
+        ComputePayload, SolvePairAdmission,
     },
     localization_coverage_wait::{
         evaluate_window_coverage, ChannelStreamActivityTracker, CoverageWaitClock,
@@ -310,7 +310,7 @@ fn finalize_pending_payload(
     payload.pair_admission = SolvePairAdmission::compute(
         &payload.sensor_layout,
         &payload.active_channels,
-        &NodeClockAssessments::new(), // R5 seam: the parked payload's trigger-time clock snapshot
+        &payload.node_clock_assessments,
         &payload.config.localization_solve,
     );
     if let Some(render) = classifier_render {
@@ -374,6 +374,7 @@ pub(crate) fn localization_only_template(
         solve_id: new_solve_id(),
         attempt_kind: trigger_attempt_kind,
         pair_admission: payload.pair_admission.clone(),
+        node_clock_assessments: payload.node_clock_assessments.clone(),
         source_ids: payload.source_ids.clone(),
         sr: payload.sr,
         now_ns: payload.now_ns,

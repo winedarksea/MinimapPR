@@ -41,10 +41,13 @@ impl DspWorker {
         }
 
         let omni_channels = owned.decoded.channels.clone();
+        let node_clock_assessments = self
+            .node_clock_quality
+            .snapshot_for_layout(&owned.sensor_layout);
         let pair_admission = SolvePairAdmission::compute(
             &owned.sensor_layout,
             &[],
-            &NodeClockAssessments::new(), // R5 seam: the trigger-time clock snapshot
+            &node_clock_assessments,
             &self.config.localization_solve,
         );
         Some(ComputePayload {
@@ -69,6 +72,7 @@ impl DspWorker {
             localization_window_center_time_ns: owned.buffer_start_time_ns
                 + (owned.buffer_end_time_ns - owned.buffer_start_time_ns) / 2,
             sensor_layout: owned.sensor_layout,
+            node_clock_assessments,
             solve_id: new_solve_id(),
             attempt_kind: SolveAttemptKind::NotAttempted,
             pair_admission,
@@ -193,6 +197,9 @@ impl DspWorker {
                         &fallback_render_channels,
                         owned.sr,
                     );
+                let node_clock_assessments = self
+                    .node_clock_quality
+                    .snapshot_for_layout(&owned.sensor_layout);
                 let active_channels = eligible_coverage_channels(
                     &fallback_render_coverage,
                     self.config.min_coverage_ratio,
@@ -200,7 +207,7 @@ impl DspWorker {
                 let pair_admission = SolvePairAdmission::compute(
                     &owned.sensor_layout,
                     &active_channels,
-                    &NodeClockAssessments::new(), // R5 seam: the trigger-time clock snapshot
+                    &node_clock_assessments,
                     &self.config.localization_solve,
                 );
                 return Some(ComputePayload {
@@ -219,6 +226,7 @@ impl DspWorker {
                     classifier_render_end_ns,
                     localization_window_center_time_ns: buffered.localization_center_time_ns,
                     sensor_layout: owned.sensor_layout,
+                    node_clock_assessments,
                     solve_id: new_solve_id(),
                     attempt_kind: SolveAttemptKind::NotAttempted,
                     pair_admission,
@@ -355,10 +363,14 @@ impl DspWorker {
                 (None, None)
             };
 
+        // Snapshot at trigger: a deferred copy of this payload keeps it.
+        let node_clock_assessments = self
+            .node_clock_quality
+            .snapshot_for_layout(&owned.sensor_layout);
         let pair_admission = SolvePairAdmission::compute(
             &owned.sensor_layout,
             &active_channels,
-            &NodeClockAssessments::new(), // R5 seam: the trigger-time clock snapshot
+            &node_clock_assessments,
             &self.config.localization_solve,
         );
         let payload = ComputePayload {
@@ -373,6 +385,7 @@ impl DspWorker {
             classifier_render_end_ns,
             localization_window_center_time_ns: buffered.localization_center_time_ns,
             sensor_layout: owned.sensor_layout,
+            node_clock_assessments,
             solve_id: new_solve_id(),
             attempt_kind: if timing_gates.run_srp {
                 trigger_attempt_kind

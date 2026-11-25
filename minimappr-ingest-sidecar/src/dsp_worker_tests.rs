@@ -1846,6 +1846,7 @@ fn resolve_buffer_start_time_prefers_packet_toa_over_other_fallbacks() {
         temperature_c: None,
         humidity_fraction: None,
         environment_source: None,
+        frame_timing: Vec::new(),
     };
     let handle = JournalPayloadHandle {
         journal_epoch: 1,
@@ -1879,6 +1880,7 @@ fn resolve_buffer_start_time_uses_tor_as_fallback() {
         temperature_c: None,
         humidity_fraction: None,
         environment_source: None,
+        frame_timing: Vec::new(),
     };
     let handle = JournalPayloadHandle {
         journal_epoch: 1,
@@ -1912,6 +1914,7 @@ fn resolve_buffer_start_time_uses_now_as_fallback() {
         temperature_c: None,
         humidity_fraction: None,
         environment_source: None,
+        frame_timing: Vec::new(),
     };
     let handle = JournalPayloadHandle {
         journal_epoch: 1,

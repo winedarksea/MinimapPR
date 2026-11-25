@@ -68,6 +68,8 @@ mod dsp_manifest_publish;
 mod dsp_node_array_geometry_gate;
 #[path = "dsp_node_clock_assessment.rs"]
 mod dsp_node_clock_assessment;
+#[path = "dsp_node_clock_quality.rs"]
+mod dsp_node_clock_quality;
 #[path = "dsp_preprocess.rs"]
 mod dsp_preprocess;
 #[path = "dsp_solve_pair_admission.rs"]
@@ -89,8 +91,8 @@ use self::dsp_covered_event_solve::*;
 use self::dsp_manifest_buffering::*;
 pub(crate) use self::dsp_manifest_publish::*;
 pub(crate) use self::dsp_node_array_geometry_gate::*;
-#[allow(unused_imports, reason = "filled by R5, consumed by R7 (milestone 2)")]
 pub(crate) use self::dsp_node_clock_assessment::*;
+pub(crate) use self::dsp_node_clock_quality::*;
 pub(crate) use self::dsp_preprocess::*;
 pub(crate) use self::dsp_solve_pair_admission::*;
 pub(crate) use self::dsp_solve_sensor_layout::*;
@@ -155,6 +157,8 @@ pub struct DspWorker {
     buffer_channel_sensor_ids: HashMap<String, Arc<Vec<String>>>,
     /// Which sensors back each buffer, their order, positions and rates.
     sensor_registry: ClusterSensorRegistry,
+    /// Per-node clock evidence; each solve snapshots its layout's nodes.
+    node_clock_quality: NodeClockQualityTracker,
     /// Per-node preprocessing state (biquad memory etc.). Keyed by `node_id`
     /// extracted from the stream_key prefix, matching how `node_audio_overrides`
     /// is keyed in [`DspWorkerState`]. Lives outside the shared RwLock so frame
@@ -208,6 +212,7 @@ impl DspWorker {
                 config.localization_coverage_total_cap_seconds,
             ));
         let sensor_registry = ClusterSensorRegistry::new(&config.localization_solve);
+        let node_clock_quality = NodeClockQualityTracker::new(&config.localization_solve);
         Self {
             manifest_store,
             derived_cache,
@@ -220,6 +225,7 @@ impl DspWorker {
             buffers: HashMap::new(),
             buffer_channel_sensor_ids: HashMap::new(),
             sensor_registry,
+            node_clock_quality,
             node_audio_state: HashMap::new(),
             last_classifier_render_ns_by_stream: HashMap::new(),
             last_localization_ns_by_stream: HashMap::new(),
@@ -511,6 +517,7 @@ impl DspWorker {
         let now_ns = system_now_ns();
         let cutoff = now_ns.saturating_sub(ttl_ns);
         self.sensor_registry.evict_stale_sensors(now_ns);
+        self.node_clock_quality.evict_stale(now_ns);
         let stale: Vec<String> = self
             .last_heartbeat_ns_by_stream
             .iter()
@@ -598,6 +605,10 @@ mod dsp_worker_coverage_race_tests;
 #[cfg(test)]
 #[path = "dsp_worker_never_streamed_member_tests.rs"]
 mod dsp_worker_never_streamed_member_tests;
+
+#[cfg(test)]
+#[path = "dsp_worker_clock_evidence_tests.rs"]
+mod dsp_worker_clock_evidence_tests;
 
 #[cfg(test)]
 #[path = "dsp_worker_test_node_fixtures.rs"]

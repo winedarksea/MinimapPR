@@ -18,7 +18,7 @@ use std::sync::atomic::AtomicU64;
 use tokio::sync::{broadcast, RwLock};
 
 const CLUSTER_ID: &str = "coverage-race";
-const CLUSTER_BUFFER_KEY: &str = "cluster::coverage-race::audio_main";
+pub(super) const CLUSTER_BUFFER_KEY: &str = "cluster::coverage-race::audio_main";
 pub(super) const NODE_A: &str = "node-a";
 pub(super) const NODE_B: &str = "node-b";
 const TETRA_CHANNEL_COUNT: usize = 4;
@@ -100,6 +100,16 @@ impl RaceHarness {
 
     pub(super) fn has_pending_localization(&self, buffer_key: &str) -> bool {
         self.worker.deferred_localizations.has_pending(buffer_key)
+    }
+
+    /// `deliver`'s manifest for this frame, for a test to alter first.
+    pub(super) async fn cluster_frame_manifest(&self, node_id: &str, frame_index: usize) -> DspManifest {
+        self.frame_manifest(node_id, frame_index, two_tetra_cluster_positions(), false)
+            .await
+    }
+
+    pub(super) fn node_clock_assessment(&self, node_id: &str) -> NodeClockAssessment {
+        self.worker.node_clock_quality.assessment(node_id)
     }
 
     pub(super) async fn deliver(&mut self, node_id: &str, frame_index: usize) {
