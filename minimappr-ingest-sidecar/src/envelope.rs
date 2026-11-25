@@ -1,3 +1,7 @@
+use minimappr_core::{
+    localization_sensor_entry::NodeTimeQuality,
+    packet_frame_timing::PACKET_TIMESTAMP_CLOCK_DOMAIN_UTC,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -91,7 +95,9 @@ struct StoreForwardFrame {
     encoding: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug)]
+/// Declaration (= wire code) order is increasing clock weakness, so `max`
+/// over an upload's frames is its weakest clock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum BinaryTimeQuality {
     GpsLocked,
     GpsHoldover,
@@ -720,11 +726,13 @@ fn parse_binary_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnvelope, 
 
     let mut first_frame: Option<BinaryFrameSummary> = None;
     let mut last_sequence: Option<u64> = None;
+    let mut weakest_time_quality: Option<BinaryTimeQuality> = None;
     let mut total_sample_count = 0_u64;
     for _ in 0..frame_count {
         let frame = read_binary_frame_summary(&mut reader, version)?;
         total_sample_count = total_sample_count.saturating_add(frame.sample_count);
         last_sequence = Some(frame.sequence);
+        weakest_time_quality = weakest_time_quality.max(Some(frame.time_quality));
         if first_frame.is_none() {
             first_frame = Some(frame);
         }
@@ -736,7 +744,12 @@ fn parse_binary_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnvelope, 
 
     let first_frame =
         first_frame.ok_or_else(|| "binary ingest payload contained no frames".to_string())?;
-    let time_quality = first_frame.time_quality.as_str().to_string();
+    // The upload reports its weakest frame clock: a degradation partway
+    // through one upload must not hide behind a good first frame.
+    let time_quality = weakest_time_quality
+        .unwrap_or(first_frame.time_quality)
+        .as_str()
+        .to_string();
     let stream_id = "audio_main".to_string();
     let channel_count = Some(first_frame.channels.max(u16::from(sensor_count)));
     Ok(CaptureEnvelope {
@@ -750,7 +763,7 @@ fn parse_binary_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnvelope, 
         toa_ns: Some(first_frame.toa_ns),
         tor_ns: Some(first_frame.tor_ns),
         time_quality: Some(time_quality.clone()),
-        clock_domain: Some("utc".to_string()),
+        clock_domain: Some(PACKET_TIMESTAMP_CLOCK_DOMAIN_UTC.to_string()),
         sync_source: sync_source_from_time_quality(Some(time_quality.as_str())),
         clock_correction_ns: first_frame.clock_correction_ns,
         clock_drift_ppm: first_frame.clock_drift_ppm,
@@ -997,7 +1010,7 @@ fn parse_store_forward_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnv
         .as_ref()
         .map(|position| (position.lat, position.lon));
     let stream_id = "audio_main".to_string();
-    let time_quality = first_frame.frame.time_quality.clone();
+    let time_quality = weakest_store_forward_time_quality(&envelope.buffered_frames);
     let encoding = first_frame
         .frame
         .encoding
@@ -1025,7 +1038,7 @@ fn parse_store_forward_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnv
         toa_ns: first_frame.frame.toa_ns,
         tor_ns: first_frame.frame.tor_ns,
         time_quality: time_quality.clone(),
-        clock_domain: Some("utc".to_string()),
+        clock_domain: Some(PACKET_TIMESTAMP_CLOCK_DOMAIN_UTC.to_string()),
         sync_source: sync_source_from_time_quality(time_quality.as_deref()),
         clock_correction_ns: None,
         clock_drift_ppm: metadata
@@ -1050,6 +1063,33 @@ fn parse_store_forward_capture_envelope(raw_payload: &[u8]) -> Result<CaptureEnv
         last_sequence: None,
         boot_session: None,
     })
+}
+
+/// Higher = weaker clock; an unrecognised class counts as the weakest.
+fn time_quality_weakness_rank(time_quality: &str) -> u8 {
+    match serde_json::from_value(serde_json::Value::from(time_quality)) {
+        Ok(NodeTimeQuality::GpsLocked) => 0,
+        Ok(NodeTimeQuality::GpsHoldover) => 1,
+        Ok(NodeTimeQuality::NtpDisciplined) => 2,
+        Ok(NodeTimeQuality::FreeRunning) => 3,
+        Ok(NodeTimeQuality::Unknown) | Err(_) => 4,
+    }
+}
+
+/// The weakest reported frame clock, spelled as the firmware sent it.
+fn weakest_store_forward_time_quality(frames: &[StoreForwardBufferedFrame]) -> Option<String> {
+    frames
+        .iter()
+        .filter_map(|buffered| buffered.frame.time_quality.as_deref())
+        .enumerate()
+        // Ties keep the earliest frame's spelling (max_by_key keeps the last).
+        .max_by_key(|(frame_index, time_quality)| {
+            (
+                time_quality_weakness_rank(time_quality),
+                std::cmp::Reverse(*frame_index),
+            )
+        })
+        .map(|(_, time_quality)| time_quality.to_string())
 }
 
 fn metadata_string(value: Option<&serde_json::Value>) -> Option<String> {
@@ -1509,5 +1549,53 @@ mod tests {
         assert_eq!(parsed.payload_codec, "binary_mmb3_pcm16le");
         assert_eq!(parsed.clock_correction_ns, Some(-123));
         assert_eq!(parsed.clock_drift_ppm, Some(0.25));
+    }
+
+    /// MMB2 frame bytes before the `time_quality` byte, and the whole frame
+    /// as `push_binary_frame` writes it.
+    const MMB2_FRAME_BYTES_BEFORE_TIME_QUALITY: usize = 61;
+    const MMB2_TEST_FRAME_BYTES: usize = 72;
+    const BINARY_FRAME_COUNT_OFFSET: usize = 6;
+    const GPS_HOLDOVER_WIRE_CODE: u8 = 1;
+
+    #[test]
+    fn binary_capture_envelope_reports_the_weakest_frame_clock() {
+        let mut payload = binary_header_only_payload(2);
+        let header_len = payload.len();
+        payload[BINARY_FRAME_COUNT_OFFSET..BINARY_FRAME_COUNT_OFFSET + 2]
+            .copy_from_slice(&2_u16.to_le_bytes());
+        push_binary_frame(&mut payload, 2);
+        push_binary_frame(&mut payload, 2);
+        payload[header_len + MMB2_TEST_FRAME_BYTES + MMB2_FRAME_BYTES_BEFORE_TIME_QUALITY] =
+            GPS_HOLDOVER_WIRE_CODE;
+        let parsed = parse_capture_envelope("/api/v1/ingest/binary", &payload)
+            .expect("two-frame MMB2 envelope should parse");
+        assert_eq!(parsed.time_quality.as_deref(), Some("gps_holdover"));
+        assert_eq!(parsed.clock_domain.as_deref(), Some("utc"));
+        assert_eq!(parsed.sample_count, Some(4));
+    }
+
+    #[test]
+    fn store_forward_capture_envelope_reports_the_weakest_frame_clock() {
+        let frame = |time_quality: Option<&str>| {
+            serde_json::json!({"frame": {
+                "sample_rate_hz": 16000, "channels": 1, "samples_per_channel": 4,
+                "time_quality": time_quality, "toa_ns": 1000, "tor_ns": 2000
+            }})
+        };
+        let payload = serde_json::json!({
+            "node": {"id": "point-node-1", "metadata": {}},
+            "buffered_frames": [
+                frame(Some("gps_locked")), frame(None), frame(Some("ntp_sync")),
+                frame(Some("gps_holdover"))
+            ]
+        });
+        let parsed = parse_capture_envelope(
+            "/api/v1/ingest/store-forward",
+            payload.to_string().as_bytes(),
+        )
+        .expect("store-forward envelope should parse");
+        assert_eq!(parsed.time_quality.as_deref(), Some("ntp_sync"));
+        assert_eq!(parsed.sync_source.as_deref(), Some("ntp"));
     }
 }

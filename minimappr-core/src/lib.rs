@@ -11,6 +11,9 @@ pub mod dsp_math;
 pub mod gcc_phat;
 // Localization overhaul R0: Rust <-> Python solve-provenance + geometry-push wire types.
 pub mod localization_sensor_entry;
+// Localization overhaul R5: per-frame clock evidence and timestamp-step detection.
+pub mod packet_frame_timing;
+pub mod timestamp_step_detector;
 pub mod range_projection;
 // Localization overhaul R2: Python-identical site ENU projection + sensor rotation.
 pub mod sensor_world_position;

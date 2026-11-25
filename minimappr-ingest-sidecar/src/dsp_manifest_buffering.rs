@@ -366,6 +366,20 @@ impl DspWorker {
             reanchor_delta =
                 reanchor_delta.saturating_add(buffer.reanchor_count().saturating_sub(pre_reanchor));
         }
+        self.node_clock_quality.observe(NodeFrameTimingObservation {
+            node_id: &owned.sensor_layout.reporting_node_id,
+            frame_timing: &owned.decoded.frame_timing,
+            segment_start_sample_index: owned.start_sample_index,
+            sample_rate_hz: owned.sr,
+            buffer_timeline: buffers.get(reference_buffer_index).and_then(|buffer| {
+                packet_time_buffer_timeline(
+                    buffer,
+                    owned.start_sample_index,
+                    owned.node_timestamp_is_available && !owned.buffer_uses_receipt_time,
+                )
+            }),
+            now_ns: owned.now_ns,
+        });
 
         let end_ns = resolve_buffer_end_time_ns(
             buffers,

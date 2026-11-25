@@ -6,8 +6,6 @@
 //! `localization_cross_node_max_timeline_residual_seconds` drops that node's
 //! cross-node pairs (`residual_over_hard_limit`); its own channels still solve.
 
-#![allow(dead_code, reason = "filled by R5, consumed by R7 (milestone 2); remove when wired")]
-
 use std::collections::BTreeMap;
 
 use minimappr_core::localization_sensor_entry::NodeTimeQuality;

@@ -9,9 +9,7 @@ use minimappr_core::localization_sensor_entry::{
     CoordinateFrameKind, NodeTimeQuality, SensorPositionSource, SolveBufferScope,
     SolveCoordinateFrame, SolveSensorEntry,
 };
-
-/// Timebase of every packet timestamp the sidecar decodes today.
-const PACKET_CLOCK_DOMAIN_UTC: &str = "utc";
+use minimappr_core::packet_frame_timing::PACKET_TIMESTAMP_CLOCK_DOMAIN_UTC;
 
 pub(crate) type SensorOrderKey = (String, usize, String);
 
@@ -221,7 +219,7 @@ pub(crate) fn snapshot_route(
                 position_source: sensor.position_source,
                 position_std_m: sensor.position_std_m,
                 clock_source: NodeTimeQuality::Unknown,
-                clock_domain: PACKET_CLOCK_DOMAIN_UTC.to_string(),
+                clock_domain: PACKET_TIMESTAMP_CLOCK_DOMAIN_UTC.to_string(),
                 clock_offset_std_s: None,
             },
         )

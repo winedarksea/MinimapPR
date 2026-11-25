@@ -365,6 +365,7 @@ pub(crate) fn localization_only_template(
         solve_id: new_solve_id(),
         attempt_kind: trigger_attempt_kind,
         pair_admission: payload.pair_admission.clone(),
+        node_clock_assessments: payload.node_clock_assessments.clone(),
         source_ids: payload.source_ids.clone(),
         sr: payload.sr,
         now_ns: payload.now_ns,

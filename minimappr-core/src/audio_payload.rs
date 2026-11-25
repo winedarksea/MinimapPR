@@ -1,6 +1,9 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Deserialize;
 
+use crate::localization_sensor_entry::NodeTimeQuality;
+use crate::packet_frame_timing::{time_quality_from_binary_wire_code, PacketFrameTiming};
+
 type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 type BoxedResult<T> = Result<T, BoxedError>;
 
@@ -14,6 +17,9 @@ pub struct DecodedAudioPayload {
     pub temperature_c: Option<f32>,
     pub humidity_fraction: Option<f32>,
     pub environment_source: Option<String>,
+    /// One entry per merged frame, in sample order (clock evidence only;
+    /// `channels` is assembled exactly as before).
+    pub frame_timing: Vec<PacketFrameTiming>,
 }
 
 struct BinaryReader<'a> {
@@ -108,7 +114,7 @@ fn decode_binary_audio(raw_payload: &[u8]) -> BoxedResult<Vec<DecodedAudioPayloa
         return Err("binary ingest frame count must be between 1 and 2048".into());
     }
 
-    skip_binary_node(&mut reader)?;
+    let boot_session = read_binary_node_boot_session(&mut reader)?;
 
     let mut segments = Vec::new();
     let mut current_segment: Option<DecodedAudioPayload> = None;
@@ -143,6 +149,15 @@ fn decode_binary_audio(raw_payload: &[u8]) -> BoxedResult<Vec<DecodedAudioPayloa
             temperature_c: None,
             humidity_fraction: None,
             environment_source: None,
+            frame_timing: Vec::new(),
+        });
+        segment.frame_timing.push(PacketFrameTiming {
+            sample_offset: segment.channels.first().map_or(0, Vec::len),
+            packet_timestamp_ns: (frame.start_time_ns > 0)
+                .then_some(i128::from(frame.start_time_ns)),
+            time_quality: frame.time_quality,
+            reported_holdover_error_ns: frame.reported_holdover_error_ns,
+            boot_session: Some(boot_session),
         });
         append_channels(&mut segment.channels, frame.channels, frame.samples);
         segment.end_sample_index = Some(frame_end_sample_index);
@@ -163,7 +178,8 @@ fn decode_binary_audio(raw_payload: &[u8]) -> BoxedResult<Vec<DecodedAudioPayloa
     Ok(segments)
 }
 
-fn skip_binary_node(reader: &mut BinaryReader<'_>) -> BoxedResult<()> {
+/// Skips the node descriptor, returning its boot counter.
+fn read_binary_node_boot_session(reader: &mut BinaryReader<'_>) -> BoxedResult<u32> {
     let _node_id = reader.string()?;
     let _node_type_code = reader.u8()?;
     if reader.u8()? != 0 {
@@ -188,8 +204,7 @@ fn skip_binary_node(reader: &mut BinaryReader<'_>) -> BoxedResult<()> {
     let _firmware = reader.string()?;
     let _gps_signal = reader.string()?;
     let _position_source = reader.string()?;
-    let _boot_count = reader.u32()?;
-    Ok(())
+    Ok(reader.u32()?)
 }
 
 struct BinaryAudioFrame {
@@ -202,6 +217,8 @@ struct BinaryAudioFrame {
     temperature_c: Option<f32>,
     humidity_fraction: Option<f32>,
     environment_source: Option<String>,
+    time_quality: NodeTimeQuality,
+    reported_holdover_error_ns: Option<u64>,
 }
 
 fn read_binary_audio_frame(reader: &mut BinaryReader<'_>) -> BoxedResult<BinaryAudioFrame> {
@@ -225,12 +242,15 @@ fn read_binary_audio_frame(reader: &mut BinaryReader<'_>) -> BoxedResult<BinaryA
     let _sequence = reader.u64()?;
     let _toa_ns = reader.u64()?;
     let _tor_ns = reader.u64()?;
-    let _time_quality = reader.u8()?;
+    let time_quality = time_quality_from_binary_wire_code(reader.u8()?);
     let environment;
     let samples_per_channel;
+    let mut reported_holdover_error_ns = None;
     if version3_source_type.is_some() {
         samples_per_channel = usize::try_from(reader.u32()?)?;
-        environment = read_binary_v3_sections(reader)?;
+        let sections = read_binary_v3_sections(reader)?;
+        environment = sections.environment;
+        reported_holdover_error_ns = sections.reported_holdover_error_ns;
     } else {
         skip_binary_timing_diagnostics(reader)?;
         environment = read_binary_environment(reader)?;
@@ -258,16 +278,28 @@ fn read_binary_audio_frame(reader: &mut BinaryReader<'_>) -> BoxedResult<BinaryA
         temperature_c: environment.temperature_c,
         humidity_fraction: environment.humidity_fraction,
         environment_source: environment.source,
+        time_quality,
+        reported_holdover_error_ns,
     })
 }
 
-fn read_binary_v3_sections(reader: &mut BinaryReader<'_>) -> BoxedResult<BinaryEnvironmentSample> {
+/// What decode keeps from a v3 frame's optional sections.
+struct BinaryV3Sections {
+    environment: BinaryEnvironmentSample,
+    reported_holdover_error_ns: Option<u64>,
+}
+
+const BINARY_V3_CLOCK_HOLDOVER_SECTION_BIT: u16 = 0x0010;
+const CLOCK_HOLDOVER_ACTIVE_FLAG: u8 = 0x01;
+
+fn read_binary_v3_sections(reader: &mut BinaryReader<'_>) -> BoxedResult<BinaryV3Sections> {
     let section_flags = reader.u16()?;
     let mut environment = BinaryEnvironmentSample {
         temperature_c: None,
         humidity_fraction: None,
         source: None,
     };
+    let mut reported_holdover_error_ns = None;
     for bit_index in 0..16 {
         let section_bit = 1_u16 << bit_index;
         if section_flags & section_bit == 0 {
@@ -280,9 +312,13 @@ fn read_binary_v3_sections(reader: &mut BinaryReader<'_>) -> BoxedResult<BinaryE
             0x0001 => skip_binary_timing_diagnostics_v3(&mut section_reader)?,
             0x0002 => environment = read_binary_environment(&mut section_reader)?,
             0x0004 => skip_binary_transport_health(&mut section_reader)?,
+            BINARY_V3_CLOCK_HOLDOVER_SECTION_BIT => {
+                reported_holdover_error_ns =
+                    read_binary_clock_holdover_error_ns(&mut section_reader)?;
+            }
             _ => {
                 // Forward-compatibility: consume unknown/future sections (e.g.
-                // 0x0008 aux sensors, 0x0010 clock holdover) so newer firmware
+                // 0x0008 aux sensors) so newer firmware
                 // does not break ingest on an older sidecar. The section was
                 // already length-delimited above; just skip its bytes. The
                 // strict trailing-bytes check below still applies to the known
@@ -297,7 +333,23 @@ fn read_binary_v3_sections(reader: &mut BinaryReader<'_>) -> BoxedResult<BinaryE
             );
         }
     }
-    Ok(environment)
+    Ok(BinaryV3Sections {
+        environment,
+        reported_holdover_error_ns,
+    })
+}
+
+/// Clock holdover section (25 bytes, same layout the envelope parser and
+/// Python decode): the predicted error is only meaningful while in holdover.
+fn read_binary_clock_holdover_error_ns(reader: &mut BinaryReader<'_>) -> BoxedResult<Option<u64>> {
+    let flags = reader.u8()?;
+    let _holdover_age_ms = reader.u32()?;
+    let predicted_error_ns = reader.u32()?;
+    let _lt_ppm = reader.f32()?;
+    let _lt_ppm_sigma = reader.f32()?;
+    let _temp_slope_ppm_per_c = reader.f32()?;
+    let _temp_resid_rms_ppm = reader.f32()?;
+    Ok((flags & CLOCK_HOLDOVER_ACTIVE_FLAG != 0).then_some(u64::from(predicted_error_ns)))
 }
 
 fn skip_binary_timing_diagnostics_v3(reader: &mut BinaryReader<'_>) -> BoxedResult<()> {
@@ -421,6 +473,8 @@ struct StoreForwardFrame {
     end_sample_index: Option<u64>,
     samples_per_channel: Option<u32>,
     samples_b64: String,
+    #[serde(default)]
+    time_quality: Option<NodeTimeQuality>,
 }
 
 fn decode_store_forward_audio(raw_payload: &[u8]) -> BoxedResult<Vec<DecodedAudioPayload>> {
@@ -498,6 +552,18 @@ fn decode_store_forward_audio(raw_payload: &[u8]) -> BoxedResult<Vec<DecodedAudi
             temperature_c: None,
             humidity_fraction: None,
             environment_source: None,
+            frame_timing: Vec::new(),
+        });
+        segment.frame_timing.push(PacketFrameTiming {
+            sample_offset: segment.channels.first().map_or(0, Vec::len),
+            packet_timestamp_ns: frame
+                .start_time_ns
+                .or(frame.utc_start_ns)
+                .filter(|timestamp_ns| *timestamp_ns > 0)
+                .map(i128::from),
+            time_quality: frame.time_quality.unwrap_or(NodeTimeQuality::Unknown),
+            reported_holdover_error_ns: None,
+            boot_session: None,
         });
         append_channels(&mut segment.channels, frame.channels, decoded);
         current_segment_has_complete_indices &=
@@ -563,21 +629,25 @@ fn pcm16le_to_f32(bytes: &[u8]) -> Vec<f32> {
 }
 
 #[cfg(test)]
+#[path = "audio_payload_frame_timing_tests.rs"]
+mod audio_payload_frame_timing_tests;
+
+#[cfg(test)]
 mod tests {
     use super::decode_audio_payload_segments;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use serde_json::json;
 
-    fn push_string(payload: &mut Vec<u8>, value: &str) {
+    pub(super) fn push_string(payload: &mut Vec<u8>, value: &str) {
         payload.push(u8::try_from(value.len()).expect("test string fits in length byte"));
         payload.extend_from_slice(value.as_bytes());
     }
 
-    fn push_f32(payload: &mut Vec<u8>, value: f32) {
+    pub(super) fn push_f32(payload: &mut Vec<u8>, value: f32) {
         payload.extend_from_slice(&value.to_le_bytes());
     }
 
-    fn push_binary_node(payload: &mut Vec<u8>) {
+    pub(super) fn push_binary_node(payload: &mut Vec<u8>) {
         push_string(payload, "sirith-tetra-1a15");
         payload.push(1); // sirith_tetra
         payload.push(1); // has_geo_position
@@ -597,7 +667,7 @@ mod tests {
         payload.extend_from_slice(&7_u32.to_le_bytes());
     }
 
-    fn push_binary_section(payload: &mut Vec<u8>, section: &[u8]) {
+    pub(super) fn push_binary_section(payload: &mut Vec<u8>, section: &[u8]) {
         payload.extend_from_slice(
             &u16::try_from(section.len())
                 .expect("test section length fits in u16")

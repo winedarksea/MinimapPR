@@ -41,6 +41,7 @@ impl DspWorker {
         }
 
         let omni_channels = owned.decoded.channels.clone();
+        let node_clock_assessments = self.node_clock_quality.snapshot_for_layout(&owned.sensor_layout);
         Some(ComputePayload {
             manifest: owned.manifest,
             stream_key: owned.buffer_key,
@@ -63,6 +64,7 @@ impl DspWorker {
             localization_window_center_time_ns: owned.buffer_start_time_ns
                 + (owned.buffer_end_time_ns - owned.buffer_start_time_ns) / 2,
             sensor_layout: owned.sensor_layout,
+            node_clock_assessments,
             solve_id: new_solve_id(),
             attempt_kind: SolveAttemptKind::NotAttempted,
             pair_admission: SolvePairAdmission::admit_all(),
@@ -187,6 +189,7 @@ impl DspWorker {
                         &fallback_render_channels,
                         owned.sr,
                     );
+                let node_clock_assessments = self.node_clock_quality.snapshot_for_layout(&owned.sensor_layout);
                 return Some(ComputePayload {
                     manifest: owned.manifest,
                     stream_key: owned.buffer_key,
@@ -206,6 +209,7 @@ impl DspWorker {
                     classifier_render_end_ns,
                     localization_window_center_time_ns: buffered.localization_center_time_ns,
                     sensor_layout: owned.sensor_layout,
+                    node_clock_assessments,
                     solve_id: new_solve_id(),
                     attempt_kind: SolveAttemptKind::NotAttempted,
                     pair_admission: SolvePairAdmission::admit_all(),
@@ -342,6 +346,8 @@ impl DspWorker {
                 (None, None)
             };
 
+        // Snapshot at trigger: a deferred copy of this payload keeps it.
+        let node_clock_assessments = self.node_clock_quality.snapshot_for_layout(&owned.sensor_layout);
         let payload = ComputePayload {
             manifest: owned.manifest,
             stream_key: owned.buffer_key,
@@ -354,6 +360,7 @@ impl DspWorker {
             classifier_render_end_ns,
             localization_window_center_time_ns: buffered.localization_center_time_ns,
             sensor_layout: owned.sensor_layout,
+            node_clock_assessments,
             solve_id: new_solve_id(),
             attempt_kind: if timing_gates.run_srp {
                 trigger_attempt_kind

@@ -165,7 +165,10 @@ Local axes: x = east, y = north, z = up, metres.
 | `position_std_m` | number, nullable | 1-sigma position accuracy; `null` when nothing states one. |
 | `clock_source` | enum string | Section 3.6. |
 | `clock_domain` | string | Timebase of the packet timestamps; currently always `utc`. |
-| `clock_offset_std_s` | number, nullable | 1-sigma clock-offset uncertainty used for this sensor's pairs. |
+| `clock_offset_std_s` | number, nullable | 1-sigma clock-offset uncertainty used for this sensor's pairs: its node's `node_timing[].clock_offset_std_s`. |
+
+`clock_source` and `clock_offset_std_s` are filled from the solve's clock
+snapshot (section 7); `unknown` / `null` only for a node with no snapshot entry.
 
 Sensor world position = node position + R(body-to-world) x body offset, with
 R the identity when the node has no orientation (rotation convention in section 9).
@@ -198,10 +201,38 @@ A weak clock class alone never excludes a pair; it raises that pair's
 |---|---|---|
 | `node_id` | string | |
 | `time_quality` | enum string | Section 3.6. |
-| `clock_offset_std_s` | number, nullable | Node timing uncertainty: max of class default, reported holdover error, measured residual. |
-| `timeline_residual_ns` | integer, nullable | Measured packet-timeline residual; `null` until measured. |
-| `last_timestamp_step_ns` | integer, nullable | Signed size of the most recent detected timestamp step; `null` if none. |
-| `timestamp_step_count` | integer | Steps detected since the node was first heard. |
+| `clock_offset_std_s` | number, nullable | Node timing uncertainty (seconds): max of class default, reported holdover error, \|measured residual\|, active step penalty. |
+| `timeline_residual_ns` | integer, nullable | Signed packet timestamp minus the node's buffer timeline at the latest frame; `null` until measured. |
+| `last_timestamp_step_ns` | integer, nullable | Signed size of the most recent detected timestamp step (positive = clock jumped ahead); `null` if none. |
+| `timestamp_step_count` | integer | Steps detected since the node was first heard (tracker entries are evicted after `localization_sensor_registry_stale_seconds` of silence). |
+
+One row per node in `sensors[]`, in sensor order, from the clock snapshot
+taken when the solve was **triggered** (a parked / coverage-deferred solve
+reports the snapshot it triggered with). Rules (Rust `dsp_node_clock_quality.rs`):
+
+- **Per-frame evidence.** Decode keeps every frame's packet timestamp,
+  `time_quality`, holdover predicted error (MMB3 section `0x0010`, only while
+  `holdover_active`) and boot session, so a step between two frames of one
+  upload is visible. `time_quality` is the latest frame's.
+- **Class default.** `localization_clock_class_uncertainty_seconds[time_quality]`;
+  `unknown`, or a class missing from the map, takes
+  `localization_clock_unknown_uncertainty_seconds` (widened, never excluded).
+  A node in the layout that has not streamed yet reports `unknown` with that default.
+- **Step.** Between consecutive frames of one boot session (within or across
+  uploads), packet-time advance minus sample-index advance / rate beyond
+  `localization_timestamp_step_threshold_seconds`. It raises the node's
+  uncertainty to `|step|` until the residual has stayed within the threshold
+  for `localization_timestamp_step_recovery_holdoff_seconds` of the node's own
+  sample time.
+- **Boot-session change.** Not counted as a step (no step size exists: sample
+  indices restart); clears the residual and holds
+  `localization_clock_unknown_uncertainty_seconds` under the same recovery rule.
+- **Residual.** Measured against the nominal-rate timeline the solve buffer
+  placed the audio on (anchored at that buffer's first packet), only when the
+  buffer runs on packet time. A step the buffer did not re-anchor on, or
+  accumulated crystal drift, therefore stays visible here; there is no drift
+  correction. Over `localization_cross_node_max_timeline_residual_seconds` the
+  node's cross-node pairs are excluded (`timeline_residual_over_limit`).
 
 ## 8. `localization.pair_tdoas[]` additions
 
