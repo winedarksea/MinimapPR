@@ -3007,7 +3007,7 @@ class FusionNode:
         )
 
     def _should_suppress_chunked_classification(self, product: LocalizedCandidate) -> bool:
-        if self._classification_chunking_policy is None:
+        if self._classification_chunking_policy is None or product.carries_authoritative_classification:
             return False
         return not self._classification_chunking_policy.should_dispatch(
             source_node_id=product.candidate.source_node_id,
@@ -3091,6 +3091,9 @@ class FusionNode:
         """
         cap = self.fusion_config.report_window_localized_emission_cap
         if cap <= 0:
+            return False
+        # A Rust render (a P7 render queued here) was never subject to the cap.
+        if product.deferred_classification is not None:
             return False
         # Only candidates that would classify on the localized branch are gated;
         # everything else (omni fallback) is the reporting policy's business.

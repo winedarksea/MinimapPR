@@ -9,10 +9,12 @@ inference on the clearest node's aligned clip, plus buffer reads and FFTs.
 That work must not run on the single SSE consumer, which also mirrors every
 node's ``raw_audio_frame`` into the buffer. So the render's product is queued
 on the classification stage like a Python-ingest product, carrying the
-remaining work as ``deferred_classification``; it gets that stage's chunking
-suppression, report-window gate, backpressure drops and timeout, and a
-classification worker releases a held fix (P5) when classification never
-happens. The detection then reaches rules through the rules queue.
+remaining work as ``deferred_classification``; it gets that stage's
+backpressure drops and timeout, and chunking suppression unless it carries the
+sidecar's label (as inline). Rust renders were never under the report-window
+cap, and a queued one is not either. A classification worker releases a held
+fix (P5) when classification never happens. The detection then reaches rules
+through the rules queue.
 """
 
 from __future__ import annotations
@@ -66,13 +68,15 @@ class LocalizedRenderReporter:
         clip classification. True when a classification worker now owns the
         product (and with it the held-fix release)."""
         host = self._host
+        report.localized_product.carries_authoritative_classification = (
+            report.payload.authoritative_classification is not None
+        )
         request = await self._point_network_request(report)
         if request is not None:
             return await self._queue_point_network_classification(report, request)
-        if host._classification_chunking_policy is not None and report.payload.authoritative_classification is None:
-            if host._should_suppress_chunked_classification(report.localized_product):
-                host._metrics.birdnet_chunk_dispatches_suppressed += 1
-                return False
+        if host._should_suppress_chunked_classification(report.localized_product):
+            host._metrics.birdnet_chunk_dispatches_suppressed += 1
+            return False
         classified = await self._render_classification(report)
         detection_product = await self._assemble_detection(report, classified)
         if detection_product is not None:

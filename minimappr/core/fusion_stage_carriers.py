@@ -64,6 +64,8 @@ class LocalizedCandidate:
     # (a point-network Rust render's clip classification, ``localized_render_reporting``);
     # returns the detections to deliver. None for every Python-ingest product.
     deferred_classification: Callable[[], Awaitable[list["DetectionProduct"]]] | None = None
+    # A Rust render carrying the sidecar's label: never chunk-suppressed, inline or on a worker.
+    carries_authoritative_classification: bool = False
 
 
 @dataclass(slots=True)
