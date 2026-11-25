@@ -8,6 +8,8 @@ GC pressure during long recordings.
 
 from __future__ import annotations
 
+from bisect import bisect_right
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -43,8 +45,10 @@ class _CapturedSensorStream:
     _samples: np.ndarray = field(init=False, default_factory=lambda: np.zeros(0, dtype=np.float32))
     _coverage: np.ndarray = field(init=False, default_factory=lambda: np.zeros(0, dtype=np.bool_))
     # (global start sample index, sample count, start_time_ns, time_quality, sequence)
-    # for every frame written; bounded like the samples (frames past the
-    # buffer end are not recorded, a timeline reset clears it).
+    # for every frame written, in write order; bounded like the samples (frames
+    # past the buffer end are not recorded, a timeline reset clears it). Writes
+    # may overlap (re-delivered uploads, frames placed by time outside the snap
+    # tolerance); ``frame_timings_in_range`` resolves them like the samples.
     _frame_timings: list[tuple[int, int, int, str | None, int | None]] = field(init=False, default_factory=list)
 
     def __post_init__(self) -> None:
@@ -169,7 +173,7 @@ class _CapturedSensorStream:
             return []
         range_start_index = self._time_to_sample_index(start_ns)
         range_end_index = self._time_to_sample_index(end_ns)
-        return [
+        frames_in_write_order = [
             CapturedFrameTiming(
                 sample_offset=frame_start_index - range_start_index,
                 sample_count=sample_count,
@@ -177,9 +181,10 @@ class _CapturedSensorStream:
                 time_quality=time_quality,
                 sequence=sequence,
             )
-            for frame_start_index, sample_count, start_time_ns, time_quality, sequence in sorted(self._frame_timings)
+            for frame_start_index, sample_count, start_time_ns, time_quality, sequence in self._frame_timings
             if frame_start_index < range_end_index and frame_start_index + sample_count > range_start_index
         ]
+        return frame_timings_with_later_writes_winning(frames_in_write_order, self.sample_rate_hz)
 
     def _time_to_sample_index(self, time_ns: int) -> int:
         if self._timeline_origin_ns is None:
@@ -203,6 +208,63 @@ class _CapturedSensorStream:
         if numerator >= 0:
             return (numerator + denominator // 2) // denominator
         return -((-numerator + denominator // 2) // denominator)
+
+
+def frame_timings_with_later_writes_winning(
+    frames_in_write_order: Sequence[CapturedFrameTiming],
+    sample_rate_hz: int,
+) -> list[CapturedFrameTiming]:
+    """Non-overlapping frame timings, sorted by ``sample_offset``.
+
+    The sample buffer keeps the last write of every sample, so each sample's
+    timing comes from the frame that wrote it last: an earlier frame keeps only
+    the pieces no later frame overwrote (a fully re-delivered frame vanishes).
+    A piece cut from a frame's front keeps that frame's packet timestamp
+    advanced by the cut samples at the nominal rate. Walking newest-first with
+    a sorted list of already-claimed spans keeps this O(n log n) per extract.
+    """
+    claimed_span_starts: list[int] = []
+    claimed_span_ends: list[int] = []
+    surviving_pieces: list[CapturedFrameTiming] = []
+    for frame in reversed(frames_in_write_order):
+        frame_start = frame.sample_offset
+        frame_end = frame.sample_offset + frame.sample_count
+        first_overlapping_span = bisect_right(claimed_span_ends, frame_start)
+        span_index = first_overlapping_span
+        uncovered_start = frame_start
+        while span_index < len(claimed_span_starts) and claimed_span_starts[span_index] < frame_end:
+            if claimed_span_starts[span_index] > uncovered_start:
+                surviving_pieces.append(
+                    _frame_timing_piece(frame, uncovered_start, claimed_span_starts[span_index], sample_rate_hz)
+                )
+            uncovered_start = max(uncovered_start, claimed_span_ends[span_index])
+            span_index += 1
+        if uncovered_start < frame_end:
+            surviving_pieces.append(_frame_timing_piece(frame, uncovered_start, frame_end, sample_rate_hz))
+        merged_span_start = frame_start
+        merged_span_end = frame_end
+        if span_index > first_overlapping_span:
+            merged_span_start = min(frame_start, claimed_span_starts[first_overlapping_span])
+            merged_span_end = max(frame_end, claimed_span_ends[span_index - 1])
+        claimed_span_starts[first_overlapping_span:span_index] = [merged_span_start]
+        claimed_span_ends[first_overlapping_span:span_index] = [merged_span_end]
+    return sorted(surviving_pieces, key=lambda piece: piece.sample_offset)
+
+
+def _frame_timing_piece(
+    frame: CapturedFrameTiming,
+    piece_start: int,
+    piece_end: int,
+    sample_rate_hz: int,
+) -> CapturedFrameTiming:
+    if piece_start == frame.sample_offset and piece_end == frame.sample_offset + frame.sample_count:
+        return frame
+    leading_cut_samples = piece_start - frame.sample_offset
+    return frame._replace(
+        sample_offset=piece_start,
+        sample_count=piece_end - piece_start,
+        start_time_ns=frame.start_time_ns + round(leading_cut_samples * 1_000_000_000 / sample_rate_hz),
+    )
 
 
 class ChunkedCaptureSessionBuffer:

@@ -139,13 +139,10 @@ class _NodeRowStorage:
         return "lar-frame-timing"
 
 
-async def test_calibration_capture_writes_frame_timing_that_replays_frame_by_frame(tmp_path: Path) -> None:
+async def _run_calibration_capture(tmp_path: Path, capture: ChunkedCaptureSessionBuffer, *, end_ns: int):
     frame = LocalCoordinateFrame(origin=ORIGIN, mode="flat")
-    capture = ChunkedCaptureSessionBuffer(SENSOR_IDS, max_duration_seconds=2.0)
-    _append_stepped_frames(capture, frame_count=6, stepped_from=2)
     work_dir = tmp_path / "work"
     work_dir.mkdir()
-    end_ns = CAPTURE_START_NS + 6 * FRAME_DURATION_NS
     record = CaptureSessionRecord(
         session_id="frame-timing",
         state=CaptureState.PROCESSING,
@@ -171,7 +168,13 @@ async def test_calibration_capture_writes_frame_timing_that_replays_frame_by_fra
         environment_provider=StaticEnvironmentProvider(temperature_c=20.0, humidity_fraction=0.5),
         artifact_dir=tmp_path / "artifacts",
     ).run(record)
-    bundle_path = write_bundle_zip(record.work_dir, build_ground_truth_payload([]), tmp_path / "bundle.zip")
+    return write_bundle_zip(record.work_dir, build_ground_truth_payload([]), tmp_path / "bundle.zip")
+
+
+async def test_calibration_capture_writes_frame_timing_that_replays_frame_by_frame(tmp_path: Path) -> None:
+    capture = ChunkedCaptureSessionBuffer(SENSOR_IDS, max_duration_seconds=2.0)
+    _append_stepped_frames(capture, frame_count=6, stepped_from=2)
+    bundle_path = await _run_calibration_capture(tmp_path, capture, end_ns=CAPTURE_START_NS + 6 * FRAME_DURATION_NS)
     with zipfile.ZipFile(bundle_path) as archive:
         assert "frame_timing/node-a.json" in archive.namelist()
 
@@ -190,6 +193,85 @@ async def test_calibration_capture_writes_frame_timing_that_replays_frame_by_fra
     assert [frame.frame.start_sample_index for frame in decoded.buffered_frames] == [0, 160, 320, 480, 640, 800]
     assert [frame.frame.sequence for frame in decoded.buffered_frames] == list(range(100, 106))
     assert decoded.buffered_frames[3].frame.time_quality is TimeQuality.NTP_DISCIPLINED
+
+
+SAMPLE_DURATION_NS = 1_000_000_000 // SAMPLE_RATE_HZ
+# Global sample index -> packet time on the capture's nominal timeline.
+def _nominal_time_ns(sample_index: int) -> int:
+    return CAPTURE_START_NS + sample_index * SAMPLE_DURATION_NS
+
+
+def _append_frame(
+    capture: ChunkedCaptureSessionBuffer,
+    *,
+    first_sample: int,
+    sample_count: int,
+    sequence: int,
+    placed_by_time: bool = False,
+) -> None:
+    """``placed_by_time`` omits the sample index, as a receipt-placed frame does."""
+    for sensor_id in SENSOR_IDS:
+        capture.append(
+            sensor_id=sensor_id,
+            sample_rate_hz=SAMPLE_RATE_HZ,
+            start_time_ns=_nominal_time_ns(first_sample),
+            samples=np.full(sample_count, float(sequence), dtype=np.float32),
+            start_sample_index=None if placed_by_time else first_sample,
+            time_quality=TimeQuality.GPS_LOCKED.value,
+            sequence=sequence,
+        )
+
+
+def _capture_with_overlapping_writes() -> ChunkedCaptureSessionBuffer:
+    """Re-delivered, mid-frame-overwritten and time-placed overlapping frames.
+
+    Re-delivery is live behaviour: the sidecar's sequence tracker observes but
+    never drops a duplicate upload, and republishes its raw_audio_frame.
+    """
+    capture = ChunkedCaptureSessionBuffer(SENSOR_IDS, max_duration_seconds=2.0)
+    for frame_index in range(4):
+        _append_frame(capture, first_sample=frame_index * FRAME_SAMPLES, sample_count=FRAME_SAMPLES, sequence=100 + frame_index)
+    _append_frame(capture, first_sample=FRAME_SAMPLES, sample_count=FRAME_SAMPLES, sequence=201)  # re-delivered frame 1
+    _append_frame(capture, first_sample=360, sample_count=40, sequence=250)  # overwrites the middle of frame 2
+    # Lands 100 samples into frame 3's tail: past the snap tolerance (half a frame).
+    _append_frame(capture, first_sample=540, sample_count=FRAME_SAMPLES, sequence=300, placed_by_time=True)
+    return capture
+
+
+EXPECTED_RESOLVED_FRAMES = (
+    CapturedFrameTiming(0, 160, _nominal_time_ns(0), TimeQuality.GPS_LOCKED.value, 100),
+    CapturedFrameTiming(160, 160, _nominal_time_ns(160), TimeQuality.GPS_LOCKED.value, 201),
+    CapturedFrameTiming(320, 40, _nominal_time_ns(320), TimeQuality.GPS_LOCKED.value, 102),
+    CapturedFrameTiming(360, 40, _nominal_time_ns(360), TimeQuality.GPS_LOCKED.value, 250),
+    # Front-cut piece of frame 2: its packet time advanced by the 80 cut samples.
+    CapturedFrameTiming(400, 80, _nominal_time_ns(400), TimeQuality.GPS_LOCKED.value, 102),
+    CapturedFrameTiming(480, 60, _nominal_time_ns(480), TimeQuality.GPS_LOCKED.value, 103),
+    CapturedFrameTiming(540, 160, _nominal_time_ns(540), TimeQuality.GPS_LOCKED.value, 300),
+)
+
+
+def test_overlapping_and_re_delivered_frames_resolve_like_the_samples_later_write_wins() -> None:
+    capture = _capture_with_overlapping_writes()
+    range_end_ns = _nominal_time_ns(700)
+
+    timings = capture.frame_timings_in_range(SENSOR_IDS[0], CAPTURE_START_NS, range_end_ns)
+
+    assert tuple(timings) == EXPECTED_RESOLVED_FRAMES
+    channels, _, _ = capture.extract_range(SENSOR_IDS, CAPTURE_START_NS, range_end_ns)
+    for timing in timings:
+        written = channels[0, timing.sample_offset : timing.sample_offset + timing.sample_count]
+        assert np.all(written == float(timing.sequence)), timing
+    table = frame_timing_table_from_capture("node-a", SAMPLE_RATE_HZ, timings, total_samples=int(channels.shape[1]))
+    assert table.frames == EXPECTED_RESOLVED_FRAMES
+
+
+async def test_calibration_extract_survives_overlapping_and_re_delivered_frames(tmp_path: Path) -> None:
+    bundle_path = await _run_calibration_capture(
+        tmp_path, _capture_with_overlapping_writes(), end_ns=_nominal_time_ns(700)
+    )
+
+    table = load_bundle(bundle_path).node_frame_timing("node-a")
+    assert table is not None and table.frames == EXPECTED_RESOLVED_FRAMES
 
 
 def _stepped_replay_bundle(tmp_path: Path) -> Path:
