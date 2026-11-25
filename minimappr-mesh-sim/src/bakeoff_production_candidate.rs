@@ -28,6 +28,7 @@ use minimappr_core::srp_phat::{
     estimate_tetrahedral_steering_with_solve_constraints, ChannelClockOffsets, NoiseFloorRelativeReference, SensorNodePositionStd,
     SolveChannelConstraints, SolverReferenceChannelFloor, SrpPhatConfig, SrpPhatEvaluation, DEFAULT_ABSOLUTE_REFERENCE_CHANNEL_RMS,
 };
+use minimappr_core::localization_event_timing::{derive_event_timing, CrossNodeGeometry, EventTimingConfig};
 use minimappr_core::tdoa_solver::cartesian_tdoa_solve::{solve_cartesian_tdoa, CartesianTdoaSolveRequest, NodePositionUncertainty};
 use minimappr_core::tdoa_solver::measurement_types::{normalized_pair_quality, BearingPrior, PairTdoaMeasurement, SensorPositions};
 use minimappr_core::tdoa_solver::nalgebra::{DMatrix, DVector, Vector3};
@@ -37,11 +38,6 @@ use crate::bakeoff_config::ProductionCandidateConfig;
 use crate::bakeoff_scenes::BakeoffScene;
 use crate::bakeoff_windows::{cut_window, BakeoffTrigger};
 
-/// `localization_event_span.rs`: the far sensor may hear the event the max
-/// lag before or after the trigger; a lag up to half the node-local window
-/// is already tolerated.
-const LAG_EXTENT_SIDES: f64 = 2.0;
-const NODE_LOCAL_WINDOW_TOLERATED_LAG_FRACTION: f64 = 0.5;
 /// `rust_tdoa_solve.py::_bearing_prior_from_direction` strength floor.
 const BEARING_PRIOR_MINIMUM_STRENGTH: f64 = 0.01;
 const DIRECTION_NORM_EPSILON: f64 = 1.0e-9;
@@ -61,12 +57,19 @@ pub fn sensor_id(node: usize) -> String {
     format!("node-{node:02}")
 }
 
-/// Seconds of audio the event solve reads; `lag_cap_s = None` lifts the cap.
+/// Seconds of audio the event solve reads: the sidecar's geometry-derived
+/// span (`localization_event_timing`); `lag_cap_s = None` lifts the bound.
 pub fn production_event_window_seconds(aperture_m: f64, sound_speed_mps: f64, config: &ProductionCandidateConfig, lag_cap_s: Option<f64>) -> f64 {
-    let node_local_window_s = config.node_local_window_seconds;
-    let max_lag_s = lag_cap_s.map_or(aperture_m / sound_speed_mps, |cap| (aperture_m / sound_speed_mps).min(cap));
-    let excess_lag_s = (max_lag_s - NODE_LOCAL_WINDOW_TOLERATED_LAG_FRACTION * node_local_window_s).max(0.0);
-    (node_local_window_s + LAG_EXTENT_SIDES * excess_lag_s).max(node_local_window_s)
+    let timing_config = EventTimingConfig {
+        node_local_window_seconds: config.node_local_window_seconds,
+        coverage_wait_enabled: true,
+        explicit_coverage_total_cap_seconds: 0.0,
+        coverage_delivery_margin_seconds: 0.0,
+        clock_margin_sigma: 0.0,
+        max_cross_node_lag_seconds: lag_cap_s.unwrap_or(f64::INFINITY),
+        max_buffer_seconds: f64::INFINITY,
+    };
+    derive_event_timing(Some(CrossNodeGeometry { max_cross_node_distance_m: aperture_m }), sound_speed_mps, &timing_config).event_span_seconds
 }
 
 fn srp_config(config: &ProductionCandidateConfig, quietest_node_floor_rms: f64, band_hz: [f32; 2]) -> SrpPhatConfig {

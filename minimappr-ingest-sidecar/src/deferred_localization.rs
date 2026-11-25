@@ -1,12 +1,15 @@
 //! Per-cluster-buffer parking lot for localizations held by the coverage wait
 //! (see `localization_coverage_wait.rs` for the policy and why it exists).
 //!
-//! Bounded by construction: at most one pending localization per buffer key
-//! (a newer candidate supersedes and dispatches the older one), and buffer
-//! keys are evicted together with their stream buffers. Ready payloads go to a
+//! Bounded by construction: at most `max_pending_per_buffer` pending
+//! localizations per buffer key (one more supersedes and dispatches the
+//! oldest), and buffer keys are evicted together with their stream buffers.
+//! More than one may be parked because on a km-spread network a second event
+//! can trigger while the first still waits seconds for the far node's audio;
+//! superseding it would solve it without that node. Ready payloads go to a
 //! small outbox the worker drains after every manifest and poll tick.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::{
     dsp::SensorStreamBuffer,
@@ -55,11 +58,13 @@ struct PendingLocalization {
 #[derive(Default)]
 struct BufferCoverageWaitState {
     tracker: ChannelStreamActivityTracker,
-    pending: Option<PendingLocalization>,
+    /// Oldest first.
+    pending: VecDeque<PendingLocalization>,
 }
 
 pub(crate) struct DeferredLocalizationScheduler {
     config: LocalizationCoverageWaitConfig,
+    max_pending_per_buffer: usize,
     clock: CoverageWaitClock,
     states_by_buffer_key: HashMap<String, BufferCoverageWaitState>,
     ready_payloads: Vec<ComputePayload>,
@@ -67,9 +72,10 @@ pub(crate) struct DeferredLocalizationScheduler {
 }
 
 impl DeferredLocalizationScheduler {
-    pub(crate) fn new(config: LocalizationCoverageWaitConfig) -> Self {
+    pub(crate) fn new(config: LocalizationCoverageWaitConfig, max_pending_per_buffer: usize) -> Self {
         Self {
             config,
+            max_pending_per_buffer: max_pending_per_buffer.max(1),
             clock: CoverageWaitClock::default(),
             states_by_buffer_key: HashMap::new(),
             ready_payloads: Vec::new(),
@@ -90,17 +96,21 @@ impl DeferredLocalizationScheduler {
     pub(crate) fn has_pending(&self, buffer_key: &str) -> bool {
         self.states_by_buffer_key
             .get(buffer_key)
-            .is_some_and(|state| state.pending.is_some())
+            .is_some_and(|state| !state.pending.is_empty())
     }
 
-    /// Window centre of the solve parked on `buffer_key`, if one is parked.
-    pub(crate) fn pending_window_center_time_ns(&self, buffer_key: &str) -> Option<i128> {
-        let pending = self
-            .states_by_buffer_key
-            .get(buffer_key)?
-            .pending
-            .as_ref()?;
-        Some(pending.span.center_time_ns)
+    /// Window centres of the solves parked on `buffer_key`, oldest first.
+    pub(crate) fn pending_window_center_times_ns(&self, buffer_key: &str) -> Vec<i128> {
+        self.states_by_buffer_key
+            .get(buffer_key)
+            .map(|state| {
+                state
+                    .pending
+                    .iter()
+                    .map(|pending| pending.span.center_time_ns)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Record channel progress for `buffer_key` (stall accounting). Called
@@ -135,11 +145,11 @@ impl DeferredLocalizationScheduler {
         }
         let now_ns = self.clock.now_ns();
         for (buffer_key, state) in self.states_by_buffer_key.iter_mut() {
-            if state.pending.is_none() {
+            if state.pending.is_empty() {
                 continue;
             }
             let Some(buffers) = buffers_by_key.get(buffer_key) else {
-                state.pending = None;
+                state.pending.clear();
                 continue;
             };
             state.tracker.observe(buffers, now_ns);
@@ -177,8 +187,8 @@ impl DeferredLocalizationScheduler {
     }
 
     /// Park a localization-only payload (plus any classifier render due on
-    /// the same frame) until `span` is covered. An older pending localization
-    /// for the same buffer is dispatched first.
+    /// the same frame) until `span` is covered. When the buffer already holds
+    /// `max_pending_per_buffer`, the oldest is dispatched first.
     pub(crate) fn defer(
         &mut self,
         buffer_key: &str,
@@ -192,7 +202,10 @@ impl DeferredLocalizationScheduler {
             .states_by_buffer_key
             .entry(buffer_key.to_string())
             .or_default();
-        if let Some(superseded) = state.pending.take() {
+        while state.pending.len() >= self.max_pending_per_buffer {
+            let Some(superseded) = state.pending.pop_front() else {
+                break;
+            };
             let waited_ns = now_ns.saturating_sub(superseded.first_deferred_ns);
             self.ready_payloads
                 .push(finalize_pending_payload(superseded, buffers));
@@ -201,7 +214,7 @@ impl DeferredLocalizationScheduler {
                 waited_ns,
             });
         }
-        state.pending = Some(PendingLocalization {
+        state.pending.push_back(PendingLocalization {
             span,
             first_deferred_ns: now_ns,
             payload_template,
@@ -234,7 +247,7 @@ impl DeferredLocalizationScheduler {
         let Some(state) = self.states_by_buffer_key.remove(buffer_key) else {
             return;
         };
-        if let Some(pending) = state.pending {
+        for pending in state.pending {
             let waited_ns = self
                 .clock
                 .now_ns()
@@ -261,26 +274,30 @@ impl DeferredLocalizationScheduler {
         ready_payloads: &mut Vec<ComputePayload>,
         outcomes: &mut Vec<CoverageWaitOutcome>,
     ) {
-        let Some(pending) = state.pending.as_ref() else {
-            return;
-        };
-        let waited_ns = now_ns.saturating_sub(pending.first_deferred_ns);
-        let decision = evaluate_window_coverage(
-            buffers,
-            pending.span,
-            &state.tracker,
-            config,
-            waited_ns,
-            now_ns,
-        );
-        if let CoverageWaitDecision::Ready { stop_reason } = decision {
-            let pending = state.pending.take().expect("pending checked above");
-            ready_payloads.push(finalize_pending_payload(pending, buffers));
-            outcomes.push(CoverageWaitOutcome {
-                stop_reason,
+        // Released oldest first, so solves leave in trigger order.
+        let mut still_waiting = VecDeque::with_capacity(state.pending.len());
+        while let Some(pending) = state.pending.pop_front() {
+            let waited_ns = now_ns.saturating_sub(pending.first_deferred_ns);
+            let decision = evaluate_window_coverage(
+                buffers,
+                pending.span,
+                &state.tracker,
+                config,
                 waited_ns,
-            });
+                now_ns,
+            );
+            match decision {
+                CoverageWaitDecision::Ready { stop_reason } => {
+                    ready_payloads.push(finalize_pending_payload(pending, buffers));
+                    outcomes.push(CoverageWaitOutcome {
+                        stop_reason,
+                        waited_ns,
+                    });
+                }
+                CoverageWaitDecision::Wait => still_waiting.push_back(pending),
+            }
         }
+        state.pending = still_waiting;
     }
 }
 

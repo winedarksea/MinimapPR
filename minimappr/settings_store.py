@@ -398,6 +398,10 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "localization_trigger_noise_floor_relative_db": float,
     "localization_solver_floor_relative_db": float,
     "localization_sensor_registry_stale_seconds": float,
+    "localization_coverage_delivery_margin_seconds": float,
+    "localization_event_span_clock_margin_sigma": float,
+    "localization_event_span_max_cross_node_lag_seconds": float,
+    "localization_coverage_max_pending_per_buffer": int,
     # --- end localization overhaul ---
 }
 

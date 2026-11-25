@@ -47,6 +47,7 @@ fn span_for_frame(frame_index: usize) -> LocalizationWindowSpan {
         center_time_ns: frame_end_ns - FRAME_DURATION_NS / 2,
         window_seconds: WINDOW_SECONDS,
         min_coverage_ratio: MIN_COVERAGE_RATIO,
+        coverage_total_cap_ns: None,
     }
 }
 

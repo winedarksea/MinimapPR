@@ -52,6 +52,21 @@ DEFAULT_NOISE_FLOOR_RELATIVE_TRIGGER_SNR_DB = 8.0
 # while still rejecting dead or muted channels.
 DEFAULT_LOCALIZATION_SOLVER_FLOOR_RELATIVE_DB = 3.0
 DEFAULT_LOCALIZATION_SENSOR_REGISTRY_STALE_SECONDS = 120.0
+# Geometry-derived event span (core/localization_event_timing.py). The coverage
+# wait holds for the largest cross-node lag plus this delivery skew between
+# nodes; with no cross-node lag it is the old fixed 1 s wait.
+DEFAULT_LOCALIZATION_COVERAGE_DELIVERY_MARGIN_SECONDS = 1.0
+# The far copy of a sound can also shift by the clocks' error: the span grows
+# by this many sigma of the worst cross-node pair's clock uncertainty.
+DEFAULT_LOCALIZATION_EVENT_SPAN_CLOCK_MARGIN_SIGMA = 3.0
+# Memory/latency safety bound on the derived cross-node lag: ~3.4 km of
+# baseline, a 20 s span. The sensor buffer is raised to hold that span.
+DEFAULT_LOCALIZATION_EVENT_SPAN_MAX_CROSS_NODE_LAG_SECONDS = 10.0
+# Parked event solves per sidecar cluster buffer: on a km network a new
+# trigger can open every cooldown (0.8 s) while earlier ones still wait up to
+# the safety-bounded lag for the far node; 8 covers a ~5 s wait. Each holds a
+# node-local template, so the bound is memory-cheap.
+DEFAULT_LOCALIZATION_COVERAGE_MAX_PENDING_PER_BUFFER = 8
 
 # Per-class clock uncertainty. A disciplined GPS/PPS clock is ~1 us; holdover
 # drifts away from that (the reported holdover error wins when larger); NTP is
@@ -68,6 +83,15 @@ _CLOCK_CLASS_UNCERTAINTY_SECONDS_BY_TIME_QUALITY: dict[TimeQuality, float] = {
 def default_localization_clock_class_uncertainty_seconds() -> dict[str, float]:
     return {quality.value: seconds for quality, seconds in _CLOCK_CLASS_UNCERTAINTY_SECONDS_BY_TIME_QUALITY.items()}
 
+
+# Range envelope (owner: "as long range as possible", e.g. a gunshot 2 km from
+# a small site). Far-field search and the radial range refinement stop here; a
+# solve still unresolved there is range_asymptotic at the envelope with a radial
+# std of at least that radius. The sanity gate sits just past it, and the
+# covariance ceiling lets an unobservable range carry its honest spread.
+DEFAULT_LOCALIZATION_FAR_FIELD_MAX_RANGE_M = 5_000.0
+DEFAULT_LOCALIZATION_MAX_RANGE_M = 6_000.0
+DEFAULT_LOCALIZATION_MAX_POSITION_STD_M = 5_000.0
 
 # --- Python-only defaults ------------------------------------------------------
 DEFAULT_SIDECAR_GEOMETRY_PUSH_ESTIMATE_MOVE_THRESHOLD_M = 0.5
@@ -101,6 +125,10 @@ RUST_FORWARDED_LOCALIZATION_SETTING_KEYS: tuple[str, ...] = (
     "localization_trigger_noise_floor_relative_db",
     "localization_solver_floor_relative_db",
     "localization_sensor_registry_stale_seconds",
+    "localization_coverage_delivery_margin_seconds",
+    "localization_event_span_clock_margin_sigma",
+    "localization_event_span_max_cross_node_lag_seconds",
+    "localization_coverage_max_pending_per_buffer",
 )
 PYTHON_ONLY_LOCALIZATION_OVERHAUL_SETTING_KEYS: tuple[str, ...] = (
     "sidecar_geometry_push_estimate_move_threshold_m",
@@ -156,6 +184,7 @@ def localization_overhaul_setting_errors(settings) -> list[str]:
         "sidecar_geometry_push_estimate_move_threshold_m",
         "sidecar_geometry_reconcile_interval_seconds",
         "localized_handoff_duplicate_merge_max_separation_m",
+        "localization_event_span_max_cross_node_lag_seconds",
     ):
         if not _is_positive_finite(getattr(settings, key)):
             errors.append(f"{key} must be a finite value > 0")
@@ -168,6 +197,12 @@ def localization_overhaul_setting_errors(settings) -> list[str]:
         errors.append("localization_trigger_noise_floor_relative_db must be a finite value > 0")
     if not math.isfinite(settings.localization_solver_floor_relative_db):
         errors.append("localization_solver_floor_relative_db must be finite")
+    for key in ("localization_coverage_delivery_margin_seconds", "localization_event_span_clock_margin_sigma"):
+        value = getattr(settings, key)
+        if not (math.isfinite(value) and value >= 0.0):
+            errors.append(f"{key} must be a finite value >= 0")
+    if settings.localization_coverage_max_pending_per_buffer < 1:
+        errors.append("localization_coverage_max_pending_per_buffer must be >= 1")
     if settings.localization_timeline_residual_window_frames < 1:
         errors.append("localization_timeline_residual_window_frames must be >= 1")
     percentile = settings.localization_timeline_residual_percentile

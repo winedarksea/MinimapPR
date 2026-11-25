@@ -15,6 +15,8 @@ pub mod localization_sensor_entry;
 pub mod packet_frame_timing;
 pub mod timestamp_step_detector;
 pub mod range_projection;
+// Event span / coverage cap / same-event window derived from node geometry.
+pub mod localization_event_timing;
 // Localization overhaul R2: Python-identical site ENU projection + sensor rotation.
 pub mod sensor_world_position;
 pub mod site_frame_projection;

@@ -57,17 +57,32 @@ class LiveCellResult:
     outcome: CellOutcome
     detection_count: int
     manifest_count: int
+    manifests_by_id: dict[str, dict] | None = None
 
 
-def run_range_matrix_cell(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cell: RangeMatrixCell) -> LiveCellResult:
+def run_range_matrix_cell(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cell: RangeMatrixCell,
+    *,
+    source_burst: SourceBurstSpec = SOURCE_BURST,
+    pre_roll_seconds: float = PRE_ROLL_SECONDS,
+    nearest_sensor_in_band_snr_db: float = NEAREST_SENSOR_IN_BAND_SNR_DB,
+    detection_wait_seconds: float = DETECTION_WAIT_SECONDS,
+    replay_manifests_over_sse: bool = False,
+) -> LiveCellResult:
+    """The keyword arguments serve the off-matrix km-range tests: an impulsive
+    burst, a fainter source, enough pre-roll that the buffers already hold a
+    km network's cross-node lag of history when the event triggers, and a
+    longer wait for its multi-second solve on the debug-build sidecar."""
     realized = realize_cell(cell)
     verdict = realized.oracle_verdict()
-    _first_arrival_s, last_arrival_end_s = realized.scene.emission_to_arrival_span_seconds(SOURCE_BURST.duration_seconds)
+    _first_arrival_s, last_arrival_end_s = realized.scene.emission_to_arrival_span_seconds(source_burst.duration_seconds)
     captures = render_calibrated_captures(
         realized.scene,
-        [Emission(PRE_ROLL_SECONDS, NEAREST_SENSOR_IN_BAND_SNR_DB, SOURCE_BURST)],
+        [Emission(pre_roll_seconds, nearest_sensor_in_band_snr_db, source_burst)],
         sensor_gain_relative_to_reference=realized.sensor_gain_relative_to_nearest,
-        capture_seconds=PRE_ROLL_SECONDS + last_arrival_end_s + TAIL_SECONDS,
+        capture_seconds=pre_roll_seconds + last_arrival_end_s + TAIL_SECONDS,
         sensor_noise_rms=SENSOR_NOISE_RMS,
         noise_seed=SENSOR_NOISE_SEED,
     )
@@ -81,11 +96,11 @@ def run_range_matrix_cell(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cell:
         )
         for reported in realized.reported_nodes
     ]
-    emission_offset_ns = int(round(PRE_ROLL_SECONDS * 1e9))
+    emission_offset_ns = int(round(pre_roll_seconds * 1e9))
 
     def event_detected(result) -> bool:
         span = event_arrival_span_ns(
-            realized, result.capture_start_packet_time_ns + emission_offset_ns, SOURCE_BURST.duration_seconds
+            realized, result.capture_start_packet_time_ns + emission_offset_ns, source_burst.duration_seconds
         )
         return bool(detections_overlapping_span(result.detections, span))
 
@@ -96,7 +111,8 @@ def run_range_matrix_cell(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cell:
         nodes=streaming_nodes,
         captures_by_node=captures,
         app_environment=RANGE_MATRIX_APP_ENVIRONMENT,
-        detection_wait_seconds=DETECTION_WAIT_SECONDS,
+        detection_wait_seconds=detection_wait_seconds,
+        replay_manifests_over_sse=replay_manifests_over_sse,
         detections_complete=event_detected,
     )
     outcome = score_cell(
@@ -104,6 +120,11 @@ def run_range_matrix_cell(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cell:
         verdict,
         run.detections,
         emission_packet_time_ns=run.capture_start_packet_time_ns + emission_offset_ns,
-        burst_seconds=SOURCE_BURST.duration_seconds,
+        burst_seconds=source_burst.duration_seconds,
     )
-    return LiveCellResult(outcome=outcome, detection_count=len(run.detections), manifest_count=len(run.manifests_by_id))
+    return LiveCellResult(
+        outcome=outcome,
+        detection_count=len(run.detections),
+        manifest_count=len(run.manifests_by_id),
+        manifests_by_id=run.manifests_by_id,
+    )

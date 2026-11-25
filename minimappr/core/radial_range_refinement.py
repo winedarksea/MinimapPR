@@ -1,4 +1,14 @@
-"""Unbounded one-dimensional range refinement for TDOA bearing estimates."""
+"""One-dimensional range refinement for TDOA bearing estimates.
+
+The search doubles the radius while the cost keeps falling. A far-field
+solve's cost falls all the way to float saturation (10^8-10^9 m), so callers
+pass ``maximum_radius_m`` (the far-field envelope, ``localization_far_field_max_range_m``):
+a cost still falling there means the range is unobservable within the
+envelope, and the result is ``range_asymptotic`` at the envelope with a radial
+std at least that radius (bearing kept, range honestly unknown) instead of a
+runaway radius every downstream sanity gate would drop. ``None`` keeps the
+unbounded search (the Rust oracle parity cases).
+"""
 
 from __future__ import annotations
 
@@ -52,6 +62,7 @@ def adaptive_radial_refinement(
     residual_function: Callable[[np.ndarray], np.ndarray],
     effective_time_std_s: float,
     asymptotic_radial_std_fraction: float | None = None,
+    maximum_radius_m: float | None = None,
 ) -> RadialRefinement:
     normalized_direction = direction / max(float(np.linalg.norm(direction)), EPSILON)
 
@@ -68,7 +79,13 @@ def adaptive_radial_refinement(
     center_log_radius = math.log(center_radius_m)
     lower_cost = squared_cost_for_log_radius(lower_log_radius)
     center_cost = squared_cost_for_log_radius(center_log_radius)
-    upper_radius_m = center_radius_m * RADIAL_SEARCH_EXPANSION_FACTOR
+    # At least one expansion above the centre, so the bracket is never empty.
+    ceiling_radius_m = (
+        math.inf
+        if maximum_radius_m is None
+        else max(float(maximum_radius_m), center_radius_m * RADIAL_SEARCH_EXPANSION_FACTOR)
+    )
+    upper_radius_m = min(center_radius_m * RADIAL_SEARCH_EXPANSION_FACTOR, ceiling_radius_m)
     upper_log_radius = math.log(upper_radius_m)
     upper_cost = squared_cost_for_log_radius(upper_log_radius)
 
@@ -78,9 +95,12 @@ def adaptive_radial_refinement(
         and upper_cost < center_cost
         and expansion_count < MAX_RADIAL_SEARCH_EXPANSIONS
     ):
+        if upper_radius_m >= ceiling_radius_m:
+            # Still falling at the envelope: asymptotic there (no interior minimum).
+            break
         lower_log_radius, lower_cost = center_log_radius, center_cost
         center_log_radius, center_cost = upper_log_radius, upper_cost
-        upper_radius_m *= RADIAL_SEARCH_EXPANSION_FACTOR
+        upper_radius_m = min(upper_radius_m * RADIAL_SEARCH_EXPANSION_FACTOR, ceiling_radius_m)
         if not np.isfinite(upper_radius_m):
             break
         upper_log_radius = math.log(upper_radius_m)

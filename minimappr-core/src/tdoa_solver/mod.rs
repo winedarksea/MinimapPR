@@ -43,6 +43,8 @@ mod cartesian_solver_tests;
 #[cfg(test)]
 mod degenerate_input_tests;
 #[cfg(test)]
+mod radial_range_ceiling_tests;
+#[cfg(test)]
 mod joint_objective_tests;
 #[cfg(test)]
 mod loop_consistency_tests;

@@ -68,6 +68,8 @@ from minimappr.core.sensor_span_coverage_wait import SensorStreamActivityTracker
 from minimappr.core.onset_cluster_attribution_stage import OnsetClusterAttributor  # Field Mode W3-attribution
 from minimappr.core.onset_window_label_reconciliation import OnsetWindowLabelReconciler, WindowSibling
 from minimappr.core.ingest_relative_trigger import NoiseFloorRelativeTrigger  # Field Mode W3-attribution
+from minimappr.core.ingest_same_event_gate import same_event_gate_from_settings
+from minimappr.core.python_ingest_event_span import python_ingest_event_timing, required_coverage_deadline_seconds
 from minimappr.core.ingest import EnvironmentUpdater, IngestProcessor
 from minimappr.core.live_ingest_state import LiveIngestState
 from minimappr.core.localized_render_handoff import LocalizedRenderHandoff
@@ -98,6 +100,7 @@ from minimappr.core.range_projection import (
     RANGE_BEARING_PROJECTED,
     RANGE_BOUNDARY,
     RANGE_REFINED,
+    UNOBSERVABLE_RANGE_MODES,
     apply_unobservable_range_haircut,
     normalize_range_mode,
 )
@@ -148,12 +151,6 @@ from minimappr.utils.audio import rms
 
 
 logger = logging.getLogger(__name__)
-
-# Absolute distance-from-origin backstop for the localization sanity gate. The
-# primary gate measures range from the contributing-sensor centroid (Phase 2), so a
-# node surveyed far from origin still gets its full 1 km envelope; this backstop only
-# catches runaway coordinates well beyond any plausible deployment footprint.
-_SANITY_GATE_ORIGIN_BACKSTOP_M = 5000.0
 
 
 @dataclass(slots=True)
@@ -492,6 +489,7 @@ class FusionNode:
                 if settings.trigger_noise_floor_relative_enabled
                 else None
             ),
+            same_event_gate=same_event_gate_from_settings(settings),
         )
         self._classification_orchestrator = ClassificationOrchestrator(
             classifier=classifier,
@@ -1440,6 +1438,7 @@ class FusionNode:
         center_time_ns: int,
         window_seconds: float,
         timeout_s: float,
+        total_cap_seconds: float | None = None,
         poll_interval_s: float = 0.005,
     ) -> tuple[bool, list[dict[str, Any]]]:
         """Yield until the sensor buffers cover [center ± window/2].
@@ -1448,11 +1447,21 @@ class FusionNode:
         within `timeout_s`. With the coverage race fix on, the wait then also
         holds for every other still-streaming node (stall budget + total cap),
         so a fast tetra no longer wins the race and excludes later nodes.
+        ``total_cap_seconds`` is the candidate's geometry-derived cap
+        (core/python_ingest_event_span.py); None = the node-local cap (the
+        explicit override, else the delivery margin).
         """
         cfg = self.localization_config
         half_window_ns = int(window_seconds / 2 * 1_000_000_000)
         min_needed = max(1, min(len(sensor_ids), int(cfg.min_sensors_for_2d)))
         wait_for_all = bool(cfg.localization_coverage_wait_all_streaming_nodes_enabled)
+        if total_cap_seconds is None:
+            explicit_cap_seconds = float(cfg.localization_coverage_total_cap_seconds)
+            total_cap_seconds = (
+                explicit_cap_seconds
+                if explicit_cap_seconds > 0.0
+                else float(self.settings.localization_coverage_delivery_margin_seconds)
+            )
         result = await await_sensor_span_coverage(
             buffer=self.buffer,
             sensor_ids=sensor_ids,
@@ -1460,7 +1469,7 @@ class FusionNode:
             span_end_ns=center_time_ns + half_window_ns,
             # Stall budget 0 = return as soon as min_needed are covered (pre-fix behaviour).
             stall_budget_seconds=cfg.localization_coverage_stall_budget_seconds if wait_for_all else 0.0,
-            total_cap_seconds=max(timeout_s, cfg.localization_coverage_total_cap_seconds if wait_for_all else 0.0),
+            total_cap_seconds=max(timeout_s, total_cap_seconds if wait_for_all else 0.0),
             poll_interval_seconds=poll_interval_s,
             activity_tracker=self._sensor_stream_activity,
             required_covered_count=min_needed,
@@ -1534,8 +1543,20 @@ class FusionNode:
             )
             return None
 
-        window_seconds = self.localization_config.localization_window_seconds
-        timeout_s = self.localization_config.localization_buffer_wait_max_seconds
+        node_local_window_seconds = self.localization_config.localization_window_seconds
+        # Cross-node: the span and wait follow the largest baseline / c, so a
+        # km-spread cluster's far node is read (core/localization_event_timing.py).
+        event_timing = await python_ingest_event_timing(
+            settings=self.settings,
+            registry=self.registry,
+            environment_provider=self.environment_provider,
+            sensor_positions=sensor_positions,
+            node_local_window_seconds=node_local_window_seconds,
+        )
+        window_seconds = event_timing.event_span_seconds
+        timeout_s = required_coverage_deadline_seconds(
+            self.localization_config.localization_buffer_wait_max_seconds, event_timing, node_local_window_seconds
+        )
         min_localization_sensors = max(2, int(self.localization_config.min_sensors_for_2d))
         # Wait for the per-node sensor buffers to actually cover the requested
         # window before asking for it. The legacy fixed 40 ms grace-sleep
@@ -1546,6 +1567,7 @@ class FusionNode:
             center_time_ns=candidate.event_time_ns,
             window_seconds=window_seconds,
             timeout_s=timeout_s,
+            total_cap_seconds=event_timing.coverage_total_cap_seconds,
         )
         if not ready:
             half_window_ns = int(window_seconds / 2 * 1_000_000_000)
@@ -1652,7 +1674,7 @@ class FusionNode:
         localization_audio_quality = await self.buffer.get_synchronized_window_coverage_stats(
             sensor_ids=selected_ids,
             center_time_ns=candidate.event_time_ns,
-            window_seconds=self.localization_config.localization_window_seconds,
+            window_seconds=window_seconds,
             sample_rate_hz=candidate.sample_rate_hz,
         )
         classification_windows = await self._classification_windows_for_event(
@@ -2151,6 +2173,7 @@ class FusionNode:
         position_m,
         contributing_centroid_m,
         capability_tier: str | None = None,
+        range_projection_mode: str | None = None,
     ):
         """Range-proportional covariance clamp shared by both ingest seams.
 
@@ -2161,6 +2184,12 @@ class FusionNode:
 
         When ``capability_tier`` says altitude was not solved, the vertical axis is
         widened first so the ceiling clamp below still applies to the honest value.
+
+        An unobservable-range mode's point is a placeholder along the ray (often
+        the 50 m default): the source may be anywhere out to the far-field
+        envelope, so the range term is the envelope, not the placeholder's
+        distance. Otherwise a 2 km gunshot's honest radial spread would be
+        clamped to the placeholder's 50 m.
         """
         cfg = self.localization_config
         if capability_tier is not None and capability_tier not in {"full_3d", "3d"}:
@@ -2171,6 +2200,8 @@ class FusionNode:
             cen = np.asarray(contributing_centroid_m, dtype=np.float64).reshape(-1)
             if pos.size == 3 and cen.size == 3 and np.all(np.isfinite(pos)) and np.all(np.isfinite(cen)):
                 range_m = float(np.linalg.norm(pos - cen))
+        if normalize_range_mode(range_projection_mode) in UNOBSERVABLE_RANGE_MODES:
+            range_m = max(range_m, float(cfg.localization_far_field_max_range_m))
         capped, range_capped = clamp_covariance_eigenvalues_range_proportional(
             covariance_m2,
             range_m=range_m,
@@ -2314,8 +2345,10 @@ class FusionNode:
         position = np.asarray(position_m, dtype=np.float64).reshape(-1)
         if position.size != 3 or not np.all(np.isfinite(position)):
             return False
-        if float(np.linalg.norm(position)) > _SANITY_GATE_ORIGIN_BACKSTOP_M:
-            return False
+        # Measured from the contributing sensors (the origin when unknown), so a
+        # node surveyed far from origin keeps its full envelope. The radial
+        # search is bounded by the far-field envelope, so a runaway radius no
+        # longer reaches here.
 
         max_range_m = self.localization_config.localization_max_range_m
         if max_range_m <= 0.0:
@@ -2446,6 +2479,7 @@ class FusionNode:
             position_m=localization.position_m,
             contributing_centroid_m=contributing_centroid_m,
             capability_tier=capability_tier,
+            range_projection_mode=range_projection_mode,
         )
         return LocalizationBranch(
             localization_position_m=localization.position_m,
@@ -3236,7 +3270,8 @@ class FusionNode:
             enqueued_ns=enqueued_ns,
         )
         if await self._enqueue_stage(self._localization_queue, candidate):
-            self._ingest_processor.confirm_trigger(result.event_time_ns)
+            if result.trigger is not None:
+                self._ingest_processor.confirm_trigger(result.trigger)
             self._metrics.triggers_enqueued += 1
             self._metrics.last_trigger_enqueue_ns = enqueued_ns
             result.response.queued_event_id = candidate.id

@@ -1,0 +1,307 @@
+{
+ "event_timing_cases": [
+  {
+   "name": "node_local_tetra",
+   "sound_speed_mps": 343.2,
+   "geometry": null,
+   "config": {
+    "node_local_window_seconds": 0.032,
+    "coverage_wait_enabled": true,
+    "explicit_coverage_total_cap_seconds": 0.0,
+    "coverage_delivery_margin_seconds": 1.0,
+    "clock_margin_sigma": 3.0,
+    "max_cross_node_lag_seconds": 10.0,
+    "max_buffer_seconds": 32.0
+   },
+   "expected": {
+    "cross_node_lag_seconds": 0.0,
+    "event_span_seconds": 0.032,
+    "coverage_total_cap_seconds": 1.0,
+    "lag_bounded": false
+   }
+  },
+  {
+   "name": "compact_site_2m_keeps_node_local_window",
+   "sound_speed_mps": 343.2,
+   "geometry": {
+    "max_cross_node_distance_m": 2.0
+   },
+   "config": {
+    "node_local_window_seconds": 0.032,
+    "coverage_wait_enabled": true,
+    "explicit_coverage_total_cap_seconds": 0.0,
+    "coverage_delivery_margin_seconds": 1.0,
+    "clock_margin_sigma": 3.0,
+    "max_cross_node_lag_seconds": 10.0,
+    "max_buffer_seconds": 32.0
+   },
+   "expected": {
+    "cross_node_lag_seconds": 0.005827505827505828,
+    "event_span_seconds": 0.032,
+    "coverage_total_cap_seconds": 1.005827505827506,
+    "lag_bounded": false
+   }
+  },
+  {
+   "name": "compact_site_20m_gps",
+   "sound_speed_mps": 343.2,
+   "geometry": {
+    "max_cross_node_distance_m": 20.0
+   },
+   "config": {
+    "node_local_window_seconds": 0.032,
+    "coverage_wait_enabled": true,
+    "explicit_coverage_total_cap_seconds": 0.0,
+    "coverage_delivery_margin_seconds": 1.0,
+    "clock_margin_sigma": 3.0,
+    "max_cross_node_lag_seconds": 10.0,
+    "max_buffer_seconds": 32.0
+   },
+   "expected": {
+    "cross_node_lag_seconds": 0.05827505827505828,
+    "event_span_seconds": 0.11655011655011656,
+    "coverage_total_cap_seconds": 1.0582750582750582,
+    "lag_bounded": false
+   }
+  },
+  {
+   "name": "point_network_1500m_ntp",
+   "sound_speed_mps": 343.2,
+   "geometry": {
+    "max_cross_node_distance_m": 1500.0
+   },
+   "config": {
+    "node_local_window_seconds": 0.032,
+    "coverage_wait_enabled": true,
+    "explicit_coverage_total_cap_seconds": 0.0,
+    "coverage_delivery_margin_seconds": 1.0,
+    "clock_margin_sigma": 3.0,
+    "max_cross_node_lag_seconds": 10.0,
+    "max_buffer_seconds": 32.0
+   },
+   "expected": {
+    "cross_node_lag_seconds": 4.370629370629371,
+    "event_span_seconds": 8.741258741258742,
+    "coverage_total_cap_seconds": 5.370629370629371,
+    "lag_bounded": false
+   }
+  },
+  {
+   "name": "point_network_2000m",
+   "sound_speed_mps": 343.2,
+   "geometry": {
+    "max_cross_node_distance_m": 2000.0
+   },
+   "config": {
+    "node_local_window_seconds": 0.032,
+    "coverage_wait_enabled": true,
+    "explicit_coverage_total_cap_seconds": 0.0,
+    "coverage_delivery_margin_seconds": 1.0,
+    "clock_margin_sigma": 3.0,
+    "max_cross_node_lag_seconds": 10.0,
+    "max_buffer_seconds": 32.0
+   },
+   "expected": {
+    "cross_node_lag_seconds": 5.827505827505828,
+    "event_span_seconds": 11.655011655011656,
+    "coverage_total_cap_seconds": 6.827505827505828,
+    "lag_bounded": false
+   }
+  },
+  {
+   "name": "safety_bound_5km",
+   "sound_speed_mps": 343.2,
+   "geometry": {
+    "max_cross_node_distance_m": 5000.0
+   },
+   "config": {
+    "node_local_window_seconds": 0.032,
+    "coverage_wait_enabled": true,
+    "explicit_coverage_total_cap_seconds": 0.0,
+    "coverage_delivery_margin_seconds": 1.0,
+    "clock_margin_sigma": 3.0,
+    "max_cross_node_lag_seconds": 10.0,
+    "max_buffer_seconds": 32.0
+   },
+   "expected": {
+    "cross_node_lag_seconds": 10.0,
+    "event_span_seconds": 20.0,
+    "coverage_total_cap_seconds": 11.0,
+    "lag_bounded": true
+   }
+  },
+  {
+   "name": "explicit_cap_override_bounds_the_lag",
+   "sound_speed_mps": 343.2,
+   "geometry": {
+    "max_cross_node_distance_m": 1500.0
+   },
+   "config": {
+    "node_local_window_seconds": 0.032,
+    "coverage_wait_enabled": true,
+    "explicit_coverage_total_cap_seconds": 1.0,
+    "coverage_delivery_margin_seconds": 1.0,
+    "clock_margin_sigma": 3.0,
+    "max_cross_node_lag_seconds": 10.0,
+    "max_buffer_seconds": 32.0
+   },
+   "expected": {
+    "cross_node_lag_seconds": 1.0,
+    "event_span_seconds": 2.0,
+    "coverage_total_cap_seconds": 1.0,
+    "lag_bounded": true
+   }
+  },
+  {
+   "name": "explicit_cap_override_on_node_local",
+   "sound_speed_mps": 343.2,
+   "geometry": null,
+   "config": {
+    "node_local_window_seconds": 0.032,
+    "coverage_wait_enabled": true,
+    "explicit_coverage_total_cap_seconds": 2.5,
+    "coverage_delivery_margin_seconds": 1.0,
+    "clock_margin_sigma": 3.0,
+    "max_cross_node_lag_seconds": 10.0,
+    "max_buffer_seconds": 32.0
+   },
+   "expected": {
+    "cross_node_lag_seconds": 0.0,
+    "event_span_seconds": 0.032,
+    "coverage_total_cap_seconds": 2.5,
+    "lag_bounded": false
+   }
+  },
+  {
+   "name": "short_buffer_bounds_the_lag",
+   "sound_speed_mps": 343.2,
+   "geometry": {
+    "max_cross_node_distance_m": 1500.0
+   },
+   "config": {
+    "node_local_window_seconds": 0.032,
+    "coverage_wait_enabled": true,
+    "explicit_coverage_total_cap_seconds": 0.0,
+    "coverage_delivery_margin_seconds": 1.0,
+    "clock_margin_sigma": 3.0,
+    "max_cross_node_lag_seconds": 10.0,
+    "max_buffer_seconds": 5.0
+   },
+   "expected": {
+    "cross_node_lag_seconds": 1.984,
+    "event_span_seconds": 3.968,
+    "coverage_total_cap_seconds": 2.984,
+    "lag_bounded": true
+   }
+  },
+  {
+   "name": "coverage_wait_off_keeps_node_local_window",
+   "sound_speed_mps": 343.2,
+   "geometry": {
+    "max_cross_node_distance_m": 1500.0
+   },
+   "config": {
+    "node_local_window_seconds": 0.032,
+    "coverage_wait_enabled": false,
+    "explicit_coverage_total_cap_seconds": 0.0,
+    "coverage_delivery_margin_seconds": 1.0,
+    "clock_margin_sigma": 3.0,
+    "max_cross_node_lag_seconds": 10.0,
+    "max_buffer_seconds": 32.0
+   },
+   "expected": {
+    "cross_node_lag_seconds": 4.370629370629371,
+    "event_span_seconds": 0.032,
+    "coverage_total_cap_seconds": 5.370629370629371,
+    "lag_bounded": false
+   }
+  }
+ ],
+ "same_event_window_cases": [
+  {
+   "name": "same_node_is_the_cooldown",
+   "sound_speed_mps": 343.2,
+   "trigger_cooldown_seconds": 0.8,
+   "node_distance_m": 0.0,
+   "pair_clock_uncertainty_seconds": 0.0,
+   "config": {
+    "node_local_window_seconds": 0.032,
+    "coverage_wait_enabled": true,
+    "explicit_coverage_total_cap_seconds": 0.0,
+    "coverage_delivery_margin_seconds": 1.0,
+    "clock_margin_sigma": 3.0,
+    "max_cross_node_lag_seconds": 10.0,
+    "max_buffer_seconds": 32.0
+   },
+   "expected_window_seconds": 0.8
+  },
+  {
+   "name": "compact_pair_20m",
+   "sound_speed_mps": 343.2,
+   "trigger_cooldown_seconds": 0.8,
+   "node_distance_m": 20.0,
+   "pair_clock_uncertainty_seconds": 1.4142135623730952e-06,
+   "config": {
+    "node_local_window_seconds": 0.032,
+    "coverage_wait_enabled": true,
+    "explicit_coverage_total_cap_seconds": 0.0,
+    "coverage_delivery_margin_seconds": 1.0,
+    "clock_margin_sigma": 3.0,
+    "max_cross_node_lag_seconds": 10.0,
+    "max_buffer_seconds": 32.0
+   },
+   "expected_window_seconds": 0.8582793009157454
+  },
+  {
+   "name": "km_pair_1500m_ntp",
+   "sound_speed_mps": 343.2,
+   "trigger_cooldown_seconds": 0.8,
+   "node_distance_m": 1500.0,
+   "pair_clock_uncertainty_seconds": 0.0028284271247461905,
+   "config": {
+    "node_local_window_seconds": 0.032,
+    "coverage_wait_enabled": true,
+    "explicit_coverage_total_cap_seconds": 0.0,
+    "coverage_delivery_margin_seconds": 1.0,
+    "clock_margin_sigma": 3.0,
+    "max_cross_node_lag_seconds": 10.0,
+    "max_buffer_seconds": 32.0
+   },
+   "expected_window_seconds": 5.1791146520036095
+  },
+  {
+   "name": "km_pair_bounded_by_safety",
+   "sound_speed_mps": 343.2,
+   "trigger_cooldown_seconds": 0.8,
+   "node_distance_m": 5000.0,
+   "pair_clock_uncertainty_seconds": 1.4142135623730952e-06,
+   "config": {
+    "node_local_window_seconds": 0.032,
+    "coverage_wait_enabled": true,
+    "explicit_coverage_total_cap_seconds": 0.0,
+    "coverage_delivery_margin_seconds": 1.0,
+    "clock_margin_sigma": 3.0,
+    "max_cross_node_lag_seconds": 10.0,
+    "max_buffer_seconds": 32.0
+   },
+   "expected_window_seconds": 10.8
+  },
+  {
+   "name": "cooldown_off_opens_every_trigger",
+   "sound_speed_mps": 343.2,
+   "trigger_cooldown_seconds": 0.0,
+   "node_distance_m": 1500.0,
+   "pair_clock_uncertainty_seconds": 0.0028284271247461905,
+   "config": {
+    "node_local_window_seconds": 0.032,
+    "coverage_wait_enabled": true,
+    "explicit_coverage_total_cap_seconds": 0.0,
+    "coverage_delivery_margin_seconds": 1.0,
+    "clock_margin_sigma": 3.0,
+    "max_cross_node_lag_seconds": 10.0,
+    "max_buffer_seconds": 32.0
+   },
+   "expected_window_seconds": 0.0
+  }
+ ]
+}

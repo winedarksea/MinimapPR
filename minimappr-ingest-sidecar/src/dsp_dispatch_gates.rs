@@ -309,6 +309,8 @@ impl DspWorker {
             LocalizationTriggerEvidence {
                 windows: &windows,
                 node_frame_relatively_loud: node_frame.relatively_loud,
+                layout: &owned.sensor_layout,
+                sound_speed_mps: owned.effective_sound_speed_mps,
             },
         );
         // Taken before a coverage deferral clears `run_srp`: the parked
@@ -328,14 +330,15 @@ impl DspWorker {
             active_channels =
                 self.recenter_localization_window(&owned, &mut buffered, event_center_time_ns)?;
         }
+        let event_timing = derived_event_timing(
+            &owned.sensor_layout,
+            &self.config,
+            owned.effective_sound_speed_mps,
+        );
         let coverage_deferral_span = self.coverage_deferral_span(
             &owned.buffer_key,
             buffered.localization_center_time_ns,
-            event_solve_window_seconds(
-                &owned.sensor_layout,
-                &self.config,
-                owned.effective_sound_speed_mps,
-            ),
+            event_timing,
             timing_gates.on_localization_cadence,
             solve_eligible_sensor_count,
         );
@@ -414,7 +417,11 @@ impl DspWorker {
         // Past the last early return: the triggered solve now either leaves
         // with this payload or parks for the coverage wait, so it counts.
         if timing_gates.event_trigger.is_some() {
-            self.commit_localization_trigger(&gate_key, buffered.audio_end_ns);
+            self.commit_localization_trigger(
+                &gate_key,
+                buffered.audio_end_ns,
+                &owned.sensor_layout.reporting_node_id,
+            );
         }
         let node_noise_floor_rms = self
             .localization_trigger

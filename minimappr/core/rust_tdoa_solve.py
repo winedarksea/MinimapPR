@@ -154,6 +154,7 @@ def solve_localization_from_rust_tdoas(
     interpolation_factor: int,
     far_field_default_range_m: float,
     far_field_prior_radial_std_m: float | None = None,
+    far_field_max_range_m: float | None = None,
     bearing_strength: float = 1.0,
     bearing_observed_obs_floor: float | None = None,
     node_position_uncertainty: NodePositionUncertainty | None = None,
@@ -218,6 +219,7 @@ def solve_localization_from_rust_tdoas(
             far_field_initial_range_m=far_field_default_range_m,
             far_field_prior_radial_std_m=far_field_prior_radial_std_m,
             radial_refinement_enabled=True,
+            far_field_max_range_m=far_field_max_range_m,
             node_position_uncertainty=node_position_uncertainty,
             **(
                 {"bearing_observed_obs_floor": bearing_observed_obs_floor}

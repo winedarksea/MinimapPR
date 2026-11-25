@@ -677,6 +677,7 @@ def build_localizer_from_settings(settings: Settings | LocalizationConfig) -> Lo
         node_bearing_strength=cfg.localization_node_bearing_strength,
         amplitude_ratio_strength=cfg.localization_amplitude_ratio_strength,
         far_field_default_range_m=cfg.localization_far_field_default_range_m,
+        far_field_max_range_m=cfg.localization_far_field_max_range_m,
         cross_node_max_tau_s=(
             getattr(settings, "localization_cross_node_max_tau_seconds", None)
             if cross_node_enabled

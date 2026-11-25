@@ -29,6 +29,7 @@ from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.ingest_health import IngestHealthClassifier, runner_stats_from_timing_diagnostics
 from minimappr.core.ingest_relative_trigger import NoiseFloorRelativeTrigger
+from minimappr.core.ingest_same_event_gate import IngestTrigger, SameEventTriggerGate, default_same_event_gate
 from minimappr.core.live_ingest_state import FrameIdentity, LiveIngestState
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.node_position_estimator import StationaryKdeState, compute_stationary_kde
@@ -92,6 +93,8 @@ class IngestResult:
     observation_ids: list[str] | None = None
     environment_counts: EnvironmentCounts | None = None
     sequence_gap_count: int = 0
+    # What ``confirm_trigger`` commits to the same-event gate once enqueued.
+    trigger: IngestTrigger | None = None
 
 
 class EnvironmentUpdater:
@@ -156,6 +159,7 @@ class IngestProcessor:
         node_position_kde_rejection_streak_reset: int = 60,
         gps_2d_altitude_mode: str = "site_origin",
         relative_trigger: NoiseFloorRelativeTrigger | None = None,
+        same_event_gate: SameEventTriggerGate | None = None,
     ) -> None:
         self._localization_config = localization_config
         # Field Mode W3-attribution: optional noise-floor-relative trigger, OR'd with trigger_rms.
@@ -187,7 +191,8 @@ class IngestProcessor:
         # "raw" restores the legacy passthrough.
         self._gps_2d_altitude_mode = str(gps_2d_altitude_mode).strip().lower()
 
-        self._last_trigger_ns = 0
+        # Geometry-aware cooldown (core/ingest_same_event_gate.py).
+        self._same_event_gate = same_event_gate or default_same_event_gate(localization_config)
         self._accepted_frame_count = 0
         self._last_audio_summary_publish_ns_by_node: dict[str, int] = {}
         self._preprocess_locks_by_node: dict[str, asyncio.Lock] = {}
@@ -215,7 +220,7 @@ class IngestProcessor:
 
     @property
     def last_trigger_ns(self) -> int:
-        return self._last_trigger_ns
+        return self._same_event_gate.last_trigger_ns
 
     @property
     def accepted_frame_count(self) -> int:
@@ -332,9 +337,9 @@ class IngestProcessor:
             "horizontal_std_m": state.horizontal_std_m,
         }
 
-    def confirm_trigger(self, event_time_ns: int) -> None:
-        """Commit the cooldown timestamp after a trigger was successfully enqueued."""
-        self._last_trigger_ns = event_time_ns
+    def confirm_trigger(self, trigger: IngestTrigger) -> None:
+        """Commit the cooldown after a trigger was successfully enqueued."""
+        self._same_event_gate.commit(trigger)
 
     async def process_frame(
         self,
@@ -605,7 +610,12 @@ class IngestProcessor:
         else:
             frame_duration_ns = int((processed.shape[1] / frame.sample_rate_hz) * 1_000_000_000)
             center_time_ns = frame.start_time_ns + max(0, frame_duration_ns - half_window_ns)
-        cooldown_ns = int(self._localization_config.trigger_cooldown_seconds * 1_000_000_000)
+        trigger = self._same_event_gate.trigger_for(
+            event_time_ns=center_time_ns,
+            node_id=normalized_node.id,
+            node_position_m=normalized_node.position_m,
+            time_quality=frame.time_quality.value,
+        )
 
         relatively_loud = self._relative_trigger is not None and self._relative_trigger.observe(
             normalized_node.id, frame_energy, processed.shape[1] / frame.sample_rate_hz
@@ -614,11 +624,10 @@ class IngestProcessor:
         if (
             not buffer_uses_receipt_time
             and (frame_energy >= self._localization_config.trigger_rms or relatively_loud)
-            and center_time_ns - self._last_trigger_ns >= cooldown_ns
+            and not self._same_event_gate.is_same_event_as_last(trigger)
         ):
-            # Don't update _last_trigger_ns here — the caller decides whether
-            # the trigger was actually accepted (enqueue succeeded). Call
-            # ``confirm_trigger()`` to commit the cooldown timestamp.
+            # Don't commit here — the caller decides whether the trigger was
+            # actually accepted (enqueue succeeded). Call ``confirm_trigger()``.
             triggered = True
 
         env_counts = EnvironmentCounts(
@@ -654,6 +663,7 @@ class IngestProcessor:
             observation_ids=observation_ids,
             environment_counts=env_counts,
             sequence_gap_count=sequence_gap_count,
+            trigger=trigger if triggered else None,
         )
 
     async def _publish_audio_summary_if_due(

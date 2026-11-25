@@ -88,6 +88,22 @@ _LAYOUT_NODES: dict[str, tuple[tuple[str, NodeType, tuple, tuple[float, float, f
 }
 LAYOUTS = tuple(_LAYOUT_NODES)
 
+# Off-matrix layouts for the kilometre-range tests (tests/test_localization_km_range_e2e.py);
+# the matrix and its oracle table stay as they are.
+# Five GPS point nodes across ~1.5 km (corner diagonal) with height relief, so
+# cross-node lags reach ~4.4 s: past the old fixed 1 s coverage cap.
+LAYOUT_POINT_NETWORK_KM = "point_network_km"
+POINT_NETWORK_KM_SIDE_M = 1_060.0
+_OFF_MATRIX_LAYOUT_NODES: dict[str, tuple[tuple[str, NodeType, tuple, tuple[float, float, float]], ...]] = {
+    LAYOUT_POINT_NETWORK_KM: (
+        ("point-a", NodeType.POINT, POINT_SENSOR_OFFSETS_BODY_M, (0.0, 0.0, 0.0)),
+        ("point-b", NodeType.POINT, POINT_SENSOR_OFFSETS_BODY_M, (POINT_NETWORK_KM_SIDE_M, 0.0, 3.0)),
+        ("point-c", NodeType.POINT, POINT_SENSOR_OFFSETS_BODY_M, (0.0, POINT_NETWORK_KM_SIDE_M, 8.0)),
+        ("point-d", NodeType.POINT, POINT_SENSOR_OFFSETS_BODY_M, (POINT_NETWORK_KM_SIDE_M, POINT_NETWORK_KM_SIDE_M, 14.0)),
+        ("point-e", NodeType.POINT, POINT_SENSOR_OFFSETS_BODY_M, (0.5 * POINT_NETWORK_KM_SIDE_M, 0.5 * POINT_NETWORK_KM_SIDE_M, 25.0)),
+    ),
+}
+
 # --- Clock classes (packet timestamps) ---
 CLOCK_GPS_LOCKED = "gps_locked"
 CLOCK_NTP_TIMED = "ntp_timed"
@@ -95,7 +111,8 @@ CLOCK_TIME_QUALITY = {CLOCK_GPS_LOCKED: TimeQuality.GPS_LOCKED, CLOCK_NTP_TIMED:
 CLOCK_CLASSES = tuple(CLOCK_TIME_QUALITY)
 # Each node's actual packet-clock error in units of its class sigma: within
 # about 1 sigma, of mixed sign, so cross-node errors neither cancel nor vanish.
-NODE_CLOCK_ERROR_IN_SIGMA = (0.8, -0.6, 1.1, -0.9)
+# (The fifth entry serves only the off-matrix five-node layout.)
+NODE_CLOCK_ERROR_IN_SIGMA = (0.8, -0.6, 1.1, -0.9, 0.5)
 
 # --- Position sources ---
 POSITION_GPS = "gps"
@@ -112,6 +129,7 @@ NODE_HAND_MEASURED_ERROR_IN_SIGMA = (
     (-0.6, 0.6, -0.2),
     (0.5, 0.8, 0.2),
     (-0.8, -0.4, -0.3),
+    (0.4, -0.7, 0.1),
 )
 
 RANGES_M = (1.0, 10.0, 100.0, 1000.0)
@@ -213,7 +231,8 @@ def realize_cell(cell: RangeMatrixCell) -> RealizedCell:
     clock_std_seconds = default_localization_clock_class_uncertainty_seconds()[CLOCK_TIME_QUALITY[cell.clock_class].value]
     scene_nodes: list[SceneNode] = []
     reported: list[ReportedNode] = []
-    for node_index, (node_id, node_type, offsets, anchor_delta) in enumerate(_LAYOUT_NODES[cell.layout]):
+    layout_nodes = _LAYOUT_NODES.get(cell.layout) or _OFF_MATRIX_LAYOUT_NODES[cell.layout]
+    for node_index, (node_id, node_type, offsets, anchor_delta) in enumerate(layout_nodes):
         scene_node = scene_node_near_enu(
             frame,
             node_id=node_id,

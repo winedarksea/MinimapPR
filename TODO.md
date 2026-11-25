@@ -270,14 +270,28 @@ Contract: `docs/localization_solve_contract.md`; tracking: `docs/tracking.md`; c
   - At about 20 ppm drift a node passes the 10 ms residual hard limit after about 8 min and loses its cross-node pairs until its stream goes stale.
   - A single 10 ms–buffer-length timestamp step (for example an SNTP re-sync) does the same.
   - Recommendation: re-anchor a node's timeline when a step is detected, or once the residual passes a fraction of the limit.
-- [ ] **Kilometre-range cross-node events need settings** — `localization_coverage_total_cap_seconds` ≥ 3 s, and a trigger cooldown longer than the cross-node lag. The default 1 s cap limits the event span to about 340 m.
+- [x] **Kilometre-range cross-node events need settings** — done on branch `loc/km-range`. No setting is needed now. The event span, coverage-wait cap and same-event cooldown come from the layout's largest cross-node baseline / c (`minimappr-core/src/localization_event_timing.rs`, mirrored in `core/localization_event_timing.py`; contract §12).
+  - Safety bound: `localization_event_span_max_cross_node_lag_seconds` = 10 s. The sensor buffer is raised to hold the span it allows.
+  - The cooldown is the plain cooldown on the same node, and the cooldown + the pair's travel time across nodes.
+  - The sidecar parks up to 8 solves per cluster buffer.
+  - `localization_coverage_total_cap_seconds` > 0 is now an explicit override (default 0 = derived).
+  - Open: a span reaches a full lag before the trigger, so a km network's first events after start-up miss the far nodes. A long span also dilutes a short impulse for GCC-PHAT; that is the front-end item below.
+- [ ] **Far-source limiters left in place after the km-range audit** (branch `loc/km-range`; the full audit table is in its merge commit):
+  - The sidecar's `min_localization_confidence` (0.20) forces omni before the Python re-solve for `range_asymptotic`/`range_boundary` solves, whose confidence is capped at 0.20 × max(obs, 0.35). This drops far cluster solves that a re-solve could keep as a bearing.
+  - A `range_bearing_projected` fix sits at the 50 m placeholder with radial σ = max(4r, prior, 200 m). Range is declared unobservable, so it is honest as a bearing, but the ellipse does not reach a 2 km source.
+  - `association_max_gate_m` (32 m) fragments wide-covariance far fixes into new tracks.
+  - GCC-PHAT pair search stops at baseline / c with no clock margin, so a weak-clock cross-node pair near endfire is clipped.
+  - The mesh SRP polar grid places anything past 200 m on its far ring.
+  - Impulse dilution at admission: frame RMS is averaged over a 100 ms upload. A 30 ms impulse at 20 dB in-band SNR reaches only ~6.5 dB, below the 8 dB relative trigger, and is never solved (measured on the 2 km E5-harness cell; at 30 dB it is admitted). A peak-block statistic would admit far gunshots but needs an E7 false-trigger check.
+  - A km network's ~9 s span means 4x-interpolated GCC-PHAT over 2^22-point inverse FFTs per pair: about 1 s per solve for 5 point nodes in release, and many seconds for 16 tetra channels. That is compute-pool time, not ingest-path time. Interpolating only around the peak would fix it.
+  - The 1.5 km point network's cross-node pairs are exact and the fix is right horizontally, but a near-coplanar layout solves z badly with an overconfident z std (strict xfail in `tests/test_localization_km_range_e2e.py`). The ~10 m four-tetra cluster at 2 km states a 0.01° elevation std against a 0.77° error (strict xfail; same as E5 `1000m-four_node_spread-gps_locked-gps`).
 - [ ] **GCC-PHAT front end loses point-network calls** (E8):
   - the 50–3430 Hz band discards most of a 3.4–7 kHz call;
   - the rectangular event window makes PHAT pull every pair toward zero lag.
   - Band plus taper took point-network recall from 0.30 to 0.45. Reconcile with the measured array bearing reversal behind the 3430 Hz ceiling before changing it (memory: localization band PHAT ceiling).
 - [ ] **3-node point networks never localize** — SRP needs 4 channels and `rust_tdoa_solve.py` 4 sensors (35 of 200 E8 held-out sites).
 - [ ] **Covariance calibration** — stated 95 % regions cover about 0.73 on E8 point networks (0.54 before the position-accuracy term). Correlation structure on coplanar and collinear layouts blocks starting the stationary filter from the fix covariance (`docs/tracking.md`, branch `loc/m3-hold-filter-init`, which also carries a relocation-gate double-fusion fix). `onset_overlap_two_species` stays at 0.44 m (was 0.33 m) until then.
-- [ ] **Re-solve radial divergence** — `radial_range_refinement.py` doubles the radius while the cost falls and can return 10⁸–10⁹ m as `range_bearing_projected`; only the handoff gate keeps it out of storage.
+- [x] **Re-solve radial divergence** — the radial search now stops at `localization_far_field_max_range_m` (`radial_range_refinement.py`, Rust oracle mirror). A cost still falling there gives `range_asymptotic` at the envelope with radial std ≥ that radius: the bearing is kept and the stored fix no longer diverges to 10⁸ m (branch `loc/km-range`).
 - [ ] **`solve_3x3` / `invert_3x3` absolute 1e-9 pivot** (`srp_phat.rs`) — near-field normal-matrix entries are 1e-5 to 1e-10, so the base covariance often falls back or comes out non-symmetric.
 - [ ] **E5 open cells** (25 strict xfails, reasons in `tests/test_localization_range_matrix_realistic.py`):
   - a compact planar array plus one weak-clock point collapses near the array with too small a covariance;

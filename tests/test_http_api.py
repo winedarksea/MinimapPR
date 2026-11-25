@@ -1158,7 +1158,8 @@ async def test_start_ingest_sidecar_passes_classifier_helper_env(monkeypatch, tm
     # Coverage race fix: same keys/meaning as the Python coverage wait, default on.
     assert env["MINIMAPPR_LOCALIZATION_COVERAGE_WAIT_ALL_STREAMING_NODES_ENABLED"] == "true"
     assert env["MINIMAPPR_LOCALIZATION_COVERAGE_STALL_BUDGET_SECONDS"] == "0.5"
-    assert env["MINIMAPPR_LOCALIZATION_COVERAGE_TOTAL_CAP_SECONDS"] == "1.0"
+    # 0 = derived from node geometry (core/localization_event_timing.py).
+    assert env["MINIMAPPR_LOCALIZATION_COVERAGE_TOTAL_CAP_SECONDS"] == "0.0"
     assert env["MINIMAPPR_SITE_ORIGIN_LAT"] == "37.0"
     assert env["MINIMAPPR_SITE_ORIGIN_LON"] == "-122.0"
     assert env["MINIMAPPR_SITE_ORIGIN_ALT_M"] == "12.5"

@@ -60,7 +60,7 @@ value can be JSON `null`.
 | `excluded_pairs` | array | `{sensor_index_a, sensor_index_b, reason}` for each pair left out (section 6). |
 | `node_timing` | array | Clock evidence per contributing node (section 7). |
 | `window_center_time_ns` | integer | Packet-derived centre of the solve window, ns since the Unix epoch. This is the stored observation time; never substitute receipt time. |
-| `window_seconds` | number | Solve window length, centred on `window_center_time_ns`: the node-local window, or for an event solve across nodes more than ~half a node-local window of lag apart, the cross-node event span (twice the max cross-node lag, capped by the coverage-wait cap and buffer length; milestone 2 / R4). |
+| `window_seconds` | number | Solve window length, centred on `window_center_time_ns`: the node-local window, or for an event solve across nodes more than ~half a node-local window of lag apart, the cross-node event span (twice the max cross-node lag, derived from the layout's node geometry and bounded by the safety bound and buffer length; section 12). |
 | `solve_sample_rate_hz` | integer | Rate of the solve buffer. |
 
 ### Index rule
@@ -484,8 +484,70 @@ must equal the Python `Settings` defaults.
 | `MINIMAPPR_LOCALIZATION_TRIGGER_NOISE_FLOOR_RELATIVE_DB` | float | `8.0` |
 | `MINIMAPPR_LOCALIZATION_SOLVER_FLOOR_RELATIVE_DB` | float | `3.0` |
 | `MINIMAPPR_LOCALIZATION_SENSOR_REGISTRY_STALE_SECONDS` | float | `120.0` |
+| `MINIMAPPR_LOCALIZATION_COVERAGE_DELIVERY_MARGIN_SECONDS` | float | `1.0` |
+| `MINIMAPPR_LOCALIZATION_EVENT_SPAN_CLOCK_MARGIN_SIGMA` | float | `3.0` |
+| `MINIMAPPR_LOCALIZATION_EVENT_SPAN_MAX_CROSS_NODE_LAG_SECONDS` | float | `10.0` |
+| `MINIMAPPR_LOCALIZATION_COVERAGE_MAX_PENDING_PER_BUFFER` | integer | `8` |
 | `MINIMAPPR_SITE_GEOMETRY_JSON` | JSON (section 10) | unset |
 
 The clock-class map **replaces** the default map (no merge); a class missing
 from it uses `MINIMAPPR_LOCALIZATION_CLOCK_UNKNOWN_UNCERTAINTY_SECONDS`. Every
 value must be finite and >= 0 or the sidecar refuses to start.
+
+## 12. Geometry-derived event span, coverage wait and cooldown
+
+One sound reaches every node within `baseline / c` of the first, whatever the
+source range. So the largest cross-node baseline of the solve's layout, not a
+fixed cap, sets three things. Both paths use the same rules
+(`minimappr-core/src/localization_event_timing.rs`, mirrored in
+`minimappr/core/localization_event_timing.py`). Both are pinned by
+`tests/fixtures/localization_event_timing_vectors.json`.
+
+- **Lag** = largest distance between solve-eligible sensors on different
+  nodes / c. It is bounded by `localization_event_span_max_cross_node_lag_seconds`
+  (10 s, about 3.4 km of baseline; a memory and latency safety bound) and by
+  what the sensor buffer holds. No clock margin is added: GCC-PHAT searches
+  each pair only to its own `baseline / c` (`gcc_phat::pair_max_tau_s`), so
+  audio past that lag cannot move a peak.
+- **Event span** (`window_seconds`) = the node-local window, grown by the lag
+  beyond half that window on each side and centred on the trigger. A
+  node-local layout, a short baseline, or the coverage wait switched off
+  keeps the node-local window.
+- **Coverage-wait cap** = lag + `localization_coverage_delivery_margin_seconds`
+  (1 s: the delivery skew between nodes; with no cross-node lag this is the
+  old fixed 1 s). Each parked window carries its own cap. The sidecar holds up
+  to `localization_coverage_max_pending_per_buffer` (8) parked solves per
+  cluster buffer. On a km network a new trigger can open every cooldown while
+  earlier ones still wait for the far node; one more parked solve dispatches
+  the oldest (`superseded`).
+- **Same-event window (trigger cooldown).** A trigger on node B is the same
+  event as the last dispatched trigger, on node A, while |t_B - t_A| <
+  `trigger_cooldown_seconds` + distance(A, B) / c +
+  `localization_event_span_clock_margin_sigma` x RSS(clock uncertainty of A
+  and B). This holds in either order. Onsets are stamped by each node's own
+  clock, so the clock margin belongs here.
+  - A far node's onset of an event never opens a second solve, and never
+    supersedes the parked solve that waits for its audio.
+  - A second event on the same node still waits only the plain cooldown.
+  - Two onsets on different nodes closer than their travel time cannot be told
+    apart by timing; the first solve's span already reads both.
+  - The sidecar keys this per cluster buffer; Python ingest keeps one
+    site-wide last trigger (`core/ingest_same_event_gate.py`).
+  - `trigger_cooldown_seconds` = 0 still switches the cooldown off entirely.
+- **Explicit override.** `localization_coverage_total_cap_seconds` > 0 sets
+  the cap and also bounds the lag, which is the pre-derivation behaviour. The
+  default `0` derives it.
+- **Buffer.** Both runtimes raise `max_sensor_buffer_seconds` to at least
+  node-local window + 2 x the safety bound + the delivery margin (about 21 s).
+  The span the safety bound allows is therefore always buffered. The 32 s
+  default already exceeds it.
+
+A span reaches a full lag before the trigger, so right after start-up (less
+than a lag of history buffered) a km network's first events solve without the
+far nodes, which are excluded with `coverage_below_threshold`.
+
+Sound speed: with no reported temperature or humidity the sidecar now uses the
+configured default air (`MINIMAPPR_DEFAULT_TEMPERATURE_C` and
+`MINIMAPPR_DEFAULT_HUMIDITY`; 344.04 m/s at 20 °C and 50 %), as the Python
+environment provider does. It used to use a fixed 343.2 m/s, a 0.25 % range
+scale error, which is metres at a kilometre.

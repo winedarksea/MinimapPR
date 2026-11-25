@@ -2,6 +2,8 @@
 //! cadence-triggered solve, draining released payloads, and test seams.
 
 use super::*;
+use crate::localization_coverage_wait::seconds_to_ns;
+use minimappr_core::localization_event_timing::DerivedEventTiming;
 
 impl DspWorker {
     /// `Some(span)` when this cadence-triggered localization must wait for
@@ -10,7 +12,7 @@ impl DspWorker {
         &mut self,
         buffer_key: &str,
         localization_center_time_ns: i128,
-        localization_window_seconds: f64,
+        event_timing: DerivedEventTiming,
         on_localization_cadence: bool,
         buffer_channel_count: usize,
     ) -> Option<LocalizationWindowSpan> {
@@ -23,8 +25,9 @@ impl DspWorker {
         let buffers = self.buffers.get(buffer_key)?;
         let span = LocalizationWindowSpan {
             center_time_ns: localization_center_time_ns,
-            window_seconds: localization_window_seconds,
+            window_seconds: event_timing.event_span_seconds,
             min_coverage_ratio: self.config.min_coverage_ratio,
+            coverage_total_cap_ns: Some(seconds_to_ns(event_timing.coverage_total_cap_seconds)),
         };
         // Cluster buffers always park until the batch boundary: mid-batch a
         // member may show holes that later frames in the same batch backfill

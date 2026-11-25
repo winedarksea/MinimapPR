@@ -29,7 +29,10 @@ async def test_integration_harness_multi_node_tdoa_pipeline(tmp_path: Path) -> N
         snippet_retention_seconds=0,
         trigger_rms=0.001,
         trigger_cooldown_seconds=0.0,
-        localization_window_seconds=0.02,
+        # Half the window holds the grid's largest cross-node lag (5.7 m, 16.5 ms):
+        # a shorter window grows into a cross-node event span reaching past the
+        # last frame these one- or two-frame streams send.
+        localization_window_seconds=0.04,
         classification_window_seconds=0.0,
         max_sensor_buffer_seconds=2.0,
         fusion_worker_count=1,
@@ -121,7 +124,10 @@ async def test_integration_harness_three_node_degrades_to_2d(tmp_path: Path) -> 
         snippet_retention_seconds=0,
         trigger_rms=0.001,
         trigger_cooldown_seconds=0.0,
-        localization_window_seconds=0.02,
+        # Half the window holds the grid's largest cross-node lag (5.7 m, 16.5 ms):
+        # a shorter window grows into a cross-node event span reaching past the
+        # last frame these one- or two-frame streams send.
+        localization_window_seconds=0.04,
         classification_window_seconds=0.0,
         max_sensor_buffer_seconds=2.0,
         fusion_worker_count=1,
@@ -200,7 +206,10 @@ async def test_integration_harness_multi_source_simultaneous(tmp_path: Path) -> 
         snippet_retention_seconds=0,
         trigger_rms=0.001,
         trigger_cooldown_seconds=0.0,
-        localization_window_seconds=0.02,
+        # Half the window holds the grid's largest cross-node lag (5.7 m, 16.5 ms):
+        # a shorter window grows into a cross-node event span reaching past the
+        # last frame these one- or two-frame streams send.
+        localization_window_seconds=0.04,
         classification_window_seconds=0.0,
         max_sensor_buffer_seconds=2.0,
         fusion_worker_count=1,

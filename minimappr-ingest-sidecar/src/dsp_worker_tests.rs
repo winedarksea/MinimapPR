@@ -2268,10 +2268,10 @@ async fn purge_stale_streams_removes_idle_stream_entries() {
         .insert(live_key.clone(), now_ns);
     worker
         .localization_trigger
-        .commit_dispatched_trigger(&old_key, two_hours_ago);
+        .commit_dispatched_trigger(&old_key, two_hours_ago, "old-node");
     worker
         .localization_trigger
-        .commit_dispatched_trigger(&live_key, now_ns);
+        .commit_dispatched_trigger(&live_key, now_ns, "live-node");
     worker
         .last_classifier_render_ns_by_stream
         .insert(old_key.clone(), two_hours_ago);

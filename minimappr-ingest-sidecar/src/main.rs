@@ -330,7 +330,7 @@ struct Args {
     #[arg(
         long,
         env = "MINIMAPPR_LOCALIZATION_FAR_FIELD_MAX_RANGE_M",
-        default_value_t = 1000.0
+        default_value_t = 5000.0
     )]
     localization_far_field_max_range_m: f32,
 
@@ -410,7 +410,7 @@ struct Args {
     #[arg(
         long,
         env = "MINIMAPPR_LOCALIZATION_COVERAGE_TOTAL_CAP_SECONDS",
-        default_value_t = 1.0
+        default_value_t = 0.0
     )]
     localization_coverage_total_cap_seconds: f64,
 
@@ -851,10 +851,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             args.classification_window_seconds
                 .max(localization_window_seconds)
         };
+        let localization_solve_config = args.localization_solve.clone().into_config();
+        // The buffer must hold the largest geometry-derived event span the
+        // safety bound allows (`localization_event_timing`), or a km-spread
+        // event's far end is cut; that bound also caps the memory this costs.
+        let event_span_buffer_seconds =
+            minimappr_core::localization_event_timing::required_sensor_buffer_seconds(
+                &minimappr_core::localization_event_timing::EventTimingConfig {
+                    node_local_window_seconds: localization_window_seconds,
+                    coverage_wait_enabled: args
+                        .localization_coverage_wait_all_streaming_nodes_enabled,
+                    explicit_coverage_total_cap_seconds: args
+                        .localization_coverage_total_cap_seconds,
+                    coverage_delivery_margin_seconds: localization_solve_config
+                        .localization_coverage_delivery_margin_seconds,
+                    clock_margin_sigma: localization_solve_config
+                        .localization_event_span_clock_margin_sigma,
+                    max_cross_node_lag_seconds: localization_solve_config
+                        .localization_event_span_max_cross_node_lag_seconds,
+                    max_buffer_seconds: args.max_sensor_buffer_seconds,
+                },
+            );
         let max_sensor_buffer_seconds = args
             .max_sensor_buffer_seconds
             .max(classification_window_seconds)
-            .max(localization_window_seconds);
+            .max(localization_window_seconds)
+            .max(event_span_buffer_seconds);
         let classifier_render_min_interval_seconds =
             if args.classifier_render_min_interval_seconds >= 0.0 {
                 args.classifier_render_min_interval_seconds
@@ -910,6 +932,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 band_split_highpass_hz: args.birdnet_pre_blend_highpass_hz,
                 band_split_max_clamp_hz: args.birdnet_spatial_blend_max_hz,
                 default_temperature_c: args.default_temperature_c,
+                // No reported environment: the configured default air (Python parity).
+                sound_speed_mps: DspWorkerConfig::sound_speed_for_air_mps(
+                    args.default_temperature_c,
+                    args.default_humidity_fraction,
+                ),
                 default_humidity_fraction: args.default_humidity_fraction,
                 classifier_command_json: args.classifier_command_json.clone(),
                 localization_cadence_ms: args.dsp_localization_cadence_ms,
@@ -924,7 +951,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 classification_audio_source: args.classification_audio_source.clone(),
                 min_localization_confidence: args.min_localization_confidence as f32,
                 query_persisted_raw_manifests: false,
-                localization_solve: args.localization_solve.clone().into_config(),
+                localization_solve: localization_solve_config,
                 ..DspWorkerConfig::default()
             },
             dsp_state.clone(),

@@ -13,7 +13,8 @@
 //! - release a channel whose buffer end has not advanced for
 //!   `stall_budget_ns` (a dead node costs one stall budget once, because the
 //!   per-channel tracker persists across windows);
-//! - never hold a window longer than `total_cap_ns`;
+//! - never hold a window longer than its cap: the window's own geometry-derived
+//!   `coverage_total_cap_ns` (cross-node lag + delivery margin), else `total_cap_ns`;
 //! - channels that never buffered audio are not streaming and are ignored.
 //!
 //! The wait is a *deferral*, never a sleep: the DSP worker parks one pending
@@ -60,7 +61,7 @@ impl LocalizationCoverageWaitConfig {
     }
 }
 
-fn seconds_to_ns(seconds: f64) -> u128 {
+pub(crate) fn seconds_to_ns(seconds: f64) -> u128 {
     if !seconds.is_finite() || seconds <= 0.0 {
         return 0;
     }
@@ -133,6 +134,9 @@ pub(crate) struct LocalizationWindowSpan {
     pub(crate) center_time_ns: i128,
     pub(crate) window_seconds: f64,
     pub(crate) min_coverage_ratio: f64,
+    /// This window's wait cap, derived from its layout's cross-node lag
+    /// (`localization_event_span.rs`); `None` uses the config's cap.
+    pub(crate) coverage_total_cap_ns: Option<u128>,
 }
 
 impl LocalizationWindowSpan {
@@ -182,7 +186,8 @@ pub(crate) fn evaluate_window_coverage(
         };
     }
     let (span_start_ns, span_end_ns) = span.start_and_end_ns();
-    let remaining_cap_ns = config.total_cap_ns.saturating_sub(waited_ns) as i128;
+    let total_cap_ns = span.coverage_total_cap_ns.unwrap_or(config.total_cap_ns);
+    let remaining_cap_ns = total_cap_ns.saturating_sub(waited_ns) as i128;
     let mut any_uncovered_streaming_channel = false;
     let mut any_channel_worth_waiting_for = false;
     for (channel_index, buffer) in buffers.iter().enumerate() {
@@ -210,7 +215,7 @@ pub(crate) fn evaluate_window_coverage(
             stop_reason: STOP_REASON_ALL_COVERED,
         };
     }
-    if waited_ns >= config.total_cap_ns {
+    if waited_ns >= total_cap_ns {
         return CoverageWaitDecision::Ready {
             stop_reason: STOP_REASON_TOTAL_CAP,
         };

@@ -193,7 +193,7 @@ impl RaceHarness {
             .collect()
     }
 
-    async fn stop_reason_count(&self, stop_reason: &str) -> u64 {
+    pub(super) async fn stop_reason_count(&self, stop_reason: &str) -> u64 {
         let st = self.state.read().await;
         st.localization_coverage_wait_stop_reasons
             .get(stop_reason)
@@ -201,7 +201,7 @@ impl RaceHarness {
             .unwrap_or(0)
     }
 
-    async fn max_wait_ms(&self) -> f64 {
+    pub(super) async fn max_wait_ms(&self) -> f64 {
         self.state.read().await.localization_coverage_wait_max_ms
     }
 }

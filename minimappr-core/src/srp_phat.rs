@@ -401,7 +401,11 @@ pub fn estimate_tetrahedral_steering_with_solve_constraints(
         }
         (candidate, _) => candidate,
     };
-    let selected_candidate = select_candidate(near_field_candidate, far_field_candidate);
+    let selected_candidate = select_candidate(
+        near_field_candidate,
+        far_field_candidate,
+        centroid(&ordered_channels, mic_positions_m),
+    );
     let Some(candidate) = selected_candidate else {
         return SrpPhatEvaluation {
             localization: degraded_localization("srp_phat_degraded_empty_grid", sound_speed_mps),
@@ -1003,10 +1007,15 @@ fn far_field_candidate(
     })
 }
 
+/// Candidate ranges are measured from the array centroid: the site frame's
+/// origin can sit hundreds of metres from the sensors, which made the 20 m /
+/// 100 m range tests below always (or never) pass for such a site.
 fn select_candidate(
     near_field_candidate: Option<LocalizationCandidate>,
     far_field_candidate: Option<LocalizationCandidate>,
+    array_centroid_m: [f32; 3],
 ) -> Option<LocalizationCandidate> {
+    let range_from_array_m = |position_m: [f32; 3]| magnitude(sub(position_m, array_centroid_m));
     match (near_field_candidate, far_field_candidate) {
         (Some(near), Some(far)) => {
             let minimum_residual_improvement_seconds = near
@@ -1017,11 +1026,11 @@ fn select_candidate(
                 Some(RANGE_ASYMPTOTIC) | Some(RANGE_BEARING_PROJECTED)
             ) && near.residual_rms_seconds.is_finite()
             {
-                let near_range_m = magnitude(near.position_m);
+                let near_range_m = range_from_array_m(near.position_m);
                 far.residual_rms_seconds <= near.residual_rms_seconds * 0.12
                     || (near.is_boundary_clamped
                         && near_range_m > 20.0
-                        && magnitude(far.position_m) > 100.0
+                        && range_from_array_m(far.position_m) > 100.0
                         && far.residual_rms_seconds < near.residual_rms_seconds)
                     // When the near-field range is unobservable, the residual gap
                     // between near and far narrows because phase-slope-refined TDOAs
@@ -1036,7 +1045,7 @@ fn select_candidate(
                     // overconfident near-field range guess.
                     || (near.range_observability.unwrap_or(1.0) < 0.15
                         && far.contrast_score >= near.contrast_score + 0.2
-                        && magnitude(far.position_m) > 100.0
+                        && range_from_array_m(far.position_m) > 100.0
                         && far.residual_rms_seconds <= near.residual_rms_seconds * 0.6)
             } else {
                 far.residual_rms_seconds + minimum_residual_improvement_seconds
@@ -1582,19 +1591,18 @@ fn grid_from_bounds(
     }
 
     let step = ((total_points as f32 / max_grid_points.max(1) as f32).ceil() as usize).max(1);
-    let mut grid = Vec::with_capacity(total_points.min(max_grid_points.max(1)));
-    let mut point_index = 0_usize;
-    for &x_m in &xs {
-        for &y_m in &ys {
-            for &z_m in &zs {
-                if point_index.is_multiple_of(step) {
-                    grid.push([x_m, y_m, z_m]);
-                }
-                point_index += 1;
-            }
-        }
-    }
-    grid
+    // Visit only the kept points (x-major, z fastest, as before): a km-spread
+    // cluster's box holds ~10^8 points, so walking every one cost seconds.
+    let (y_count, z_count) = (ys.len(), zs.len());
+    (0..total_points)
+        .step_by(step)
+        .map(|point_index| {
+            let z_index = point_index % z_count;
+            let y_index = (point_index / z_count) % y_count;
+            let x_index = point_index / (z_count * y_count);
+            [xs[x_index], ys[y_index], zs[z_index]]
+        })
+        .collect()
 }
 
 fn axis_points(min_m: f32, max_m: f32, resolution_m: f32) -> Vec<f32> {
@@ -2197,14 +2205,14 @@ mod tests {
             contrast_score: 0.6,
         };
 
-        let selected_boundary = select_candidate(Some(near_boundary), Some(marginal_far))
+        let selected_boundary = select_candidate(Some(near_boundary), Some(marginal_far), [0.0; 3])
             .expect("boundary-clamped near candidate");
         assert_eq!(
             selected_boundary.range_projection_mode,
             Some("range_boundary")
         );
 
-        let selected_interior = select_candidate(Some(near_interior), Some(marginal_far))
+        let selected_interior = select_candidate(Some(near_interior), Some(marginal_far), [0.0; 3])
             .expect("interior near candidate");
         assert_eq!(
             selected_interior.range_projection_mode,

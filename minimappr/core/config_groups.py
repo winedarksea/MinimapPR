@@ -96,6 +96,11 @@ CONFIG_STAGE_GROUPS: tuple[tuple[str, str, PipelineStageKind | None, tuple[str, 
             "localization_coverage_wait_all_streaming_nodes_enabled",
             "localization_coverage_stall_budget_seconds",
             "localization_coverage_total_cap_seconds",
+            # --- geometry-derived event span (core/localization_event_timing.py) ---
+            "localization_coverage_delivery_margin_seconds",
+            "localization_event_span_clock_margin_sigma",
+            "localization_event_span_max_cross_node_lag_seconds",
+            "localization_coverage_max_pending_per_buffer",
             # --- Field Mode W2-onset-srp ---
             "localization_onset_clustering_enabled",
             "onset_analysis_pre_trigger_seconds",
