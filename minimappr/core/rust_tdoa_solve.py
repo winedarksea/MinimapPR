@@ -27,6 +27,7 @@ from minimappr.core.cartesian_tdoa import (
     localization_result_from_cartesian_solve,
     solve_cartesian_tdoa,
 )
+from minimappr.core.node_position_covariance import NodePositionUncertainty
 from minimappr.core.subspace_bearing import BearingPrior
 from minimappr.core.pair_timing_uncertainty import (
     MINIMUM_PAIR_MEASUREMENT_QUALITY,
@@ -155,6 +156,7 @@ def solve_localization_from_rust_tdoas(
     far_field_prior_radial_std_m: float | None = None,
     bearing_strength: float = 1.0,
     bearing_observed_obs_floor: float | None = None,
+    node_position_uncertainty: NodePositionUncertainty | None = None,
 ) -> LocalizationResult | None:
     """Return a Python Cartesian solve from Rust TDOAs, or None if not solvable.
 
@@ -164,6 +166,9 @@ def solve_localization_from_rust_tdoas(
     ``bearing_strength`` should be ``Settings.localization_node_bearing_strength``
     so this single-node path honours the same operator-configured DOA-vs-TDOA
     trust dial as the multi-node dispatch path in ``core/localization_dispatch.py``.
+
+    ``node_position_uncertainty`` (the solve's stated node position accuracies)
+    widens the covariance the way the sidecar widens its SRP covariance.
     """
     sensor_count = len(ordered_sensor_ids)
     _require_complete_sensor_map(
@@ -213,6 +218,7 @@ def solve_localization_from_rust_tdoas(
             far_field_initial_range_m=far_field_default_range_m,
             far_field_prior_radial_std_m=far_field_prior_radial_std_m,
             radial_refinement_enabled=True,
+            node_position_uncertainty=node_position_uncertainty,
             **(
                 {"bearing_observed_obs_floor": bearing_observed_obs_floor}
                 if bearing_observed_obs_floor is not None

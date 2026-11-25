@@ -33,7 +33,11 @@ from minimappr.core.localization_provenance import (
     site_frame_id_for_coordinate_frame,
 )
 from minimappr.core.node_position_estimator import checkpointed_stationary_estimate
-from minimappr.core.node_registry import operator_override_position_m
+from minimappr.core.node_registry import (
+    DEFAULT_OPERATOR_PLACEMENT_POSITION_STD_M,  # noqa: F401  re-exported: the push's default accuracy
+    operator_override_position_m,
+    operator_override_position_std_m,
+)
 from minimappr.core.sensor_world_position import body_to_world_quaternion_wxyz
 from minimappr.models import GeoPoint, NodeOrientation, NodeOverrides
 
@@ -41,12 +45,6 @@ logger = logging.getLogger(__name__)
 
 PLACEMENT_SOURCE_OPERATOR_OVERRIDE = "operator_override"
 PLACEMENT_SOURCE_STATIONARY_ESTIMATE = "stationary_estimate"
-
-
-# Accuracy assumed for an operator-entered position with no stated accuracy: a
-# tape- or laser-measured placement is good to about a decimetre. Operators
-# with a survey-grade or phone-GPS placement enter position_std_m explicitly.
-DEFAULT_OPERATOR_PLACEMENT_POSITION_STD_M = 0.1
 
 
 def contract_projection_for(coordinate_frame: LocalCoordinateFrame) -> str:
@@ -159,14 +157,9 @@ def _operator_placement(
     position_m = operator_override_position_m(overrides, coordinate_frame)
     if position_m is None:
         return None
-    position_std_m = (
-        overrides.position_std_m
-        if overrides.position_std_m is not None
-        else DEFAULT_OPERATOR_PLACEMENT_POSITION_STD_M
-    )
     return SiteNodePlacement(
         position_m=position_m,
-        position_std_m=float(position_std_m),
+        position_std_m=operator_override_position_std_m(overrides),
         placement_source=PLACEMENT_SOURCE_OPERATOR_OVERRIDE,
         body_to_world_quaternion_wxyz=_orientation_quaternion(node_row),
     )

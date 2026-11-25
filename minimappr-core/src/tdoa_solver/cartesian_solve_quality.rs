@@ -15,6 +15,9 @@ use crate::range_projection::{
     RANGE_BEARING_PROJECTED, RANGE_BOUNDARY, RANGE_REFINED, UNOBSERVABLE_CONFIDENCE_CAP,
     UNOBSERVABLE_RANGE_OBSERVABILITY_CAP,
 };
+use crate::tdoa_node_position_covariance::{
+    node_position_error_covariance_m2, SensorNodePositionStd, WeightedTdoaRow,
+};
 
 /// Full-Jacobian condition above which a REFINED range is demoted to ASYMPTOTIC.
 pub const RANGE_PROJECTION_CONDITION_THRESHOLD: f64 = 1.0e6;
@@ -102,6 +105,75 @@ fn covariance_from_singular_values(
     let right = Matrix3::from_fn(|row, column| right_vectors_transposed[(row, column)]);
     let covariance = right.transpose() * Matrix3::from_diagonal(&variances) * right;
     0.5 * (covariance + covariance.transpose())
+}
+
+/// Python `pair_measurement_node_position_covariance_m2`: the stated node
+/// position errors through this solve's weighted pair rows; the non-TDOA rows
+/// of the final Jacobian (constraints, canopy prior) only shape the inverse.
+fn node_position_covariance_m2(inputs: &CartesianFinalizationInputs<'_>) -> Option<Matrix3<f64>> {
+    let request = inputs.request;
+    let uncertainty = request.node_position_uncertainty.as_ref()?;
+    if request.measurements.is_empty() {
+        return None;
+    }
+    let sensor_ids: Vec<&String> = request.sensor_positions.keys().collect();
+    let sensor_index = |sensor_id: &str| sensor_ids.iter().position(|id| id.as_str() == sensor_id);
+    let node_ids: Vec<&String> = uncertainty.node_position_std_m.keys().collect();
+    // A sensor of a node with no stated error gets an index past the stated
+    // nodes, so it moves no row.
+    let node_index_by_sensor: Vec<usize> = sensor_ids
+        .iter()
+        .map(|sensor_id| {
+            uncertainty
+                .sensor_node_ids
+                .get(sensor_id.as_str())
+                .and_then(|node_id| node_ids.iter().position(|id| *id == node_id))
+                .unwrap_or(node_ids.len())
+        })
+        .collect();
+    let rows: Vec<WeightedTdoaRow> = request
+        .measurements
+        .iter()
+        .map(|measurement| {
+            Some(WeightedTdoaRow {
+                sensor_a: sensor_index(&measurement.sensor_a)?,
+                sensor_b: sensor_index(&measurement.sensor_b)?,
+                weight: measurement.weight,
+            })
+        })
+        .collect::<Option<_>>()?;
+    let mut additional_normal_matrix = [[0.0_f64; 3]; 3];
+    let jacobian = &inputs.final_jacobian;
+    for row in request.measurements.len()..jacobian.nrows() {
+        for out_axis in 0..3 {
+            for in_axis in 0..3 {
+                additional_normal_matrix[out_axis][in_axis] +=
+                    jacobian[(row, out_axis)] * jacobian[(row, in_axis)];
+            }
+        }
+    }
+    let sensor_positions_m: Vec<[f64; 3]> = request
+        .sensor_positions
+        .values()
+        .map(|position| [position.x, position.y, position.z])
+        .collect();
+    let node_position_std_m: Vec<f64> = node_ids
+        .iter()
+        .map(|node_id| uncertainty.node_position_std_m[*node_id])
+        .collect();
+    let position = inputs.best_position_m;
+    node_position_error_covariance_m2(
+        [position.x, position.y, position.z],
+        &sensor_positions_m,
+        &rows,
+        additional_normal_matrix,
+        request.sound_speed_mps,
+        SensorNodePositionStd {
+            node_index_by_sensor: &node_index_by_sensor,
+            node_position_std_m: &node_position_std_m,
+        },
+    )
+    .map(|covariance| Matrix3::from_fn(|row, column| covariance[row][column]))
 }
 
 pub fn finalize_cartesian_solution(
@@ -250,6 +322,12 @@ pub fn finalize_cartesian_solution(
     } else {
         f64::INFINITY
     };
+    // Added last (Python `solve_cartesian_tdoa` does the same): a rigid
+    // placement error carries no range information, so it must not raise the
+    // eigenvalue-ratio observability above.
+    if let Some(node_position_term_m2) = node_position_covariance_m2(inputs) {
+        covariance_m2 += node_position_term_m2;
+    }
     Ok(CartesianTdoaSolve {
         position_m: best_position,
         covariance_m2,

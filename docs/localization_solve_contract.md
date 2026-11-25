@@ -163,7 +163,7 @@ Local axes: x = east, y = north, z = up, metres.
 | `position_m` | `[x, y, z]` numbers | **The snapshot this solve used**, in `coordinate_frame`. Re-solve with these, not with the current registry. |
 | `sample_rate_hz` | integer | The sensor's own rate. |
 | `position_source` | enum string | Section 3.5. |
-| `position_std_m` | number, nullable | 1-sigma position accuracy; `null` when nothing states one. |
+| `position_std_m` | number, nullable | 1-sigma position accuracy of the sensor's node placement, per axis (read as isotropic); widens the published covariance (section 8). `null` when nothing states one, and then adds nothing. |
 | `clock_source` | enum string | Section 3.6. |
 | `clock_domain` | string | Timebase of the packet timestamps; currently always `utc`. |
 | `clock_offset_std_s` | number, nullable | 1-sigma clock-offset uncertainty used for this sensor's pairs: its node's `node_timing[].clock_offset_std_s`. |
@@ -300,6 +300,26 @@ reference channel's node together, so each pair's variance is `u_pair^2` and
 pairs sharing a node co-vary. This grows with geometric dilution (about r/b
 laterally and r^2/b in range for a node spread b at range r), unlike a flat
 per-axis term. A solve with only same-node pairs is unchanged.
+
+**Node position term.** The covariance also carries each node's stated
+`position_std_m` (owner decision: a hand-measured position is used as
+entered, and its stated accuracy widens the error; it never excludes the
+node). A rigid placement error `d ~ N(0, sigma^2 I)` moves every arrival at
+that node's sensors by `-u_s . d / c` (`u_s` the unit vector from sensor `s`
+toward the solved position), so like a clock offset it is correlated across
+the node's pairs; it enters through the same sandwich, with `R` the
+direction-dependent projection (`sigma^2 u_i . u_j / c^2` between two sensors
+of one node). For a single-sensor node this equals a clock offset of
+`sigma / c`; a solve whose sensors all sit on one node gains `sigma^2 I`
+(the whole fix moves with the node). Every stated accuracy counts, whatever
+the `position_source` (an operator's entry, a stationary estimate's spread,
+a reported GPS accuracy); `null` adds nothing. The Python `python_cartesian`
+re-solve adds the same term from `sensors[].position_std_m`, through its own
+weighted pair rows (`minimappr/core/node_position_covariance.py`; shared
+implementation in Rust `minimappr-core/src/tdoa_node_position_covariance.rs`,
+pinned by `tests/fixtures/node_position_covariance_parity_cases.json`). The
+Python-ingest path adds it from the node registry's accuracy, which follows
+the geometry push (operator override, else stationary estimate).
 
 ## 9. Example `solve_provenance`
 

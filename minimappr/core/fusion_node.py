@@ -1656,6 +1656,12 @@ class FusionNode:
             localization_kwargs["sensor_timing_uncertainty_seconds"] = selected_timing_uncertainty_seconds
         if "sensor_node_ids" in localize_parameters:
             localization_kwargs["sensor_node_ids"] = selected_sensor_node_ids
+        if "node_position_std_m" in localize_parameters:
+            # Stated node position accuracy widens the solve covariance (owner decision).
+            sensor_position_std_m = await self.registry.sensor_position_std_m()
+            localization_kwargs["node_position_std_m"] = {
+                sensor_id: sensor_position_std_m[sensor_id] for sensor_id in selected_ids if sensor_id in sensor_position_std_m
+            }
         if "sensor_gain_offsets_db" in localize_parameters:
             localization_kwargs["sensor_gain_offsets_db"] = (
                 selected_sensor_gain_offsets_db

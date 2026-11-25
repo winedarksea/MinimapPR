@@ -22,6 +22,8 @@ pub mod sensor_stream_buffer;
 pub mod sirith_array_geometry;
 pub mod srp_layout;
 pub mod srp_phat;
+// Owner decision: a stated node position accuracy widens the solve error.
+pub mod tdoa_node_position_covariance;
 // W2-core-codec-proto
 pub mod clip_codec;
 pub mod protocol;

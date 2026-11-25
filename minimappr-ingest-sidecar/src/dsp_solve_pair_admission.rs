@@ -24,7 +24,7 @@ use minimappr_core::localization_sensor_entry::{ExcludedSensorPair, SolveExclusi
 use crate::{
     dsp_worker::{NodeClockAssessments, SolveSensorLayout},
     localization_solve_config::LocalizationSolveConfig,
-    srp_phat::ChannelClockOffsets,
+    srp_phat::{ChannelClockOffsets, SensorNodePositionStd},
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -34,6 +34,10 @@ pub(crate) struct SolvePairAdmission {
     sensor_node_indices: Vec<usize>,
     /// Per node of the layout (first-seen order): 1-sigma timing uncertainty.
     node_timing_uncertainty_seconds: Vec<f64>,
+    /// Per node: the 1-sigma position error its placement states (an
+    /// operator's entered accuracy, a stationary estimate's spread); 0 when
+    /// none is stated, which adds nothing to the covariance.
+    node_position_std_m: Vec<f64>,
     /// Nodes whose cross-node pairs were dropped for a timeline residual over
     /// the hard limit; their audio cannot be time-aligned with other nodes.
     timeline_rejected_node_ids: BTreeSet<String>,
@@ -76,6 +80,15 @@ impl SolvePairAdmission {
                 )
             })
             .collect();
+        // Every sensor of a node carries its node's placement accuracy; the
+        // largest is kept so a mixed snapshot never understates it.
+        let mut node_position_std_m = vec![0.0_f64; node_ids.len()];
+        for (sensor, &node_index) in layout.sensors.iter().zip(&sensor_node_indices) {
+            if let Some(position_std_m) = sensor.position_std_m {
+                node_position_std_m[node_index] =
+                    node_position_std_m[node_index].max(position_std_m);
+            }
+        }
         let residual_over_hard_limit = |node_id: &str| {
             node_clock
                 .get(node_id)
@@ -142,6 +155,7 @@ impl SolvePairAdmission {
             excluded_pairs,
             sensor_node_indices,
             node_timing_uncertainty_seconds,
+            node_position_std_m,
             timeline_rejected_node_ids,
             reporting_node_id: layout.reporting_node_id.clone(),
             solve_sensor_indices,
@@ -190,6 +204,16 @@ impl SolvePairAdmission {
         ChannelClockOffsets {
             clock_index_by_channel: &self.sensor_node_indices,
             clock_offset_std_seconds: &self.node_timing_uncertainty_seconds,
+        }
+    }
+
+    /// Each buffer channel's node and every node's stated position error,
+    /// for the solver's node-position covariance term (owner decision: a
+    /// stated accuracy widens the error, it never excludes the node).
+    pub(crate) fn channel_node_position_std(&self) -> SensorNodePositionStd<'_> {
+        SensorNodePositionStd {
+            node_index_by_sensor: &self.sensor_node_indices,
+            node_position_std_m: &self.node_position_std_m,
         }
     }
 

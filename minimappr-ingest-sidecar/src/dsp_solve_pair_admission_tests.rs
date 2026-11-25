@@ -249,6 +249,24 @@ fn per_channel_clock_offsets_follow_the_layout_nodes() {
     assert_eq!(clocks.clock_offset_std_seconds, [1e-6, 1e-6, 0.002, 1e-6]);
 }
 
+#[test]
+fn per_channel_node_position_std_follows_the_layout_nodes_and_unstated_is_zero() {
+    let mut operator_placed = layout("tetra-a");
+    // tetra-a hand-measured (one of its sensors states it), point-c a
+    // stationary estimate; point-b and point-d state nothing.
+    operator_placed.sensors[1].position_std_m = Some(0.3);
+    operator_placed.sensors[3].position_std_m = Some(0.05);
+    let admission = SolvePairAdmission::compute(
+        &operator_placed,
+        &ALL_RATE_MATCHED,
+        &gps_locked_clocks(),
+        &LocalizationSolveConfig::default(),
+    );
+    let nodes = admission.channel_node_position_std();
+    assert_eq!(nodes.node_index_by_sensor, [0, 0, 1, 2, 3]);
+    assert_eq!(nodes.node_position_std_m, [0.3, 0.0, 0.05, 0.0]);
+}
+
 const FAR_NODE_SPREAD_M: f64 = 100.0;
 /// Sirith tetra offsets about the node origin.
 const TETRA_OFFSETS_M: [[f64; 3]; 4] = [
@@ -423,6 +441,7 @@ fn srp_on_the_reporter_component_solves_around_the_reporter_not_the_node_midpoin
         SolveChannelConstraints {
             admitted_pair_filter: Some(&admits_pair),
             channel_clock_offsets: Some(admission.channel_clock_offsets()),
+            channel_node_position_std: Some(admission.channel_node_position_std()),
         },
     );
     assert!(

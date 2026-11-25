@@ -59,7 +59,6 @@ def measure_pair_tdoas(
     gcc_phat_function: Callable[..., tuple[float, float]],
     sensor_node_ids: dict[str, str] | None = None,
     cross_node_max_tau_s: float | None = None,
-    node_position_std_m: dict[str, float] | None = None,
     stats: PairMeasurementStats | None = None,
 ) -> list[PairTdoaMeasurement]:
     """Measure pairwise TDOAs, optionally enabling true cross-node correlation.
@@ -69,11 +68,13 @@ def measure_pair_tdoas(
     pairs keep the tight ``max_tau_s``. ``sensor_timing_uncertainty_seconds`` is
     each sensor's node clock uncertainty (``core/pair_timing_uncertainty.py``):
     every cross-node pair is kept and inverse-variance weighted by it, never
-    rejected by clock class. ``node_position_std_m`` scales cross-node pair weight
-    by ``baseline/(baseline + σ_a + σ_b)`` so poorly-surveyed nodes contribute less.
+    rejected by clock class. Node position accuracy never enters the weights
+    (the sidecar's pairs carry none either, so both ingest paths weight a pair
+    set alike); it widens the solve covariance instead
+    (``core/node_position_covariance.py``).
     """
     reference_time_std_s = solver_reference_time_std_seconds(sample_rate_hz, interpolation_factor)
-    pair_candidates: list[tuple[float, str, str, float, float, bool, float]] = []
+    pair_candidates: list[tuple[float, str, str, float, bool, float]] = []
     for sensor_a, sensor_b in itertools.combinations(sensor_ids, 2):
         baseline_m = float(np.linalg.norm(sensor_positions[sensor_a] - sensor_positions[sensor_b]))
         same_node = (
@@ -87,17 +88,9 @@ def measure_pair_tdoas(
             sensor_node_ids=sensor_node_ids,
             sensor_timing_uncertainty_seconds=sensor_timing_uncertainty_seconds,
         )
-        # Phase 5: geometry weighting — a wide baseline surveyed with small position
-        # std is far more informative than a short/uncertain one.
-        geometry_weight = 1.0
-        if not same_node and node_position_std_m is not None:
-            sigma_a = float(node_position_std_m.get(sensor_a, 0.0))
-            sigma_b = float(node_position_std_m.get(sensor_b, 0.0))
-            geometry_weight = baseline_m / max(baseline_m + sigma_a + sigma_b, 1e-6)
         pair_candidates.append(
             (
-                geometry_weight
-                * pair_information_score(
+                pair_information_score(
                     baseline_m=max(baseline_m, 0.01),
                     timing_uncertainty_seconds=timing_uncertainty_s,
                     reference_time_std_seconds=reference_time_std_s,
@@ -105,18 +98,17 @@ def measure_pair_tdoas(
                 sensor_a,
                 sensor_b,
                 baseline_m,
-                geometry_weight,
                 same_node,
                 timing_uncertainty_s,
             )
         )
     if len(sensor_ids) > 8 and len(pair_candidates) > MAX_SELECTED_PAIR_COUNT:
         pair_candidates.sort(key=lambda item: item[0], reverse=True)
-        selected_pairs: list[tuple[float, str, str, float, float, bool, float]] = []
+        selected_pairs: list[tuple[float, str, str, float, bool, float]] = []
         selected_pair_ids: set[tuple[str, str]] = set()
         covered_sensor_ids: set[str] = set()
         for candidate in pair_candidates:
-            _, sensor_a, sensor_b, _, _, _, _ = candidate
+            _, sensor_a, sensor_b, _, _, _ = candidate
             if sensor_a in covered_sensor_ids and sensor_b in covered_sensor_ids:
                 continue
             selected_pairs.append(candidate)
@@ -137,7 +129,7 @@ def measure_pair_tdoas(
         pair_candidates = selected_pairs
 
     measurements: list[PairTdoaMeasurement] = []
-    for _, sensor_a, sensor_b, baseline_m, geometry_weight, same_node, timing_uncertainty_s in pair_candidates:
+    for _, sensor_a, sensor_b, baseline_m, same_node, timing_uncertainty_s in pair_candidates:
         physical_max_tau_s = (baseline_m / sound_speed_mps) + (1.0 / sample_rate_hz)
         # Cross-node pairs may correlate over a much wider lag than the tight
         # same-node cap when a cross-node tau ceiling is supplied (Phase 5).
@@ -164,7 +156,7 @@ def measure_pair_tdoas(
                 weight=inverse_variance_pair_weight(
                     measurement_quality=max(
                         MINIMUM_PAIR_MEASUREMENT_QUALITY,
-                        geometry_weight * normalized_pair_quality(correlation_peak),
+                        normalized_pair_quality(correlation_peak),
                     ),
                     timing_uncertainty_seconds=timing_uncertainty_s,
                     reference_time_std_seconds=reference_time_std_s,
