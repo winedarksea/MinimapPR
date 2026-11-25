@@ -27,8 +27,9 @@ drop, cross-reporter merge).
 - Hold rule: a fix whose one gating track is a labelled stationary_hold track
   is held for its classification (not an event-only Rust solve, which has
   none). An informative label applies it to that track unless the label gates
-  reject it, then through the label-aware ``update``; an abstention, or a
-  classification that finds nothing trackable, drops it; a classification
+  reject it, then through the label-aware ``update``; an abstention, a
+  classification that finds nothing trackable, or a label whose category is
+  not tracked, drops it; a classification
   that never comes
   (``release_held_position_without_classification``, ledger eviction, or the
   ``held_fix_max_wait_seconds`` deadline) applies it geometry-only.
@@ -69,7 +70,8 @@ class SolveLedgerState(StrEnum):
     APPLIED = "applied"
     # Waits for the classification; ``track_id`` is the one gating (stationary_hold) track.
     HELD_FOR_LABEL = "held_for_label"
-    # The classification abstained or found nothing: the held fix never reaches the tracker.
+    # The classification abstained, found nothing, or labelled an untracked category:
+    # the held fix never reaches the tracker.
     HELD_DROPPED = "held_dropped"
     # The position never reached the tracker; the classification will update it.
     DROPPED_QUEUE_FULL = "dropped_queue_full"
@@ -417,10 +419,16 @@ class PositionObservationPipeline:
                 self._drop_held_entry(entry)
                 return None
             entry.cancel_held_deadline()
-            metrics.position_observations_held_applied_with_label += 1
-            return await tracker.apply_held_position_with_label(
+            track = await tracker.apply_held_position_with_label(
                 entry.observation, gating_track_id=entry.track_id, classified_update_kwargs=classified_update_kwargs
             )
+            if track is None:
+                # Resolved without a track (an untracked label category): no later
+                # release may apply the fix geometry-only onto the perched track.
+                self._drop_held_entry(entry)
+                return None
+            metrics.position_observations_held_applied_with_label += 1
+            return track
         if entry.state is SolveLedgerState.APPLIED:
             if not abstention:
                 metrics.position_observation_labels_attached += 1
