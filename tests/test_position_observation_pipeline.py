@@ -17,7 +17,9 @@ from minimappr.config import Settings
 from minimappr.core.assembly_track_resolution import resolve_detection_track
 from minimappr.core.fusion_node import EventCandidate, FusionMetrics
 from minimappr.core.fusion_stage_carriers import LocalizationBranch, LocalizedCandidate
-from minimappr.core.localization_overhaul_config import POSITION_OBSERVATION_POLICY_REQUIRE_CLASSIFICATION
+from minimappr.core.localization_overhaul_config import (
+    POSITION_OBSERVATION_POLICY_REQUIRE_CLASSIFICATION,
+)
 from minimappr.core.localization_provenance import LOCALIZATION_SOLVE_FEATURE_KEY
 from minimappr.core.localized_render_handoff_hooks import (
     SOLVE_ORIGIN_PYTHON_INGEST,
@@ -25,11 +27,19 @@ from minimappr.core.localized_render_handoff_hooks import (
 )
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.position_observation import position_observation_solve_id
-from minimappr.core.position_observation_config import position_observation_config_from_settings
-from minimappr.core.position_observation_pipeline import PositionObservationPipeline, SolveLedgerState
+from minimappr.core.position_observation_config import (
+    position_observation_config_from_settings,
+)
+from minimappr.core.position_observation_pipeline import (
+    PositionObservationPipeline,
+    SolveLedgerState,
+)
 from minimappr.core.tracking import TrackManager
 from minimappr.models import TimeQuality
-from minimappr.sim.continuous_source_scenes import DELIVERY_EVENT_LOCALIZATION_RESULT, drone_fly_by
+from minimappr.sim.continuous_source_scenes import (
+    DELIVERY_EVENT_LOCALIZATION_RESULT,
+    drone_fly_by,
+)
 from tests.continuous_source_manifests import SCENE_REPORTER_IDS
 from tests.continuous_source_tracking_harness import (
     default_scene_timing,
