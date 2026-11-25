@@ -116,7 +116,8 @@ impl PerchedWildlifeTracker {
                     .collect();
                 matched = self.relocation_gate.find_relocation_match(fix.timestamp_ns, &fix.position_m, species, &relocation_candidates);
                 if let Some(track_id) = matched {
-                    self.filter.initialize_track(track_id, &fix.position_m);
+                    // update_matched restarts the perch at this fix.
+                    self.filter.restart_at_next_fix(track_id);
                     relocated = true;
                 }
             }

@@ -214,11 +214,15 @@ the tanager's track now starts from its own first fix. That fix is poorly condit
 (variance 211 m²), but the stationary_hold filter restarts at it with its default isotropic
 4 m² variance, not the fix's.
 
-Starting the filter from the founding fix's covariance was tried (branch
-`loc/m3-hold-filter-init`, not merged). It brings this scene to 0.34 m, but makes
+Starting the filter from the founding fix's covariance was tried and not merged (tag
+`archive/loc-m3-hold-filter-init`, commit 9384cba). It brings this scene to 0.34 m, but makes
 `gate_countersinging_pair` worse (0.32 → 0.51 m) and `gate_collinear_trail` worse
 (0.08 → 0.21 m). In those coplanar and collinear layouts the solver's fix covariances have long
 axes (up to 900 m²) that are tilted, so a later fix's height correction drags the horizontal
 position along the tilt. The real fix is calibrating the correlation structure of the solver
-covariance. The same branch also carries a separate, smaller fix: a relocation-gate hop fused
-the same fix twice.
+covariance.
+
+A relocation-gate hop restarts the stationary_hold filter at the hop's fix with that fix's
+measurement covariance (`restart_at_next_fix`, Python and Rust), like the filter's own relocation
+snap. It used to initialise the filter at the fix and then fuse the same fix again, counting it
+twice and halving its covariance. This part of the experiment was kept.

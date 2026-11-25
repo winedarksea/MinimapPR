@@ -82,6 +82,8 @@ struct PerchedStep {
     measurement_m: Position3,
     covariance_m2: Option<Covariance3>,
     dt_s: f64,
+    #[serde(default)]
+    restart_at_next_fix: bool,
 }
 
 fn run_perched_filter_case(case: &Value) -> Result<Value, serde_json::Error> {
@@ -92,6 +94,9 @@ fn run_perched_filter_case(case: &Value) -> Result<Value, serde_json::Error> {
     let mut current = initial;
     let mut outputs = Vec::new();
     for step in steps {
+        if step.restart_at_next_fix {
+            filter.restart_at_next_fix(ORACLE_TRACK_ID);
+        }
         let before = filter.relocation_count;
         let estimate = filter.update(
             ORACLE_TRACK_ID,
