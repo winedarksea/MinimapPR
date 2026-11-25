@@ -35,11 +35,13 @@ fn tetra_frame(seed: u32, rms: f32) -> Vec<Vec<f32>> {
 fn settle_quiet_floor(trigger: &mut LocalizationEventTrigger) -> usize {
     (0..500)
         .filter(|frame| {
-            trigger.observe_node_frame(
-                NODE,
-                &tetra_frame(*frame, QUIET_SITE_NOISE_RMS),
-                SAMPLE_RATE_HZ,
-            )
+            trigger
+                .observe_node_frame(
+                    NODE,
+                    &tetra_frame(*frame, QUIET_SITE_NOISE_RMS),
+                    SAMPLE_RATE_HZ,
+                )
+                .relatively_loud
         })
         .count()
 }
@@ -53,7 +55,9 @@ fn relative_trigger_fires_on_a_quiet_site_below_the_absolute_gate() {
     // 12 dB over the floor, still ~40x under the 0.015 absolute gate.
     let faint_call = tetra_frame(9_001, QUIET_SITE_NOISE_RMS * 4.0);
     assert!(window_rms(&faint_call[0]) < config.localization_rms_gate);
-    let relatively_loud = trigger.observe_node_frame(NODE, &faint_call, SAMPLE_RATE_HZ);
+    let relatively_loud = trigger
+        .observe_node_frame(NODE, &faint_call, SAMPLE_RATE_HZ)
+        .relatively_loud;
     assert!(relatively_loud);
     assert_eq!(
         trigger.evaluate(STREAM, 1, &faint_call, relatively_loud),
@@ -71,7 +75,9 @@ fn absolute_gate_still_fires_and_wins_a_tie() {
     let mut trigger = LocalizationEventTrigger::new(&config);
     settle_quiet_floor(&mut trigger);
     let loud_call = tetra_frame(9_002, 0.05);
-    let relatively_loud = trigger.observe_node_frame(NODE, &loud_call, SAMPLE_RATE_HZ);
+    let relatively_loud = trigger
+        .observe_node_frame(NODE, &loud_call, SAMPLE_RATE_HZ)
+        .relatively_loud;
     assert!(relatively_loud);
     assert_eq!(
         trigger.evaluate(STREAM, 1, &loud_call, relatively_loud),
@@ -91,7 +97,11 @@ fn disabled_relative_trigger_still_tracks_the_floor_but_never_fires() {
     let mut trigger = LocalizationEventTrigger::new(&config);
     settle_quiet_floor(&mut trigger);
     let faint_call = tetra_frame(9_003, QUIET_SITE_NOISE_RMS * 4.0);
-    assert!(!trigger.observe_node_frame(NODE, &faint_call, SAMPLE_RATE_HZ));
+    assert!(
+        !trigger
+            .observe_node_frame(NODE, &faint_call, SAMPLE_RATE_HZ)
+            .relatively_loud
+    );
     assert_eq!(trigger.evaluate(STREAM, 1, &faint_call, false), None);
     let layout = crate::dsp_worker::solve_layout_test_fixture::tetra_nodes_layout(&[(
         NODE,
@@ -143,8 +153,9 @@ fn relative_trigger_rate_on_pure_noise_stays_low() {
         for frame in 0..frames {
             let phase = std::f32::consts::TAU * frame as f32 / gust_period_frames;
             let rms = QUIET_SITE_NOISE_RMS * 10f32.powf(swing_db * phase.sin() / 20.0);
-            let fired =
-                trigger.observe_node_frame(NODE, &tetra_frame(frame as u32, rms), SAMPLE_RATE_HZ);
+            let fired = trigger
+                .observe_node_frame(NODE, &tetra_frame(frame as u32, rms), SAMPLE_RATE_HZ)
+                .relatively_loud;
             if fired && last_solve_frame.is_none_or(|last| frame - last >= cooldown_frames) {
                 solves += 1;
                 last_solve_frame = Some(frame);

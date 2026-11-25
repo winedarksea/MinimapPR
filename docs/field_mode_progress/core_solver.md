@@ -43,7 +43,8 @@ array's largest magnitude.
 (`minimappr/core/far_field_model_selection.py`, hooked into `solve_cartesian_tdoa`) is ported as
 `tdoa_solver/far_field_model_selection.rs` with the same constants. None of the original 9 cases
 triggered it, so 3 tetra cases were added (17 cases total): the guard fires for a 400 m source and a
-1 m source, and declines for a refined solve just outside the 4-aperture collapse zone. With the
+1 m source, and (since the 4-aperture zone cutoff was removed, localization overhaul milestone 2) an
+80 m source whose exact fit settled 4.4 apertures out and used to be kept as refined. With the
 Rust guard disabled, case 9 fails parity. Start-point construction moved to
 `cartesian_initial_positions.rs` to keep `cartesian_tdoa_solve.rs` under 500 lines.
 

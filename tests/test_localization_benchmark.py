@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from minimappr.core.localization import LocalizationEngine
+from minimappr.core.range_projection import range_mode_is_unobservable
 from minimappr.sim.benchmark import EventRecord, compute_event_metrics
 from minimappr.sim.geometry import regular_tetrahedron_offsets_m
 from tests.helpers import shift_signal
@@ -36,8 +37,14 @@ def test_localization_benchmark_tight_geometry_tetra_case() -> None:
     )
 
     estimate = np.asarray(result.position_m, dtype=np.float64)
-    error_m = float(np.linalg.norm(estimate - source))
-    assert error_m < 0.45
+    # A lone 5 cm tetra cannot resolve 0.4 m of range at 48 kHz: the near-field
+    # fit beats the best plane wave by ~0.6 us RMS, far under one interpolated
+    # sample, so the honest answer is an accurate bearing with the range left
+    # unobservable (far_field_model_selection.py).
+    estimated_direction = estimate / np.linalg.norm(estimate)
+    expected_direction = source / np.linalg.norm(source)
+    assert float(np.dot(estimated_direction, expected_direction)) > 0.99
+    assert range_mode_is_unobservable(result.range_projection_mode)
     assert np.isfinite(result.gdop)
 
 

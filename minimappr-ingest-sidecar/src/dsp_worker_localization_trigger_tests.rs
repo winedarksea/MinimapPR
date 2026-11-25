@@ -8,6 +8,7 @@ use super::dsp_worker_solve_manifest_inspection::*;
 use super::dsp_worker_test_node_fixtures::*;
 use super::dsp_worker_tests::drain_published_manifests;
 use super::*;
+use minimappr_core::localization_sensor_entry::SolveProvenance;
 
 const QUIET_SITE_NOISE_RMS: f32 = 3.0e-4;
 /// ~18 dB over the floor, still well under the 0.015 absolute gate.
@@ -65,9 +66,12 @@ fn event_attempt_kinds(published: &[DspManifest]) -> Vec<(SolveAttemptKind, Stri
         .collect()
 }
 
-/// Ambience, then a faint coherent call; returns (published during the
-/// ambience, published during the call).
-async fn quiet_site_session(config: DspWorkerConfig) -> (Vec<DspManifest>, Vec<DspManifest>) {
+/// Ambience, then a faint coherent call starting `call_onset_sample` into its
+/// first frame; returns (published during the ambience, published during the call).
+async fn quiet_site_session(
+    config: DspWorkerConfig,
+    call_onset_sample: usize,
+) -> (Vec<DspManifest>, Vec<DspManifest>) {
     let node = FixtureNode::tetra("tetra-quiet", [0.0, 0.0, 1.5]);
     let call = CoherentPointSource::new([6.0, 3.0, 2.0], QUIET_FRAMES + CALL_FRAMES);
     let call_gain = FAINT_CALL_RMS / FIXTURE_SOURCE_RMS;
@@ -83,7 +87,14 @@ async fn quiet_site_session(config: DspWorkerConfig) -> (Vec<DspManifest>, Vec<D
                 .iter_mut()
                 .zip(call.frame_channels(&node, frame_index))
             {
-                for (sample, call_sample) in channel.iter_mut().zip(call_channel) {
+                let silent_prefix = if frame_index == QUIET_FRAMES {
+                    call_onset_sample
+                } else {
+                    0
+                };
+                for (sample, call_sample) in
+                    channel.iter_mut().zip(call_channel).skip(silent_prefix)
+                {
                     *sample += call_gain * call_sample;
                 }
             }
@@ -105,7 +116,7 @@ async fn quiet_site_session(config: DspWorkerConfig) -> (Vec<DspManifest>, Vec<D
 
 #[tokio::test]
 async fn relative_trigger_opens_a_solve_on_a_faint_call_below_the_absolute_gate() {
-    let (during_ambience, during_call) = quiet_site_session(quiet_site_config(true)).await;
+    let (during_ambience, during_call) = quiet_site_session(quiet_site_config(true), 0).await;
     assert_eq!(event_attempt_kinds(&during_ambience), vec![]);
 
     let call_solves: Vec<&DspManifest> = attempted_localization_results(&during_call)
@@ -122,8 +133,38 @@ async fn relative_trigger_opens_a_solve_on_a_faint_call_below_the_absolute_gate(
 }
 
 #[tokio::test]
+async fn relative_trigger_solves_the_window_after_the_onset_not_the_noise_before_it() {
+    // The call reaches the array 7 ms before its first frame ends. The window
+    // ending at that frame would hold 7 ms of call in 32 ms; the event solve
+    // must read the window that starts at the onset (E5 100 m single tetra).
+    const ONSET_SAMPLE: usize = 400;
+    let config = quiet_site_config(true);
+    let window_ns = (config.window_seconds * 1.0e9).round() as i64;
+    let (_, during_call) = quiet_site_session(config, ONSET_SAMPLE).await;
+    let event_solves: Vec<&SolveProvenance> = attempted_localization_results(&during_call)
+        .into_iter()
+        .map(|manifest| solve_provenance(manifest))
+        .filter(|provenance| {
+            provenance.attempt_kind == SolveAttemptKind::EventTriggerNoiseFloorRelative
+        })
+        .collect();
+    assert_eq!(event_solves.len(), 1, "one solve per cooldown");
+    let onset_ns = (FIXTURE_STREAM_START_NS
+        + QUIET_FRAMES as u64 * FIXTURE_FRAME_DURATION_NS
+        + ONSET_SAMPLE as u64 * 1_000_000_000 / u64::from(FIXTURE_SAMPLE_RATE_HZ))
+        as i64;
+    let window_start_ns = event_solves[0].window_center_time_ns - window_ns / 2;
+    let onset_block_ns = 5_000_000;
+    assert!(
+        (window_start_ns - onset_ns).abs() <= onset_block_ns,
+        "window starts {} ns from the onset",
+        window_start_ns - onset_ns
+    );
+}
+
+#[tokio::test]
 async fn absolute_only_trigger_misses_the_same_faint_call() {
-    let (_, during_call) = quiet_site_session(quiet_site_config(false)).await;
+    let (_, during_call) = quiet_site_session(quiet_site_config(false), 0).await;
     assert_eq!(event_attempt_kinds(&during_call), vec![]);
 }
 

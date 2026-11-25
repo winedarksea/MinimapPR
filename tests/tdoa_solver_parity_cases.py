@@ -150,8 +150,9 @@ def build_cases() -> list[dict]:
             radial_refinement_enabled=False, far_field_initial_range_m=80.0, far_field_prior_radial_std_m=120.0,
         ),
         # Compact-array near-field collapse guard (far_field_model_selection):
-        # fires for a 400 m source and a 1 m source (solve collapsed to within
-        # 4 apertures); declines for a refined solve outside the collapse zone.
+        # fires for a 400 m source, a 1 m source, and an 80 m source whose exact
+        # fit settles 0.23 m out (4.4 apertures: the old 4-aperture zone kept it
+        # as a refined fix, so this case pins the removal of that cutoff).
         _cartesian_case(sensor_positions=_tetra("t", (0.0, 0.0, 1.5)), source_m=(400.0, 100.0, 30.0), noise_std_s=0.2 * one_sample_s, seed=100),
         _cartesian_case(sensor_positions=_tetra("t", (0.0, 0.0, 1.5)), source_m=(1.0, 0.2, 1.6), noise_std_s=one_sample_s, seed=102),
         _cartesian_case(sensor_positions=_tetra("t", (0.0, 0.0, 1.5)), source_m=(80.0, -40.0, 10.0), noise_std_s=0.2 * one_sample_s, seed=105),
