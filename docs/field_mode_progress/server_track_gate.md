@@ -50,8 +50,8 @@ python scripts/server_track_gate.py run --json out.json [--scenes ...] [--config
 python scripts/server_track_gate.py summarize out*.json [--markdown t.md] [--rescore]
 ```
 Library: `minimappr/sim/server_track_gate.py`; pytest gate: `tests/test_server_track_gate.py`.
-The pytest gate runs ALL-ON on the four scenes that pass today plus ALL-ON vs baseline on one,
-about 75 s on this machine. Unit tests: `tests/test_server_track_gate_harness.py`.
+The pytest gate runs ALL-ON on the seven scenes listed in `ALL_ON_SCENE_EXPECTATIONS` plus
+ALL-ON vs baseline on one (about 75 s on this machine when it covered four scenes). Unit tests: `tests/test_server_track_gate_harness.py`.
 
 **Scenes** (Rust `minimappr-sim`, seed 0, 24 kHz, three tetras on the 20 m triangle unless noted):
 the six W2/W3 scenes `onset_{overlap_two_species, trunk_echo, faint_far_bird, same_band_pair,
@@ -511,3 +511,52 @@ tables and tests are in `s_fixes_tracking.md`. In summary:
 - **Real audio: 0.75 → 1.00 individual recall.** The Scarlet Tanager is recovered (3 of 3 replays)
   and label accuracy is 1.00.
 - **S6 now only helps:** all-on − minus-S6 is 0 recall, −1 duplicate, −1 merged (it was −1.67 recall).
+
+## Recorded baseline: localization core overhaul (2026-11-25)
+
+Branch `loc/relocation-fix` (on `localization-core-overhaul`), after the overhaul review fixes
+(hold-rule release paths, point-network worker gates). `baseline` and `all_on` on the 10 sim
+scenes, seed 0, scored as above with entity positions. This is the baseline to compare later
+runs against; the matrix tables above are the Wave 4 history.
+
+**Repeatability.** Three runs on the fixed head and one on the head before the review fixes
+(4a6d3b0) gave identical values on all 20 rows, so no row needed a rerun this time. Some rows
+have depended on a cross-reporter dedupe race before: rerun a row that moves before reading
+anything into it. The review fixes changed no gate row.
+
+**ALL-ON gate: PASS.** Sums: individual recall 9.50, event recall 4.42, swaps 0, duplicates 0,
+echo promotions 0, merged 0, unassociated 0, median of scene medians 0.43 m (baseline: 0.00,
+0.00, 1 echo promotion, 3 unassociated, 6.79 m).
+
+| Scene | Config | Dets | Indiv. recall | Event recall | Swaps | Dup | Echo | Merged | Unassoc. | Median err (m) | P90 err (m) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| onset_overlap_two_species | baseline | 1 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 1 | 6.42 | 7.46 |
+| onset_overlap_two_species | all_on | 2 | 1.00 | 0.50 | 0 | 0 | 0 | 0 | 0 | 0.44 | 0.59 |
+| onset_trunk_echo | baseline | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | — | — |
+| onset_trunk_echo | all_on | 1 | 1.00 | 0.50 | 0 | 0 | 0 | 0 | 0 | 0.65 | 0.65 |
+| onset_faint_far_bird | baseline | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | — | — |
+| onset_faint_far_bird | all_on | 3 | 1.00 | 1.00 | 0 | 0 | 0 | 0 | 0 | 0.15 | 0.15 |
+| onset_same_band_pair | baseline | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | — | — |
+| onset_same_band_pair | all_on | 2 | 1.00 | 0.50 | 0 | 0 | 0 | 0 | 0 | 0.43 | 0.52 |
+| onset_same_band_two_species | baseline | 1 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 1 | 13.70 | 18.12 |
+| onset_same_band_two_species | all_on | 2 | 1.00 | 0.50 | 0 | 0 | 0 | 0 | 0 | 0.47 | 0.68 |
+| onset_single_tetra_overlap | baseline | 1 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 1 | — | — |
+| onset_single_tetra_overlap | all_on | 1 | 0.50 | 0.25 | 0 | 0 | 0 | 0 | 0 | — | — |
+| gate_countersinging_pair | baseline | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | — | — |
+| gate_countersinging_pair | all_on | 2 | 1.00 | 0.25 | 0 | 0 | 0 | 0 | 0 | 0.32 | 9.99 |
+| gate_flock_echo | baseline | 3 | 0.00 | 0.00 | 0 | 0 | 1 | 0 | 0 | 6.79 | 14.31 |
+| gate_flock_echo | all_on | 3 | 1.00 | 0.33 | 0 | 0 | 0 | 0 | 0 | 0.56 | 9.94 |
+| gate_omni_then_localized | baseline | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | — | — |
+| gate_omni_then_localized | all_on | 1 | 1.00 | 0.25 | 0 | 0 | 0 | 0 | 0 | 0.18 | 0.18 |
+| gate_collinear_trail | baseline | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 | — | — |
+| gate_collinear_trail | all_on | 2 | 1.00 | 0.33 | 0 | 0 | 0 | 0 | 0 | 0.08 | 0.11 |
+
+Two rows are below the pre-milestone-3 values and are accepted (`docs/tracking.md`, "Hold rule
+for perched tracks"):
+
+- `onset_overlap_two_species` median 0.44 m (0.33 m before). The pytest gate now locks it at
+  recall 1.0 and median ≤ 0.6 m.
+- `gate_flock_echo` event recall 0.33 (0.56 before, at 62cbb2a). Individual recall, error,
+  swaps and duplicates are unchanged. Per-event associations show one of the two lost events was
+  a misassociation scored as a hit, and the other a correct row that no longer surfaces on its
+  own.

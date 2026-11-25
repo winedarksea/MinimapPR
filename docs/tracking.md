@@ -223,8 +223,18 @@ This keeps the reason for point 4: no capacity or dedupe drop starves the tracke
 classifier's own verdict can stop a fix reaching a perched bird. It is the same kind of
 exception as the ambiguity rule above.
 
-`gate_flock_echo` recalls less than it did before milestone 3 (`event_recall_sum` 0.56 to 0.33).
-This is expected: the extra recall came from a misassociation that P5 removed.
+`gate_flock_echo` has a lower event recall than before milestone 3 (0.56 to 0.33, 5 to 3 of 9
+calls); individual recall (1.00), median error (0.56 m), swaps and duplicates are unchanged.
+Event recall counts detection rows per entity, so it undercounts under entity reporting. A dump
+of per-event associations at the pre-milestone-3 commit (62cbb2a) against now explains the two
+lost events:
+
+- The 3.43 s row was chickadee-3's call. Its own fix was right ([10.0, 12.7] m, 0.3 m from that
+  bird), but it was bound to chickadee-1's track and shown at chickadee-1's entity position, so
+  the 2 s association slop credited it to chickadee-1's 1.0 s call. That was a misassociation
+  scored as a hit. Now no surfaced row is bound to the wrong bird.
+- The 4.62 s row was a correct second row for chickadee-1. It no longer surfaces as a row of its
+  own, which costs event recall only.
 
 `onset_overlap_two_species` (all-on) has a median error of 0.44 m, against 0.33 m before
 milestone 3. Before milestone 3, an abstaining classification (`unknown`, confidence 0) founded
