@@ -203,8 +203,9 @@ def orientation_rotation_matrix(
 ) -> NDArray[np.float64]:
     """Return a ZYX yaw/pitch/roll rotation matrix.
 
-    Yaw is clockwise from local north in the existing MinimapPR convention. The
-    local coordinate frame is east/north/up, so yaw is a rotation about +Z.
+    The local frame is east/north/up and yaw is a right-handed (counter-clockwise
+    seen from above) rotation about +Z: yaw 0 points body +x east, yaw 90 points
+    it north. From a compass bearing of body +x, yaw = 90 - bearing.
     """
     yaw_deg = float(getattr(orientation, "yaw_deg", 0.0) if orientation else 0.0)
     pitch_deg = float(getattr(orientation, "pitch_deg", 0.0) if orientation else 0.0)
