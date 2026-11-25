@@ -3,8 +3,9 @@
 Three GPS_PPS nodes + one NTP-disciplined node form a cluster. We verify:
 
 * The cluster's per-sensor clock uncertainty follows the configured clock-class
-  defaults (``localization_clock_class_uncertainty_seconds``), floored at the
-  cluster's declared sync grade.
+  defaults (``localization_clock_class_uncertainty_seconds``) from what each
+  node reports; the cluster's declared sync grade does not change it (sidecar
+  parity).
 * Localization still converges when the NTP sensor injects a realistic timing
   jitter (≈ a few ms of skew). With the NTP node's pairs down-weighted by its
   clock uncertainty (kept, never dropped), the recovered source position
@@ -73,14 +74,15 @@ async def test_mixed_sync_cluster_timing_uncertainty_matches_class_defaults() ->
         assert uncertainty[f"{nid}:ch0"] == pytest.approx(1.0e-6)
     assert uncertainty["ntp0:ch0"] == pytest.approx(2.0e-3)
 
-    # A cluster declared NTP-synced caps every member at NTP-class timing.
+    # The declared grade is not a floor: the sidecar never sees it, and one
+    # cluster must be weighted the same on both ingest paths.
     await clusters.upsert(ClusterSpec(
         id="mixed",
         member_node_ids=list(positions.keys()),
         declared_sync_grade=SyncGrade.NTP,
     ))
-    floored = await clusters.cluster_sensor_timing_uncertainty_seconds("mixed", nodes, CLOCK_POLICY)
-    assert all(value == pytest.approx(2.0e-3) for value in floored.values())
+    declared_ntp = await clusters.cluster_sensor_timing_uncertainty_seconds("mixed", nodes, CLOCK_POLICY)
+    assert declared_ntp == uncertainty
 
 
 @pytest.mark.asyncio

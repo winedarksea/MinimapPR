@@ -20,6 +20,7 @@ import pytest
 
 from minimappr.config import Settings
 from minimappr.core import localization_overhaul_config as overhaul_defaults
+from minimappr.core.cluster_registry import ClusterRegistry
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.core.pair_timing_uncertainty import (
     ClockUncertaintyPolicy,
@@ -30,7 +31,7 @@ from minimappr.core.pair_timing_uncertainty import (
 )
 from minimappr.core.rust_tdoa_solve import pair_measurements_from_rust_tdoas, solve_localization_from_rust_tdoas
 from minimappr.core.tdoa_measurements import measure_pair_tdoas, normalized_pair_quality
-from minimappr.models import NodeSpec, NodeType, TimeQuality
+from minimappr.models import ClusterSpec, NodeSpec, NodeType, SyncGrade, TimeQuality
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUST_SOLVE_CONFIG_PATH = REPO_ROOT / "minimappr-ingest-sidecar" / "src" / "localization_solve_config.rs"
@@ -73,7 +74,8 @@ def _arrival_lag_seconds(source_m: np.ndarray, position_a: np.ndarray, position_
     return float((np.linalg.norm(source_m - position_a) - np.linalg.norm(source_m - position_b)) / SOUND_SPEED_MPS)
 
 
-async def _registry_sensor_uncertainty() -> dict[str, float]:
+async def _registry_sensor_uncertainty(cluster_declared_sync_grade: SyncGrade | None = None) -> dict[str, float]:
+    """Python-ingest per-sensor clock 1-sigma, optionally via a cluster of every node."""
     registry = NodeRegistry()
     for node_id, origin in NODE_ORIGINS_M.items():
         offsets = TETRA_OFFSETS_M if node_id.startswith("tetra") else [(0.0, 0.0, 0.0)]
@@ -89,7 +91,13 @@ async def _registry_sensor_uncertainty() -> dict[str, float]:
         )
         time_quality, timing_diagnostics = NODE_CLOCK_REPORTS[node_id]
         await registry.record_node_clock_evidence(node_id, node_clock_evidence_from_frame(time_quality, timing_diagnostics))
-    return await registry.sensor_timing_uncertainty_seconds(DEFAULT_POLICY)
+    if cluster_declared_sync_grade is None:
+        return await registry.sensor_timing_uncertainty_seconds(DEFAULT_POLICY)
+    clusters = ClusterRegistry()
+    await clusters.upsert(
+        ClusterSpec(id="site", member_node_ids=list(NODE_ORIGINS_M), declared_sync_grade=cluster_declared_sync_grade)
+    )
+    return await clusters.cluster_sensor_timing_uncertainty_seconds("site", registry, DEFAULT_POLICY)
 
 
 def _rust_node_uncertainty() -> dict[str, float]:
@@ -133,8 +141,11 @@ def _rust_pair_tdoas(
     return pairs
 
 
+# None = cluster-unaware path; every declared grade must leave the weights at
+# the sidecar's, which never receives the declared grade.
+@pytest.mark.parametrize("cluster_declared_sync_grade", [None, *SyncGrade])
 @pytest.mark.asyncio
-async def test_same_pair_set_gets_the_same_weights_on_both_paths() -> None:
+async def test_same_pair_set_gets_the_same_weights_on_both_paths(cluster_declared_sync_grade: SyncGrade | None) -> None:
     ordered_sensor_ids, positions, node_ids = _sensor_layout()
     source_m = np.asarray([70.0, 40.0, 5.0])
     windows = {sensor_id: np.full(8, float(index)) for index, sensor_id in enumerate(ordered_sensor_ids)}
@@ -152,7 +163,7 @@ async def test_same_pair_set_gets_the_same_weights_on_both_paths() -> None:
         sound_speed_mps=SOUND_SPEED_MPS,
         max_tau_s=0.35,
         interpolation_factor=INTERPOLATION_FACTOR,
-        sensor_timing_uncertainty_seconds=await _registry_sensor_uncertainty(),
+        sensor_timing_uncertainty_seconds=await _registry_sensor_uncertainty(cluster_declared_sync_grade),
         gcc_phat_function=exact_gcc_phat,
         sensor_node_ids=node_ids,
         cross_node_max_tau_s=0.35,

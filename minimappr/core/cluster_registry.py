@@ -8,10 +8,7 @@ import numpy as np
 
 from minimappr.models import ClusterSpec, SyncGrade
 from minimappr.core.node_registry import NodeRegistry, SensorDescriptor
-from minimappr.core.pair_timing_uncertainty import (
-    ClockUncertaintyPolicy,
-    declared_sync_grade_uncertainty_seconds,
-)
+from minimappr.core.pair_timing_uncertainty import ClockUncertaintyPolicy
 
 
 class ClusterRegistry:
@@ -122,20 +119,15 @@ class ClusterRegistry:
     ) -> dict[str, float]:
         """Return {sensor_id: clock 1σ seconds} for the cluster's sensors.
 
-        Each sensor's node uncertainty is floored at the cluster's declared sync
-        grade: the operator's declaration caps how good the clocks can be.
+        Each sensor gets its node's uncertainty from reported clock evidence
+        alone, the sidecar's rule (``dsp_node_clock_quality.rs``): the cluster's
+        declared sync grade is not consulted, so a cluster is weighted the same
+        on either ingest path.
         """
-        spec = await self.get(cluster_id)
-        if spec is None:
-            return {}
         sensors = await self.sensors_in_cluster(cluster_id, node_registry)
         node_uncertainty_by_sensor = await node_registry.sensor_timing_uncertainty_seconds(policy)
-        declared_floor_seconds = declared_sync_grade_uncertainty_seconds(spec.declared_sync_grade, policy)
         return {
-            sensor_id: max(
-                node_uncertainty_by_sensor.get(sensor_id, policy.unknown_uncertainty_seconds),
-                declared_floor_seconds,
-            )
+            sensor_id: node_uncertainty_by_sensor.get(sensor_id, policy.unknown_uncertainty_seconds)
             for sensor_id in sensors
         }
 

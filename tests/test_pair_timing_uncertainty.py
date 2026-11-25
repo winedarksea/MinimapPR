@@ -12,7 +12,6 @@ from minimappr.core.pair_timing_uncertainty import (
     MINIMUM_PAIR_MEASUREMENT_QUALITY,
     ClockUncertaintyPolicy,
     NodeClockEvidence,
-    declared_sync_grade_uncertainty_seconds,
     holdover_predicted_error_seconds,
     inverse_variance_pair_weight,
     node_clock_evidence_from_frame,
@@ -22,7 +21,7 @@ from minimappr.core.pair_timing_uncertainty import (
     pair_timing_uncertainty_seconds,
     solver_reference_time_std_seconds,
 )
-from minimappr.models import NodeSpec, NodeType, SyncGrade, TimeQuality
+from minimappr.models import NodeSpec, NodeType, TimeQuality
 
 DEFAULT_POLICY = ClockUncertaintyPolicy.from_settings(Settings())
 
@@ -129,13 +128,6 @@ def test_holdover_error_is_read_from_firmware_timing_diagnostics() -> None:
         TimeQuality.GPS_HOLDOVER, {"clock_holdover": {"holdover_active": True, "predicted_error_ns": 400_000}}
     )
     assert evidence == NodeClockEvidence("gps_holdover", 4.0e-4)
-
-
-def test_declared_cluster_grade_maps_to_matching_clock_class() -> None:
-    assert declared_sync_grade_uncertainty_seconds(SyncGrade.GPS_PPS, DEFAULT_POLICY) == pytest.approx(1.0e-6)
-    assert declared_sync_grade_uncertainty_seconds(SyncGrade.PTP, DEFAULT_POLICY) == pytest.approx(1.0e-6)
-    assert declared_sync_grade_uncertainty_seconds(SyncGrade.NTP, DEFAULT_POLICY) == pytest.approx(2.0e-3)
-    assert declared_sync_grade_uncertainty_seconds(SyncGrade.FREE, DEFAULT_POLICY) == pytest.approx(5.0e-2)
 
 
 @pytest.mark.asyncio
