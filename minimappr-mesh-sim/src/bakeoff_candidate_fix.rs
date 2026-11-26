@@ -71,16 +71,19 @@ pub fn reportability_gate_rejection(fix: &CandidateFix, contributing_centroid_m:
     }
     let norm = position.iter().map(|value| value * value).sum::<f64>().sqrt();
     let from_centroid = crate::bakeoff_scenes::distance_m(&position, contributing_centroid_m);
-    (norm > config.origin_backstop_m || from_centroid > config.max_range_from_centroid_m).then(|| "gated: out of range".to_string())
+    let beyond_origin_backstop = config.origin_backstop_m.is_some_and(|backstop_m| norm > backstop_m);
+    (beyond_origin_backstop || from_centroid > config.max_range_from_centroid_m).then(|| "gated: out of range".to_string())
 }
 
-/// Server defaults: `localization_max_range_m`, `_SANITY_GATE_ORIGIN_BACKSTOP_M`,
-/// and the range-proportional covariance ceiling (`localization_std_range_factor`,
+/// Server defaults: `localization_max_range_m` (centroid-relative) and the
+/// range-proportional covariance ceiling (`localization_std_range_factor`,
 /// `localization_position_std_floor_m`, `localization_max_position_std_m`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReportabilityGateConfig {
     pub max_range_from_centroid_m: f64,
-    pub origin_backstop_m: f64,
+    /// The old hard-coded `_SANITY_GATE_ORIGIN_BACKSTOP_M` (removed from the
+    /// server in 7191046); `None` = no origin-relative gate, as the app runs.
+    pub origin_backstop_m: Option<f64>,
     pub std_ceiling_range_factor: f64,
     pub std_ceiling_floor_m: f64,
     pub std_ceiling_absolute_m: f64,
@@ -89,11 +92,11 @@ pub struct ReportabilityGateConfig {
 impl Default for ReportabilityGateConfig {
     fn default() -> Self {
         Self {
-            max_range_from_centroid_m: 1_200.0,
-            origin_backstop_m: 5_000.0,
+            max_range_from_centroid_m: 6_000.0,
+            origin_backstop_m: None,
             std_ceiling_range_factor: 1.0,
             std_ceiling_floor_m: 30.0,
-            std_ceiling_absolute_m: 1_000.0,
+            std_ceiling_absolute_m: 5_000.0,
         }
     }
 }

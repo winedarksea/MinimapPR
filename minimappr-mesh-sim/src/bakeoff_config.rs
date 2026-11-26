@@ -182,8 +182,14 @@ pub struct ProductionCandidateConfig {
     pub grid_resolution_m: f32,
     pub search_padding_m: f32,
     pub interpolation_factor: u32,
+    /// `localization_far_field_default_range_m`: seeds the radial range search.
     pub far_field_default_range_m: f64,
+    /// `localization_far_field_max_range_m`: the sidecar SRP far-field envelope.
     pub far_field_max_range_m: f32,
+    /// The same envelope as the server passes it to the `python_cartesian`
+    /// re-solve's radial range search (`localized_render_localization.py`);
+    /// `None` leaves that search unbounded (the pre-km-range behaviour).
+    pub resolve_far_field_max_range_m: Option<f64>,
     /// `localization_solver_floor_relative_db`.
     pub solver_floor_relative_db: f32,
     /// `localization_node_bearing_strength`.
@@ -211,7 +217,8 @@ impl Default for ProductionCandidateConfig {
             search_padding_m: 2.0,
             interpolation_factor: 4,
             far_field_default_range_m: 50.0,
-            far_field_max_range_m: 1_000.0,
+            far_field_max_range_m: 5_000.0,
+            resolve_far_field_max_range_m: Some(5_000.0),
             solver_floor_relative_db: 3.0,
             node_bearing_strength: 1.0,
             bearing_observed_obs_floor: 1.0,
@@ -384,8 +391,13 @@ mod seed_split_tests {
     }
 }
 
+/// `Default` is the current application settings
+/// (`BakeoffSettingsProfile::CurrentProduction`); see `bakeoff_settings_profile.rs`
+/// for the named historical configuration.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PointBakeoffConfig {
+    /// Which named settings this config started from (reported with every result).
+    pub settings_profile: crate::bakeoff_settings_profile::BakeoffSettingsProfile,
     pub scene: SceneDrawConfig,
     pub trigger: TriggerModelConfig,
     pub production: ProductionCandidateConfig,
