@@ -391,6 +391,8 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     # Live: the sidecar geometry publisher re-reads both on every cycle.
     "sidecar_geometry_push_estimate_move_threshold_m": float,
     "sidecar_geometry_reconcile_interval_seconds": float,
+    # Live: the render handoff reads it per render.
+    "omni_audio_bearing_min_localization_confidence": float,
     # Sidecar-restart-required: forwarded to the sidecar as launch env. The
     # dict-valued clock-class map is not patchable (no dict coercion here).
     "localization_max_solve_sensors": int,

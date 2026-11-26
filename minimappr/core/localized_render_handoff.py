@@ -36,6 +36,7 @@ from minimappr.core.handoff_spatial_status import (
     CLASSIFICATION_AUDIO_MODALITY_FEATURE_KEY,
     LOCALIZATION_SOLVE_BEARING_FEATURE_KEY,
     handoff_spatial_modality,
+    omni_audio_bearing_below_confidence_floor,
     render_audio_modality,
     solve_time_bearing,
 )
@@ -113,6 +114,10 @@ class LocalizedRenderHandoff:
             )
         audio_modality = render_audio_modality(payload)
         solve.rust_extra_features[CLASSIFICATION_AUDIO_MODALITY_FEATURE_KEY] = audio_modality
+        if omni_audio_bearing_below_confidence_floor(
+            payload, min_localization_confidence=host.settings.omni_audio_bearing_min_localization_confidence
+        ):
+            host._metrics.omni_audio_render_bearing_below_confidence_floor_count += 1
         if solve.reporting_modality == "omni":
             replace_estimate_with_node_position(host, solve.estimate, solve.registered_node)
         elif audio_modality == "omni":
@@ -190,11 +195,14 @@ class LocalizedRenderHandoff:
         counts_solve_outcome = self._first_processing_of_solve(payload)
 
         # The clip's audio modality is not the solve's spatial status: an omni
-        # fallback render (e.g. a low-confidence SRP-PHAT) whose solve still
-        # carries a steering direction is re-solved and gated exactly like a
-        # localized render, so the gates, not the sidecar's render threshold,
-        # decide whether it is placed.
-        reporting_modality = handoff_spatial_modality(payload)
+        # fallback render whose solve still carries a steering direction and
+        # reaches omni_audio_bearing_min_localization_confidence is re-solved
+        # and gated exactly like a localized render. Below the floor it stays
+        # omni at the node, as the sidecar rendered it.
+        reporting_modality = handoff_spatial_modality(
+            payload,
+            omni_audio_bearing_min_localization_confidence=host.settings.omni_audio_bearing_min_localization_confidence,
+        )
         if render_audio_modality(payload) == "omni" and node.position_m is None:
             raise ValueError("Omni classifier render requires node.position_m")
 

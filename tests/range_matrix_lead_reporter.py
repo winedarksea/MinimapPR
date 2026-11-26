@@ -23,6 +23,9 @@ import tests.realistic_scene_full_app_run as full_app_run
 # 100 ms uploads: three rounds (300 ms) cover a 10 m layout's ~30 ms arrival
 # spread plus the upload in which the lead's onset lands.
 DEFAULT_OTHER_NODES_HOLD_ROUNDS = 3
+# Receipt for an upload still held back: not accepted (yet). The range matrix
+# never reads receipts; this only keeps UploadReceipt.from_response total.
+HELD_UPLOAD_RESPONSE: dict = {"accepted": False}
 
 
 def lead_reporter_uploads(
@@ -54,7 +57,9 @@ def lead_reporter_uploads(
         nonlocal lead_post_count
         if node_id_by_upload.get(id(upload)) != lead_node_id:
             held.append((port, lead_post_count, upload))
-            return None
+            # Not yet sent, so no ingest answer exists; the shared streamer
+            # records a receipt per upload and needs a mapping.
+            return HELD_UPLOAD_RESPONSE
         response = original_post(port, upload)
         lead_post_count += 1
         release_held(all_held=False)

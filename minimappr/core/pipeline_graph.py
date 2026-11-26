@@ -727,6 +727,7 @@ _LOCALIZATION_OVERHAUL_SOLVE_PARAM_SPECS: tuple[tuple[str, str, str], ...] = (
     ("Geometry push move threshold", "sidecar_geometry_push_estimate_move_threshold_m", " m"),
     ("Geometry reconcile interval", "sidecar_geometry_reconcile_interval_seconds", " s"),
     ("Duplicate merge max separation", "localized_handoff_duplicate_merge_max_separation_m", " m"),
+    ("Omni-audio bearing min conf", "omni_audio_bearing_min_localization_confidence", ""),
 )
 _LOCALIZATION_OVERHAUL_TRACKING_PARAM_SPECS: tuple[tuple[str, str, str], ...] = (
     ("Tracking mode by category", "tracking_mode_by_category", ""),

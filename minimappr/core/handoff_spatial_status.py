@@ -7,7 +7,11 @@ the source. The two used to be one flag, so an omni clip threw away a
 supported srp_phat bearing that the event-only manifest of the same solve
 still carried. Now an omni-audio render whose solve is a positioned srp_phat
 result with a steering direction gets the same re-solve, gates and tracker path
-as a localized render; the solve-ID ledger keeps it counted once. Fallbacks
+as a localized render, provided the sidecar's solve confidence reaches
+``omni_audio_bearing_min_localization_confidence`` (below it the render stays
+omni at the node, as before, and records no solve-time bearing: promoting every
+sub-threshold steering direction put noise-only solves onto tracks). The
+solve-ID ledger keeps a promoted solve counted once. Fallbacks
 with no solve (``single_point_node``, ``insufficient_channels``, coverage) and
 a degraded solve-contract violation stay omni at the node.
 
@@ -67,11 +71,31 @@ def solve_carries_qualified_bearing(payload: "LocalizedClassifierRenderRequest")
     )
 
 
-def handoff_spatial_modality(payload: "LocalizedClassifierRenderRequest") -> ReportingModality:
-    """Spatial status entering the gates: an omni clip keeps a qualified solve."""
+def omni_audio_bearing_below_confidence_floor(
+    payload: "LocalizedClassifierRenderRequest", *, min_localization_confidence: float
+) -> bool:
+    """An omni clip whose qualified solve is too weak to promote: the sidecar's
+    solve confidence (the value its own render threshold compares) is below the floor."""
+    return (
+        render_audio_modality(payload) == "omni"
+        and solve_carries_qualified_bearing(payload)
+        and payload.localization_confidence < min_localization_confidence
+    )
+
+
+def handoff_spatial_modality(
+    payload: "LocalizedClassifierRenderRequest", *, omni_audio_bearing_min_localization_confidence: float
+) -> ReportingModality:
+    """Spatial status entering the gates: an omni clip keeps a qualified solve
+    whose confidence reaches the floor."""
     if render_audio_modality(payload) == "localized":
         return "localized"
-    return "localized" if solve_carries_qualified_bearing(payload) else "omni"
+    if not solve_carries_qualified_bearing(payload):
+        return "omni"
+    below_floor = omni_audio_bearing_below_confidence_floor(
+        payload, min_localization_confidence=omni_audio_bearing_min_localization_confidence
+    )
+    return "omni" if below_floor else "localized"
 
 
 def solve_time_bearing(

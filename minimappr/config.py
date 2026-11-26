@@ -361,7 +361,7 @@ class LocalizationConfig:
     # from the localization snapshot.
     classification_audio_source: str = "beamformed"
     # Min localization confidence for nearest-node omni selection (else omni fallback).
-    min_localization_confidence: float = 0.20
+    min_localization_confidence: float = overhaul_defaults.DEFAULT_MIN_LOCALIZATION_CONFIDENCE
     # Default ON: a defined cluster is the unit of cross-node localization on both
     # the Python and Rust paths. When a node is not a member of any cluster,
     # `cluster_for_node` returns None and the pipeline keeps its global-sensor
@@ -838,7 +838,7 @@ class FusionConfig:
     retention_permanent_labels: tuple[str, ...]
     retention_long_security_confidence: float
     classification_audio_source: str = "beamformed"
-    min_localization_confidence: float = 0.20
+    min_localization_confidence: float = overhaul_defaults.DEFAULT_MIN_LOCALIZATION_CONFIDENCE
     # Pre-render report-window gate (0 = off). When >0, a localized candidate is
     # skipped BEFORE the beamform render + classifier inference once this many
     # localized detections were already emitted for its (node, reporting window).
@@ -1133,7 +1133,7 @@ class Settings:
     classification_audio_source: str = "beamformed"
     # Minimum localization confidence for nearest_node_omni sensor selection.
     # Previously hardcoded 0.20 in the Rust dsp_worker; now configurable both sides.
-    min_localization_confidence: float = 0.20
+    min_localization_confidence: float = overhaul_defaults.DEFAULT_MIN_LOCALIZATION_CONFIDENCE
     beamformer_type: str = "band_split_das"
     beamformed_classification_min_sensor_count: int = 2
     beamformed_classification_confidence_margin: float = 0.0
@@ -1881,6 +1881,9 @@ class Settings:
     )
     localized_handoff_duplicate_merge_max_separation_m: float = (
         overhaul_defaults.DEFAULT_LOCALIZED_HANDOFF_DUPLICATE_MERGE_MAX_SEPARATION_M
+    )
+    omni_audio_bearing_min_localization_confidence: float = (
+        overhaul_defaults.DEFAULT_OMNI_AUDIO_BEARING_MIN_LOCALIZATION_CONFIDENCE
     )
     tracking_mode_by_category: dict = field(default_factory=overhaul_defaults.default_tracking_mode_by_category)
     position_observation_queue_max_items: int = overhaul_defaults.DEFAULT_POSITION_OBSERVATION_QUEUE_MAX_ITEMS
@@ -2909,7 +2912,9 @@ class Settings:
                 False,
             ),
             classification_audio_source=classification_audio_source,
-            min_localization_confidence=_env_float("MINIMAPPR_MIN_LOCALIZATION_CONFIDENCE", 0.20),
+            min_localization_confidence=_env_float(
+                "MINIMAPPR_MIN_LOCALIZATION_CONFIDENCE", overhaul_defaults.DEFAULT_MIN_LOCALIZATION_CONFIDENCE
+            ),
             beamformer_type=_env_str("MINIMAPPR_BEAMFORMER_TYPE", "band_split_das"),
             beamform_render_highpass_hz=_env_float("MINIMAPPR_BEAMFORM_RENDER_HIGHPASS_HZ", 100.0),
             beamform_low_crossover_width_hz=_env_float("MINIMAPPR_BEAMFORM_LOW_CROSSOVER_WIDTH_HZ", 100.0),
@@ -3591,6 +3596,10 @@ class Settings:
             localized_handoff_duplicate_merge_max_separation_m=_env_float(
                 "MINIMAPPR_LOCALIZED_HANDOFF_DUPLICATE_MERGE_MAX_SEPARATION_M",
                 overhaul_defaults.DEFAULT_LOCALIZED_HANDOFF_DUPLICATE_MERGE_MAX_SEPARATION_M,
+            ),
+            omni_audio_bearing_min_localization_confidence=_env_float(
+                "MINIMAPPR_OMNI_AUDIO_BEARING_MIN_LOCALIZATION_CONFIDENCE",
+                overhaul_defaults.DEFAULT_OMNI_AUDIO_BEARING_MIN_LOCALIZATION_CONFIDENCE,
             ),
             tracking_mode_by_category=_env_json_dict(
                 "MINIMAPPR_TRACKING_MODE_BY_CATEGORY",

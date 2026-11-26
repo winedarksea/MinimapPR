@@ -219,6 +219,10 @@ class FusionMetrics:
     # Omni-audio Rust renders whose srp_phat solve passed the gates and kept its
     # position (core/handoff_spatial_status.py); counted per render.
     omni_audio_render_bearing_carried_count: int = 0
+    # Omni-audio Rust renders with a qualified srp_phat solve left omni at the
+    # node because the solve confidence was below
+    # omni_audio_bearing_min_localization_confidence; counted per render.
+    omni_audio_render_bearing_below_confidence_floor_count: int = 0
     # 2D-tier solves whose falsely-tight vertical variance had to be widened.
     localization_vertical_variance_floored_count: int = 0
     localization_stage_total_time_ms: float = 0.0

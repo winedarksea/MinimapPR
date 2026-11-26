@@ -3,7 +3,8 @@
 The render's audio modality (omni fallback clip) is separate from its spatial
 status: an srp_phat solve with a steering direction is re-solved, gated and
 tracked exactly like a localized render's, and the stored detection carries
-the solve-time bearing. Fallbacks with no solve stay omni at the node.
+the solve-time bearing. Fallbacks with no solve, and solves below
+``omni_audio_bearing_min_localization_confidence``, stay omni at the node.
 """
 
 from __future__ import annotations
@@ -93,6 +94,7 @@ def _render_manifest(
     with_steering: bool = True,
     fallback_reason: str = LOW_CONFIDENCE_FALLBACK_REASON,
     manifest_id: str = "render-omni-audio-1",
+    localization_confidence: float | None = None,
 ) -> dict:
     localization = mixed_cluster_solve_localization_payload(
         arrival_order=ARRIVAL_ORDER,
@@ -103,6 +105,8 @@ def _render_manifest(
     )
     if with_steering:
         localization["steering_direction"] = _steering_direction()
+    if localization_confidence is not None:
+        localization["confidence"] = localization_confidence
     manifest = classifier_render_manifest(
         node_payload=planar_node_payload(), localization=localization, toa_ns=PACKET_TOA_NS, manifest_id=manifest_id
     )
@@ -166,6 +170,42 @@ async def test_no_solve_fallbacks_stay_at_the_node(tmp_path: Path, fallback_reas
     assert LOCALIZATION_SOLVE_BEARING_FEATURE_KEY not in detection["feature_summary"]
     assert detection["feature_summary"][CLASSIFICATION_AUDIO_MODALITY_FEATURE_KEY] == "omni"
     assert fusion._metrics.omni_audio_render_bearing_carried_count == 0
+
+
+def test_omni_audio_bearing_floor_defaults_to_the_sidecar_render_threshold() -> None:
+    settings = Settings()
+    assert settings.omni_audio_bearing_min_localization_confidence == settings.min_localization_confidence
+    with pytest.raises(ValueError, match="omni_audio_bearing_min_localization_confidence"):
+        Settings(omni_audio_bearing_min_localization_confidence=1.5)
+
+
+@pytest.mark.parametrize(
+    ("confidence_offset_from_floor", "expect_promoted"),
+    [(-0.01, False), (0.0, True), (0.01, True)],
+    ids=["below_floor", "at_floor", "above_floor"],
+)
+async def test_omni_audio_solve_is_promoted_only_at_or_above_the_confidence_floor(
+    tmp_path: Path, confidence_offset_from_floor: float, expect_promoted: bool
+) -> None:
+    floor = Settings().omni_audio_bearing_min_localization_confidence
+    detection, fusion = await _stored_detection(
+        tmp_path, omni_audio=True, localization_confidence=floor + confidence_offset_from_floor
+    )
+    metrics = fusion._metrics
+    assert detection["feature_summary"][CLASSIFICATION_AUDIO_MODALITY_FEATURE_KEY] == "omni"
+    if expect_promoted:
+        assert detection["reporting_modality"] == "localized"
+        assert LOCALIZATION_SOLVE_BEARING_FEATURE_KEY in detection["feature_summary"]
+        assert metrics.omni_audio_render_bearing_carried_count == 1
+        assert metrics.omni_audio_render_bearing_below_confidence_floor_count == 0
+    else:
+        # Exactly as the sidecar rendered it: omni at the node, no direction stored, no track.
+        assert detection["reporting_modality"] == "omni"
+        assert detection["spatial_display_mode"] == "node_only"
+        assert detection["track_id"] is None
+        assert LOCALIZATION_SOLVE_BEARING_FEATURE_KEY not in detection["feature_summary"]
+        assert metrics.omni_audio_render_bearing_carried_count == 0
+        assert metrics.omni_audio_render_bearing_below_confidence_floor_count == 1
 
 
 async def test_a_gate_rejection_still_places_the_omni_audio_render_at_its_node(tmp_path: Path) -> None:

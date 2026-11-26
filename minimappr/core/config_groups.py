@@ -90,6 +90,7 @@ CONFIG_STAGE_GROUPS: tuple[tuple[str, str, PipelineStageKind | None, tuple[str, 
             "min_sensors_for_2d",
             "min_sensors_for_3d",
             "min_localization_confidence",
+            "omni_audio_bearing_min_localization_confidence",  # localization overhaul
             "skip_localization_for_classification",
             "coordinate_mode",
             "localization_node_bearing_strength",
