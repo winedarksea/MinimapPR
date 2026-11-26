@@ -35,6 +35,7 @@ from minimappr.config import Settings
 from minimappr.core.assembly import DetectionAssembler
 from minimappr.core.assembly_track_resolution import label_observed_solve_track_without_report
 from minimappr.core.multi_node_bearing_fusion import (
+    LATERAL_VARIANCE_FLOOR_M2 as BEARING_LATERAL_VARIANCE_FLOOR_M2,
     BearingFusionResult,
     BearingFusionStore,
     BearingObservation,
@@ -2257,7 +2258,16 @@ class FusionNode:
         if cov.shape != (3, 3) or not np.all(np.isfinite(cov)):
             return branch
         radial_var = float(direction @ cov @ direction)
-        lateral_std_m = float(np.sqrt(max((float(np.trace(cov)) - radial_var) / 2.0, 1e-4)))
+        lateral_var_m2 = max((float(np.trace(cov)) - radial_var) / 2.0, BEARING_LATERAL_VARIANCE_FLOOR_M2)
+        # The solve covariance already includes the node's stated position error
+        # (cartesian_tdoa node-position term, sidecar equivalent): for a single-node
+        # cone a rigid shift moves the solution ~1:1, so it contributes ~σ² laterally
+        # and does not grow with range. Split it off so only the angular part is
+        # rescaled to the fused range.
+        node_position_std_m = float(await self.registry.node_position_std_m(node_id) or 0.0)
+        angular_lateral_var_m2 = max(
+            lateral_var_m2 - node_position_std_m * node_position_std_m, BEARING_LATERAL_VARIANCE_FLOOR_M2
+        )
 
         now_ns = time.time_ns()
         ttl_ns = int(self.settings.multi_node_bearing_ttl_seconds * 1e9)
@@ -2265,11 +2275,12 @@ class FusionNode:
             node_id=node_id,
             origin_m=centroid,
             direction=direction,
-            lateral_std_m=lateral_std_m,
+            lateral_std_m=float(np.sqrt(angular_lateral_var_m2)),
             confidence=float(branch.localization_confidence),
             event_time_ns=int(event_time_ns),
             range_prior_m=norm,
             expiry_ns=now_ns + ttl_ns,
+            position_std_m=node_position_std_m,
         )
         await self._bearing_fusion_store.register(observation, now_ns=now_ns)
         corroborators = await self._bearing_fusion_store.corroborators(
@@ -2299,6 +2310,11 @@ class FusionNode:
                 self._metrics.localization_bearing_fusion_disagreement_count += 1
             else:
                 self._metrics.localization_bearing_fusion_degenerate_count += 1
+            return branch
+        if node_id not in result.contributor_node_ids:
+            # Outlier rejection dropped this node's cone: the fix belongs to the
+            # other nodes' source, so this cone stays as it was.
+            self._metrics.localization_bearing_fusion_disagreement_count += 1
             return branch
 
         fused_position = result.position_m

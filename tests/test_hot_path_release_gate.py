@@ -9,6 +9,7 @@ local baseline from any commit.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -219,6 +220,31 @@ def test_aggregate_metrics_takes_worst_run_for_zero_tolerance_counters():
     assert merged["packet_gap_count"] == 3.0
     assert merged["raw_audio_disk_bytes_written"] == 4096.0
     assert merged["solve_latency_p95_ms"] == 1000.0
+
+
+def test_aggregate_metrics_takes_the_fewest_known_calls_for_the_floor():
+    """A floor worsens downward: one run that stored no known call must fail the
+    floor, not hide under a median of (5, 0, 6)."""
+    config = HotPathGateConfig()
+    runs = [{"known_call_detection_count": 5}, {"known_call_detection_count": 0}, {"known_call_detection_count": 6}]
+    merged = aggregate_repeated_run_metrics(runs, config.metric_tolerances)
+    assert merged["known_call_detection_count"] == 0.0
+    assert merged["known_call_detection_count"] < config.min_candidate_known_call_detection_count
+
+
+def test_higher_is_better_tolerance_cannot_be_baseline_gated():
+    from minimappr.sim.replay_gate_config import HotPathMetricTolerance
+
+    with pytest.raises(ValueError):
+        HotPathMetricTolerance(higher_is_better=True)
+
+
+def test_known_call_accounting_with_no_calls_counts_detections_as_unmatched():
+    no_call_scenario = dataclasses.replace(SMOKE_SCENARIO, duration_seconds=SMOKE_SCENARIO.event_interval_seconds / 4.0)
+    assert call_arrival_windows_seconds(no_call_scenario) == []
+    accounting = account_known_call_detections(no_call_scenario, 0, [{"timestamp_ns": 10}, {"timestamp_ns": None}])
+    assert (accounting.known_call_count, accounting.detected_known_call_count) == (0, 0)
+    assert accounting.unmatched_detection_count == 2
 
 
 def test_post_schedule_is_deterministic_and_follows_membership():

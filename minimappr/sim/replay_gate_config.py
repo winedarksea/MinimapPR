@@ -136,9 +136,21 @@ class HotPathMetricTolerance:
     # Zero-tolerance counters take the worst run: a packet gap or disk write in
     # one of N repeats is a real regression that a median would hide.
     aggregate_worst_case_across_runs: bool = False
+    # Direction of "worse" for that worst run: counters worsen upward (max); a
+    # floor metric such as known-call detections worsens downward (min), so one
+    # run that lost every call fails instead of hiding under the median.
+    higher_is_better: bool = False
     # Wall-clock and allocator metrics only compare on the same hardware; on a
     # different machine they are reported but not gated.
     depends_on_machine: bool = False
+
+    def __post_init__(self) -> None:
+        if self.higher_is_better and self.gated:
+            # The baseline comparison is an upper bound; a floor metric is judged elsewhere.
+            raise ValueError("higher_is_better metrics must be gated=False")
+
+    def worst_run_value(self, values: list[float]) -> float:
+        return float(min(values)) if self.higher_is_better else float(max(values))
 
     def allowed_maximum(self, baseline_value: float) -> float:
         allowed = baseline_value * (1.0 + self.max_relative_increase) + self.max_absolute_increase
@@ -174,7 +186,8 @@ def _default_hot_path_tolerances() -> dict[str, HotPathMetricTolerance]:
         "detection_count": HotPathMetricTolerance(gated=False),
         # Judged against HotPathGateConfig's absolute floor, not the baseline:
         # a baseline that lost every call must not license a candidate to.
-        "known_call_detection_count": HotPathMetricTolerance(gated=False),
+        # Worst run = fewest calls stored: a zero-call run in three must fail.
+        "known_call_detection_count": HotPathMetricTolerance(gated=False, higher_is_better=True, **counter),
         "detection_snippet_bytes_written": HotPathMetricTolerance(gated=False),
         # Judged against HotPathGateConfig's absolute budget; worst run, like the other drop counters.
         "classification_backlog_drop_count": HotPathMetricTolerance(gated=False, **counter),

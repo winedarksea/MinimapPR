@@ -119,6 +119,9 @@ def account_known_call_detections(
         )
         for start_s, end_s in call_arrival_windows_seconds(scenario)
     ]
+    if not windows_ns:
+        # No calls to attribute to: every stored detection is unmatched.
+        return KnownCallDetectionAccounting(0, 0, len(detections))
     detected_call_indices: set[int] = set()
     unmatched_detection_count = 0
     for detection in detections:
@@ -237,7 +240,8 @@ def aggregate_repeated_run_metrics(per_run_metrics: list[dict], tolerances: dict
     """Per-metric aggregate over repeated runs.
 
     Median damps shared-machine timing noise; metrics whose tolerance asks for
-    the worst case (zero-tolerance counters) take the max so one bad run fails.
+    the worst case take the worst run (max for counters, min for floor metrics
+    such as known-call detections) so one bad run fails.
     """
     tolerances = tolerances or {}
     merged: dict = {}
@@ -248,5 +252,5 @@ def aggregate_repeated_run_metrics(per_run_metrics: list[dict], tolerances: dict
             continue
         tolerance = tolerances.get(metric_name)
         worst_case = tolerance is not None and tolerance.aggregate_worst_case_across_runs
-        merged[metric_name] = float(max(values)) if worst_case else float(statistics.median(values))
+        merged[metric_name] = tolerance.worst_run_value(values) if worst_case else float(statistics.median(values))
     return merged
