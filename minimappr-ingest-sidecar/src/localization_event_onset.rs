@@ -1,4 +1,4 @@
-//! Where a solve opened by the noise-floor-relative trigger reads its window.
+//! Where an event-triggered solve (either gate) reads its window.
 //!
 //! The relative trigger judges the reporter's newest frame, so it fires on the
 //! frame in which an event begins. The node-local window ends at that frame,
@@ -6,11 +6,17 @@
 //! a 100 m burst put 8 ms of signal in the 80 ms window, and the noise lags
 //! became the event's TDOAs (E5 range matrix, `100m-single_tetra-*`). The 5 s
 //! cooldown then blocked the frame that held the event. The absolute gate
-//! judges the window itself, so its window already holds the energy that
-//! opened it and keeps today's placement.
+//! fails the same way on a cross-node cluster: it judges only the reporter's
+//! window, which can hold the nearest node's onset in its last few
+//! milliseconds while the farther nodes' arrivals fall after it (E5
+//! `100m-four_node_spread-gps_locked-hand_measured` with tetra-d reporting:
+//! tetra-d's onset 56 ms into the 80 ms window, tetra-a's 86 ms, so the solve
+//! returned a 9.8 ms residual and an upward bearing while tetra-b's
+//! onset-centred solve was right).
 //!
-//! The relative trigger's window therefore starts at the onset: the first
-//! short block of the frame that reaches the level the frame had to clear.
+//! A triggered window (either gate) therefore starts at the onset whenever the
+//! frame located one: the first short block of the frame that reaches the
+//! level the frame had to clear over its noise floor.
 //! The coverage wait holds the solve until the audio after the onset has
 //! arrived (the event span grows around this centre for cross-node layouts).
 //! With the wait off nothing later can be read, so the window stays on the
@@ -62,9 +68,10 @@ pub(crate) fn event_onset_offset_seconds(
 }
 
 /// Centre of the event solve's node-local window: `onset .. onset + window`
-/// for a relative trigger that located an onset while the coverage wait can
-/// collect the audio after it; otherwise the buffered placement (window ending
-/// at the trigger frame).
+/// for a trigger (absolute or relative) whose frame located an onset while
+/// the coverage wait can collect the audio after it; otherwise the buffered
+/// placement (window ending at the trigger frame). The onset exists only when
+/// the frame stood above its node's noise floor (relative trigger enabled).
 pub(crate) fn event_window_center_time_ns(
     trigger: Option<LocalizationTriggerSource>,
     node_frame: NodeFrameTrigger,
@@ -73,7 +80,7 @@ pub(crate) fn event_window_center_time_ns(
     node_local_window_seconds: f64,
     coverage_wait_enabled: bool,
 ) -> i128 {
-    let (Some(LocalizationTriggerSource::NoiseFloorRelative), Some(onset_offset_seconds), true) = (
+    let (Some(_), Some(onset_offset_seconds), true) = (
         trigger,
         node_frame.onset_offset_seconds,
         coverage_wait_enabled,

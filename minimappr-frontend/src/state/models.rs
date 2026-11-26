@@ -128,6 +128,22 @@ pub struct GeoPoint {
     pub alt_m: Option<f64>,
 }
 
+/// Solve-time bearing (`feature_summary.localization_solve_bearing`, backend
+/// `DetectionSolveBearing`): the ray from the contributing-sensor centroid, so
+/// every reporter of one solve draws the same wedge. Compass degrees.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct DetectionSolveBearing {
+    pub origin_node_id: String,
+    pub origin_geo: Option<GeoPoint>,
+    pub bearing_deg: f64,
+    pub half_width_deg: f64,
+    pub elevation_deg: f64,
+    pub range_min_m: Option<f64>,
+    pub range_max_m: Option<f64>,
+    pub range_projection_mode: Option<String>,
+    pub range_observable: bool,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct Detection {
     pub event_id: String,
@@ -138,7 +154,7 @@ pub struct Detection {
     pub localization_range_observability: Option<f64>,
     pub localization_method: Option<String>,
     pub capability_tier: Option<String>,
-    pub position_geo_uncertainty: Option<serde_json::Value>,
+    pub solve_bearing: Option<DetectionSolveBearing>,
     pub label: Option<String>,
     pub confidence: Option<f64>,
     pub label_confidence: Option<f64>,
@@ -203,9 +219,9 @@ impl<'de> Deserialize<'de> for Detection {
                 .and_then(|features| features.get("capability_tier"))
                 .and_then(|value| value.as_str())
                 .map(str::to_string),
-            position_geo_uncertainty: feature_summary
-                .and_then(|features| features.get("position_geo_uncertainty"))
-                .cloned(),
+            solve_bearing: feature_summary
+                .and_then(|features| features.get("localization_solve_bearing"))
+                .and_then(|value| serde_json::from_value(value.clone()).ok()),
             label: wire.label,
             confidence: wire.confidence,
             label_confidence: wire.label_confidence,

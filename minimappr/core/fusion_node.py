@@ -216,6 +216,9 @@ class FusionMetrics:
     # Solves demoted to omni by the quality gate because their geometry could not
     # support a point fix (see _localization_quality_is_reportable).
     localization_rejected_low_quality_count: int = 0
+    # Omni-audio Rust renders whose srp_phat solve passed the gates and kept its
+    # position (core/handoff_spatial_status.py); counted per render.
+    omni_audio_render_bearing_carried_count: int = 0
     # 2D-tier solves whose falsely-tight vertical variance had to be widened.
     localization_vertical_variance_floored_count: int = 0
     localization_stage_total_time_ms: float = 0.0

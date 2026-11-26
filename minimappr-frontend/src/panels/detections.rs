@@ -62,12 +62,31 @@ pub fn DetectionsPane() -> impl IntoView {
                             };
                             let geo_display = if is_node_only {
                                 Some(format!("Node-based near {node}"))
+                            } else if is_bearing_only {
+                                // The point is a placeholder along the ray: state the
+                                // bearing, and only coarse coordinates and altitude.
+                                let bearing_text = d.solve_bearing.as_ref().map(|bearing| {
+                                    format!(
+                                        "Bearing {:03.0}° ±{:.0}°, elevation {:.0}° · ",
+                                        bearing.bearing_deg, bearing.half_width_deg, bearing.elevation_deg
+                                    )
+                                });
+                                d.position_geo.as_ref().map(|g| {
+                                    let altitude = g
+                                        .alt_m
+                                        .map(|alt| format!(" · ~{:.0} m", alt))
+                                        .unwrap_or_default();
+                                    format!(
+                                        "{}~{:.3}°N, {:.3}°E{altitude} · range weak",
+                                        bearing_text.clone().unwrap_or_default(),
+                                        g.lat,
+                                        g.lon
+                                    )
+                                })
                             } else {
                                 d.position_geo.as_ref().map(|g| match g.alt_m {
-                                Some(alt) if is_bearing_only => format!("{:.5}°N, {:.5}°E · {:.1} m · range weak", g.lat, g.lon, alt),
-                                Some(alt) => format!("{:.5}°N, {:.5}°E · {:.1} m", g.lat, g.lon, alt),
-                                None if is_bearing_only => format!("{:.5}°N, {:.5}°E · range weak", g.lat, g.lon),
-                                None => format!("{:.5}°N, {:.5}°E", g.lat, g.lon),
+                                    Some(alt) => format!("{:.5}°N, {:.5}°E · {:.1} m", g.lat, g.lon, alt),
+                                    None => format!("{:.5}°N, {:.5}°E", g.lat, g.lon),
                                 })
                             };
                             let geo_for_pan = if is_node_only { source_node_geo.clone() } else { d.position_geo.clone() };
