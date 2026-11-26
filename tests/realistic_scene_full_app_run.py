@@ -55,6 +55,10 @@ PACKET_TIME_BEHIND_RECEIPT_NS = 4_321_987_654
 # Half the 100 ms an upload spans: near real time without doubling the run.
 UPLOAD_ROUND_PACING_SECONDS = 0.05
 DETECTION_SETTLE_SECONDS = 3.0
+# Live-collected runs wait (up to the timeout) until the sidecar has solved a
+# window within this margin of the capture end (its periodic solves report progress).
+SIDECAR_CAUGHT_UP_MARGIN_SECONDS = 1.0
+SIDECAR_DRAIN_TIMEOUT_SECONDS = 180.0
 # The replay stream's first byte can lag while the sidecar finishes renders.
 SSE_REPLAY_IDLE_SECONDS = 3.0
 DETECTIONS_QUERY_LIMIT = 1000
@@ -114,6 +118,8 @@ class FullAppRunResult:
     manifests_by_id: dict[str, dict] = field(default_factory=dict)
     upload_receipts: list[UploadReceipt] = field(default_factory=list)
     manifest_replay_gap_count: int = 0
+    sidecar_drain_wait_seconds: float | None = None
+    sidecar_caught_up: bool | None = None
 
 
 def _node_header(node: StreamingNode) -> BinaryIngestNodeHeader:
@@ -213,6 +219,19 @@ def _rust_handoff_detections(client: TestClient, node_ids: set[str]) -> list[dic
         if detection.get("source_node_id") in node_ids
         and (detection.get("feature_summary") or {}).get("rust_manifest_id")
     ]
+
+
+def _wait_for_sidecar_to_reach(collector: LiveSidecarManifestCollector, capture_end_ns: int, result: FullAppRunResult) -> None:
+    """A loaded machine can leave the sidecar tens of seconds behind the
+    uploads; scoring before it reaches the end would drop the last calls."""
+    started = time.monotonic()
+    target_ns = capture_end_ns - int(SIDECAR_CAUGHT_UP_MARGIN_SECONDS * 1e9)
+    while time.monotonic() - started < SIDECAR_DRAIN_TIMEOUT_SECONDS:
+        if collector.latest_window_center_time_ns >= target_ns:
+            break
+        time.sleep(POLL_INTERVAL_SECONDS)
+    result.sidecar_drain_wait_seconds = time.monotonic() - started
+    result.sidecar_caught_up = collector.latest_window_center_time_ns >= target_ns
 
 
 def stream_uploads(
@@ -320,6 +339,10 @@ def run_streaming_scene_through_full_app(
         if collector is not None:
             collector.start()
         stream_uploads(nodes, uploads, lambda payload: post_binary_ingest(sidecar_port, payload), result)
+        if collector is not None:
+            capture_samples = max(capture.shape[1] for capture in captures_by_node.values())
+            capture_end_ns = result.capture_start_packet_time_ns + int(capture_samples / scene.sample_rate_hz * 1e9)
+            _wait_for_sidecar_to_reach(collector, capture_end_ns, result)
         wait_for_detections(
             lambda: _rust_handoff_detections(client, node_ids), result, detection_wait_seconds, detections_complete
         )

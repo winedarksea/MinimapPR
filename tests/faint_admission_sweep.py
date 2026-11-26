@@ -69,6 +69,7 @@ SWEEP_DETECTION_WAIT_SECONDS = 6.0
 # A detection stamped within this of a call's arrival span belongs to it.
 DETECTION_OVERLAP_MARGIN_SECONDS = 0.25
 PERIODIC_OMNI_RENDER_KIND = "birdnet_omni_fallback"
+FLOOR_STARTUP_SECONDS = 30.0
 
 SWEEP_APP_ENVIRONMENT = {
     **FUNNEL_APP_ENVIRONMENT,
@@ -140,15 +141,29 @@ class AdmissionCellResult:
     ingest_backend: str
     background: str
     rows: tuple[CallAdmissionRow, ...]
-    false_triggers: int
+    false_trigger_seconds: tuple[float, ...]
     false_trigger_exposure_seconds: float
     capture_seconds: float
     wall_seconds: float
     test_process_cpu_seconds: float
     sidecar_cpu_seconds: float | None
+    # Seconds the harness waited after streaming for the sidecar to process
+    # the whole capture, and whether it did (False: late calls were scored
+    # before the sidecar reached them).
+    sidecar_drain_wait_seconds: float | None
+    sidecar_caught_up: bool | None
     load_average_1m_start: float
     load_average_1m_end: float
     manifest_replay_gaps: int
+
+    @property
+    def false_triggers(self) -> int:
+        return len(self.false_trigger_seconds)
+
+    @property
+    def startup_false_triggers(self) -> int:
+        """Those in the floor's first convergence (same span as the offline replay's startup)."""
+        return sum(seconds < FLOOR_STARTUP_SECONDS for seconds in self.false_trigger_seconds)
 
     @property
     def false_triggers_per_hour(self) -> float:
@@ -159,19 +174,23 @@ def _seconds_ns(run: FullAppRunResult, seconds: float) -> int:
     return run.capture_start_packet_time_ns + int(round(seconds * NANOSECONDS_PER_SECOND))
 
 
-def _trigger_times_seconds(run: FullAppRunResult) -> list[tuple[float, dict | None]]:
-    """Every event trigger as (capture seconds, its solve manifest or None)."""
+def _trigger_times_seconds(run: FullAppRunResult) -> list[tuple[float, list[dict]]]:
+    """Every event trigger as (capture seconds, its solve manifests). One
+    sidecar trigger yields several manifests (one per render/output) that share
+    its window centre, so they are grouped into one trigger."""
     capture_start_ns = run.capture_start_packet_time_ns
     if run.ingest_backend == INGEST_BACKEND_RUST_SIDECAR:
-        triggers = []
+        manifests_by_centre_ns: dict[int, list[dict]] = {}
         for manifest in run.manifests_by_id.values():
             provenance = (manifest.get("localization") or {}).get("solve_provenance") or {}
             if str(provenance.get("attempt_kind") or "").startswith(EVENT_TRIGGER_ATTEMPT_PREFIX):
-                centre_ns = int(provenance.get("window_center_time_ns") or 0)
-                triggers.append(((centre_ns - capture_start_ns) / NANOSECONDS_PER_SECOND, manifest))
-        return triggers
+                manifests_by_centre_ns.setdefault(int(provenance.get("window_center_time_ns") or 0), []).append(manifest)
+        return [
+            ((centre_ns - capture_start_ns) / NANOSECONDS_PER_SECOND, manifests)
+            for centre_ns, manifests in sorted(manifests_by_centre_ns.items())
+        ]
     return [
-        ((int(frame["start_time_ns"]) - capture_start_ns) / NANOSECONDS_PER_SECOND, None)
+        ((int(frame["start_time_ns"]) - capture_start_ns) / NANOSECONDS_PER_SECOND, [])
         for receipt in run.upload_receipts
         for frame in receipt.frame_results
         if frame.get("triggered")
@@ -214,8 +233,8 @@ def score_call(scene, run: FullAppRunResult, call: ScheduledCall, candidate: str
     # stamped at its frame start, so allow one window (or frame) either side.
     slack_seconds = max(LOCALIZATION_WINDOW_SECONDS, FRAME_SECONDS)
     call_triggers = [
-        manifest
-        for trigger_seconds, manifest in triggers
+        manifests
+        for trigger_seconds, manifests in triggers
         if call.arrival_start_seconds - slack_seconds <= trigger_seconds <= call.arrival_end_seconds + slack_seconds
     ]
     detections = [
@@ -229,7 +248,8 @@ def score_call(scene, run: FullAppRunResult, call: ScheduledCall, candidate: str
     if run.ingest_backend == INGEST_BACKEND_RUST_SIDECAR:
         positions = [
             manifest["localization"]["position_m"]
-            for manifest in call_triggers
+            for manifests in call_triggers
+            for manifest in manifests
             if manifest["localization"].get("resolved_algorithm") == USABLE_SOLVE_ALGORITHM
             and manifest["localization"].get("position_m") is not None
         ]
@@ -256,9 +276,12 @@ def score_call(scene, run: FullAppRunResult, call: ScheduledCall, candidate: str
     )
 
 
-def count_false_triggers(schedule: list[ScheduledCall], triggers, capture_seconds: float) -> tuple[int, float]:
+def count_false_triggers(schedule: list[ScheduledCall], triggers, capture_seconds: float) -> tuple[list[float], float]:
+    """False trigger times (capture seconds) and the noise-only exposure they came from."""
     zones = sorted(call.exclusion_zone_seconds() for call in schedule)
-    false_triggers = sum(1 for trigger_seconds, _ in triggers if not any(start <= trigger_seconds <= end for start, end in zones))
+    false_triggers = [
+        trigger_seconds for trigger_seconds, _ in triggers if not any(start <= trigger_seconds <= end for start, end in zones)
+    ]
     covered = 0.0
     cursor = 0.0
     for start, end in zones:
@@ -327,12 +350,14 @@ def run_admission_cell(
         ingest_backend=candidate.ingest_backend,
         background=background.name,
         rows=tuple(score_call(scene, run, call, candidate.name, background.name, triggers) for call in schedule),
-        false_triggers=false_triggers,
+        false_trigger_seconds=tuple(false_triggers),
         false_trigger_exposure_seconds=exposure_seconds,
         capture_seconds=capture_seconds,
         wall_seconds=wall_seconds,
         test_process_cpu_seconds=(cpu_end.ru_utime + cpu_end.ru_stime) - (cpu_start.ru_utime + cpu_start.ru_stime),
         sidecar_cpu_seconds=max(sidecar_cpu) if sidecar_cpu else None,
+        sidecar_drain_wait_seconds=run.sidecar_drain_wait_seconds,
+        sidecar_caught_up=run.sidecar_caught_up,
         load_average_1m_start=load_start,
         load_average_1m_end=os.getloadavg()[0],
         manifest_replay_gaps=run.manifest_replay_gap_count,
@@ -342,4 +367,5 @@ def run_admission_cell(
 def cell_result_to_json(cell: AdmissionCellResult) -> dict:
     payload = asdict(cell)
     payload["false_triggers_per_hour"] = cell.false_triggers_per_hour
+    payload["startup_false_triggers"] = cell.startup_false_triggers
     return payload

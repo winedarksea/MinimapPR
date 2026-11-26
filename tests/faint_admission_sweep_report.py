@@ -34,8 +34,8 @@ def funnel_summary_table(
     lines = [
         "| candidate | background | calls | received | admitted | solved | classified | stored localized | periodic omni coverage "
         "| false trig/h (app) | false trig/h (offline steady) | startup false trig (offline, first 30 s) "
-        "| trigger us/frame (Python) | run wall s | app CPU s | sidecar CPU s | load 1m start/end |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        "| trigger us/frame (Python) | run wall s | app CPU s | sidecar CPU s | sidecar drain wait s | load 1m start/end |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for cell in cells:
         rows = cell.rows
@@ -44,11 +44,12 @@ def funnel_summary_table(
             f"| {cell.candidate} | {cell.background} | {len(rows)} | {_percent(rows, 'received')} | {_percent(rows, 'admitted')} "
             f"| {_percent(rows, 'solved')} | {_percent(rows, 'classified')} | {_percent(rows, 'stored')} "
             f"| {_percent(rows, 'periodic_omni_coverage')} "
-            f"| {cell.false_triggers_per_hour:.0f} ({cell.false_triggers} in {cell.false_trigger_exposure_seconds:.0f} s) "
+            f"| {cell.false_triggers_per_hour:.0f} ({cell.false_triggers} in {cell.false_trigger_exposure_seconds:.0f} s, {cell.startup_false_triggers} before 30 s) "
             f"| {NOT_MEASURED if replay is None else f'{replay.steady_false_triggers_per_hour:.0f}'} "
             f"| {NOT_MEASURED if replay is None else replay.startup_false_triggers} "
             f"| {NOT_MEASURED if replay is None else f'{replay.microseconds_per_frame:.0f}'} "
             f"| {cell.wall_seconds:.0f} | {cell.test_process_cpu_seconds:.0f} | {_optional(cell.sidecar_cpu_seconds, 0)} "
+            f"| {_optional(cell.sidecar_drain_wait_seconds, 0)}{'' if cell.sidecar_caught_up in (None, True) else ' (not caught up)'} "
             f"| {cell.load_average_1m_start:.1f}/{cell.load_average_1m_end:.1f} |"
         )
     return "\n".join(lines)

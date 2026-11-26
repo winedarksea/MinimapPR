@@ -26,6 +26,10 @@ class LiveSidecarManifestCollector:
         self._manifests_by_id: dict[str, dict] = {}
         self._last_event_id = 0
         self._replay_gap_count = 0
+        self.rejected_connection_count = 0
+        self.connection_count = 0
+        # Latest solve window centre seen (packet ns): how far the sidecar has got.
+        self.latest_window_center_time_ns = 0
         self._stop_requested = threading.Event()
         self._thread = threading.Thread(target=self._follow_stream, name="sidecar-manifest-collector", daemon=True)
 
@@ -53,7 +57,9 @@ class LiveSidecarManifestCollector:
         try:
             connection.request("GET", "/api/v1/dsp/stream", headers={"Last-Event-ID": str(self._last_event_id)})
             response = connection.getresponse()
+            self.connection_count += 1
             if response.status != 200:
+                self.rejected_connection_count += 1
                 return
             event_name, event_id, data = "message", None, None
             while True:
@@ -86,5 +92,9 @@ class LiveSidecarManifestCollector:
             return
         manifest = json.loads(data)
         self._manifests_by_id[str(manifest.get("manifest_id"))] = manifest
+        provenance = (manifest.get("localization") or {}).get("solve_provenance") or {}
+        self.latest_window_center_time_ns = max(
+            self.latest_window_center_time_ns, int(provenance.get("window_center_time_ns") or 0)
+        )
         if event_id is not None:
             self._last_event_id = max(self._last_event_id, event_id)
