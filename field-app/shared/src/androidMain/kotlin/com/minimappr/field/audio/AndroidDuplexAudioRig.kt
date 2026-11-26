@@ -10,6 +10,7 @@ import com.minimappr.field.capture.AudioTimestampSampler
 import com.minimappr.field.capture.CaptureBlockSink
 import com.minimappr.field.capture.CaptureGapReport
 import com.minimappr.field.capture.CaptureTimestampSample
+import com.minimappr.field.capture.SilentCaptureDropDetector
 import com.minimappr.field.chirplab.ChirpLabAudioPathFacts
 import com.minimappr.field.chirplab.describeAudioDevice
 import com.minimappr.field.playback.AndroidChirpPlaybackEngine
@@ -27,8 +28,9 @@ class DuplexAudioStartException(message: String) : RuntimeException(message)
  * chirp lab and the LAN session so both measure on the same audio paths.
  *
  * Logs `capture_timestamp` (with `wall_ms`, the coarse cross-phone time
- * reference) and `capture_gap` events; playback logs its own emissions and
- * timestamps.
+ * reference) and `capture_gap` events, from failed reads and from silent
+ * drops the capture timestamps reveal (`source`); playback logs its own
+ * emissions and timestamps.
  */
 class AndroidDuplexAudioRig(
     private val context: Context,
@@ -43,7 +45,11 @@ class AndroidDuplexAudioRig(
     /** False for a listen-only rig (CAPTURE mode): no AudioTrack is opened. */
     private val withPlayback: Boolean = true,
 ) {
-    val capture = AndroidMicrophoneCaptureLoop(context, configuration.capture, captureSink, ::handleCaptureGap, forcedAudioSource)
+    val capture = AndroidMicrophoneCaptureLoop(context, configuration.capture, captureSink, { report -> handleCaptureGap(report, GAP_SOURCE_FAILED_READ) }, forcedAudioSource)
+    private val silentDropDetector = SilentCaptureDropDetector(
+        configuration.capture.captureSampleRateHz,
+        configuration.capture.silentCaptureDropThresholdMilliseconds * NANOSECONDS_PER_MILLISECOND,
+    )
     val playback = AndroidChirpPlaybackEngine(context, configuration.playback, eventLog, emissionChannelLabel, emissionLevelDbfs)
     private val timestampSampler = AudioTimestampSampler({ capture.audioRecord }, configuration.capture.captureTimestampIntervalMilliseconds, ::handleCaptureTimestamp)
 
@@ -59,11 +65,13 @@ class AndroidDuplexAudioRig(
             put("wall_ms", sample.wallClockMilliseconds)
             put("frames_read", capture.framesRead)
         }
+        silentDropDetector.observe(sample.anchor)?.let { report -> handleCaptureGap(report, GAP_SOURCE_TIMESTAMP_STEP) }
         onCaptureTimestamp(sample)
     }
 
-    private fun handleCaptureGap(report: CaptureGapReport) {
+    private fun handleCaptureGap(report: CaptureGapReport, source: String) {
         eventLog.append(FieldRunEventTypes.CAPTURE_GAP) {
+            put("source", source)
             put("expected_frame", report.expectedFrame)
             put("got_frame", report.gotFrame)
             put("missing_frames", report.missingFrames)
@@ -110,5 +118,11 @@ class AndroidDuplexAudioRig(
         timestampSampler.stop()
         playback.stop()
         capture.stop()
+    }
+
+    private companion object {
+        const val NANOSECONDS_PER_MILLISECOND = 1_000_000L
+        const val GAP_SOURCE_FAILED_READ = "failed_read"
+        const val GAP_SOURCE_TIMESTAMP_STEP = "timestamp_step"
     }
 }

@@ -1,12 +1,14 @@
 //! Loads one phone's bundle: a tolerant WAV reader (the app may be killed
 //! before it patches the header, so the data chunk runs to end of file),
-//! `session.json`, `events.jsonl`, and a capture-timeline anchor fit that
-//! maps monotonic nanoseconds to capture samples.
+//! `session.json`, `events.jsonl`, and the capture timeline that maps
+//! monotonic nanoseconds to capture samples (`capture_timeline.rs`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::analysis_config::AnalysisConfig;
 use crate::bundle_schema::{BundleEvent, SessionDescription};
+use crate::capture_timeline::CaptureTimeline;
 
 const WAV_HEADER_SEARCH_LIMIT_BYTES: usize = 4_096;
 const NOMINAL_RATE_HZ: f64 = 48_000.0;
@@ -108,6 +110,22 @@ pub fn read_wav_tolerant(path: &Path) -> Result<WavAudio, String> {
     Err(format!("{}: no data chunk", path.display()))
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct WallClockMapping {
+    capture: CaptureTimeline,
+    monotonic_to_wall: TimelineAnchor,
+}
+
+impl WallClockMapping {
+    pub fn wall_ns_at_frame(&self, frame: f64) -> f64 {
+        self.monotonic_to_wall.ns_at_frame(self.capture.ns_at_frame(frame))
+    }
+
+    pub fn frame_at_wall_ns(&self, wall_ns: f64) -> f64 {
+        self.capture.frame_at_ns(self.monotonic_to_wall.frame_at_ns(wall_ns))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PhoneBundle {
     pub directory: PathBuf,
@@ -115,7 +133,7 @@ pub struct PhoneBundle {
     pub audio: WavAudio,
     pub events: Vec<BundleEvent>,
     pub unparsed_event_lines: usize,
-    pub capture_anchor: Option<TimelineAnchor>,
+    pub capture_timeline: Option<CaptureTimeline>,
 }
 
 impl PhoneBundle {
@@ -139,7 +157,9 @@ impl PhoneBundle {
                 _ => None,
             })
             .collect();
-        Ok(Self { directory: directory.to_path_buf(), session, audio, events, unparsed_event_lines, capture_anchor: fit_timeline(&anchor_points) })
+        let step_threshold_ns = AnalysisConfig::default().capture_timestamp_step_threshold_s * NANOSECONDS_PER_SECOND;
+        let capture_timeline = CaptureTimeline::from_points(&anchor_points, step_threshold_ns);
+        Ok(Self { directory: directory.to_path_buf(), session, audio, events, unparsed_event_lines, capture_timeline })
     }
 
     pub fn emissions(&self) -> Vec<(u64, u64, Option<i64>, bool, i64)> {
@@ -154,18 +174,26 @@ impl PhoneBundle {
             .collect()
     }
 
-    /// Wall-clock ms ↔ capture frame from the capture timestamps (NTP-level
-    /// accuracy: resolves which chirp period is which across phones).
-    pub fn wall_clock_anchor(&self) -> Option<TimelineAnchor> {
+    /// Monotonic ns → wall-clock ns from the capture timestamps (NTP-level
+    /// accuracy: resolves which chirp period is which across phones). The
+    /// anchor's "frame" axis is monotonic ns here. It is fitted against
+    /// nano_time, not frame_position, because the monotonic clock does not
+    /// jump at a silent capture drop.
+    fn monotonic_to_wall_anchor(&self) -> Option<TimelineAnchor> {
         let points: Vec<(f64, f64)> = self
             .events
             .iter()
             .filter_map(|event| match event {
-                BundleEvent::CaptureTimestamp { frame_position, wall_ms: Some(wall_ms), .. } => Some((*frame_position as f64, *wall_ms as f64 * 1e6)),
+                BundleEvent::CaptureTimestamp { nano_time, wall_ms: Some(wall_ms), .. } => Some((*nano_time as f64, *wall_ms as f64 * 1e6)),
                 _ => None,
             })
             .collect();
         fit_timeline(&points)
+    }
+
+    /// Capture frame ↔ wall-clock ns, through the segmented capture timeline.
+    pub fn wall_clock_mapping(&self) -> Option<WallClockMapping> {
+        Some(WallClockMapping { capture: self.capture_timeline.clone()?, monotonic_to_wall: self.monotonic_to_wall_anchor()? })
     }
 
     pub fn duration_s(&self) -> f64 {

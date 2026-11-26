@@ -38,7 +38,7 @@ pub struct PhonePicks {
     /// Same order as the *other* phone's `self_picks`.
     pub remote_picks: Vec<Option<ScannedArrival>>,
     pub blind_scanned: bool,
-    /// Median remote − emitter-self sample offset used for refinement.
+    /// Median remote − mapped emitter-self sample offset used for refinement.
     pub remote_offset_samples: Option<f64>,
 }
 
@@ -52,6 +52,9 @@ pub struct PairedRound {
     pub snr_db: [f64; 4],
     /// A's audio time of the round (its first self pick), seconds.
     pub a_time_s: f64,
+    /// Continuous capture stretch the round lies in (breaks on A and B
+    /// before it); θ steps between stretches. Set by `continuous_rounds`.
+    pub capture_segment: usize,
 }
 
 fn median(values: &mut [f64]) -> Option<f64> {
@@ -69,7 +72,7 @@ pub fn pick_self_arrivals(bundle: &PhoneBundle, scanner: &ArrivalScanner, self_p
     let emissions: Vec<_> = bundle.emissions().into_iter().filter(|e| e.3).collect();
     let predicted: Vec<Option<f64>> = emissions
         .iter()
-        .map(|(_, _, target_ns, _, _)| Some(bundle.capture_anchor?.frame_at_ns((*target_ns)? as f64)))
+        .map(|(_, _, target_ns, _, _)| Some(bundle.capture_timeline.as_ref()?.frame_at_ns((*target_ns)? as f64)))
         .collect();
     let have_predictions = predicted.iter().any(Option::is_some);
     let blind_offset = if have_predictions { None } else { blind_output_to_capture_offset(bundle, scanner, &emissions, config) };
@@ -125,10 +128,10 @@ pub fn pick_remote_arrivals(
 ) -> (Vec<Option<ScannedArrival>>, Option<f64>) {
     let fs = config.sample_rate_hz;
     let period_s = emitter.session.schedule.period_ms.max(1) as f64 / MILLISECONDS_PER_SECOND;
-    let wall_clocks = emitter.wall_clock_anchor().zip(listener.wall_clock_anchor());
+    let wall_clocks = emitter.wall_clock_mapping().zip(listener.wall_clock_mapping());
     let map_across = |emitter_sample: f64| -> f64 {
-        match wall_clocks {
-            Some((from, to)) => to.frame_at_ns(from.ns_at_frame(emitter_sample)),
+        match &wall_clocks {
+            Some((from, to)) => to.frame_at_wall_ns(from.wall_ns_at_frame(emitter_sample)),
             None => emitter_sample,
         }
     };
@@ -139,14 +142,19 @@ pub fn pick_remote_arrivals(
     let wide_half_window = if wall_clocks.is_some() { config.wall_clock_match_half_window_s } else { 0.25 * period_s } * fs;
     let flight_allowance = config.maximum_flight_s * fs;
     let audio = &listener.audio.samples;
+    // Offsets are taken against the mapped sample, not the raw one: the
+    // mapping goes through each phone's segmented capture timeline, so a
+    // silent drop on either phone (which moves the raw cross-phone sample
+    // offset by the whole drop) leaves the mapped offset unchanged.
     let mut offsets = Vec::new();
     for pick in emitter_self_picks.iter().filter_map(|p| p.arrival) {
         if offsets.len() >= config.coarse_match_count {
             break;
         }
-        let centre = map_across(pick.sample_index) + 0.5 * flight_allowance;
+        let mapped = map_across(pick.sample_index);
+        let centre = mapped + 0.5 * flight_allowance;
         if let Some(remote) = scanner.detect_near(audio, centre, wide_half_window + 0.5 * flight_allowance, ArrivalContext::RemoteEmitter) {
-            offsets.push(remote.sample_index - pick.sample_index);
+            offsets.push(remote.sample_index - mapped);
         }
     }
     let offset = median(&mut offsets);
@@ -154,7 +162,7 @@ pub fn pick_remote_arrivals(
         .iter()
         .map(|pick| {
             let (Some(arrival), Some(offset)) = (pick.arrival, offset) else { return None };
-            scanner.detect_near(audio, arrival.sample_index + offset, config.remote_refined_half_window_s * fs, ArrivalContext::RemoteEmitter)
+            scanner.detect_near(audio, map_across(arrival.sample_index) + offset, config.remote_refined_half_window_s * fs, ArrivalContext::RemoteEmitter)
         })
         .collect();
     (picks, offset)
@@ -186,6 +194,7 @@ pub fn pair_rounds(a: &PhonePicks, b: &PhonePicks, sample_rate_hz: f64) -> Vec<P
             repeat,
             snr_db: [a_k.snr_db, a_hears_b.snr_db, b_hears_a_k.snr_db, b_self.snr_db],
             a_time_s: seconds(a_k.sample_index),
+            capture_segment: 0,
         });
     }
     rounds

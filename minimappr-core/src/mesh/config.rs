@@ -253,8 +253,10 @@ pub struct IslandSyncConfig {
     /// body frame (x right, y up the screen, z out of the screen), metres,
     /// for `correct_for_speaker_mic_offsets`. Filled from Phase 1 run A3.
     pub speaker_offset_body_frame_by_platform_m: BTreeMap<String, [f64; 3]>,
-    /// Per-model stereo channel that drives the bottom (chirp) speaker, from
-    /// Phase 1 run A1. Unknown models play on the default channel.
+    /// Per-model stereo channel the chirp plays on, from Phase 1 run A1:
+    /// the bottom speaker where it ranges cleanly, otherwise a measured
+    /// earpiece (which then needs its d_ii and speaker vector above).
+    /// Unknown models play on the default channel.
     pub chirp_output_channel_by_platform: BTreeMap<String, StereoOutputChannel>,
     pub default_chirp_output_channel: StereoOutputChannel,
     pub clock_graph: ClockGraphConfig,
@@ -279,10 +281,26 @@ impl Default for IslandSyncConfig {
             walking_position_growth_mps: 1.5,
             confident_chirality_threshold: 0.9,
             relative_bearing_noise_std_deg: 8.0,
-            self_path_length_by_platform_m: BTreeMap::new(),
+            // Pixel 10 Pro XL chirps from its earpiece (see the channel map
+            // below): its self recording shows a body-borne precursor 22.3
+            // samples before the airborne arrival, i.e. a speaker ~0.16 m up
+            // the body from the bottom mic. Without this d_ii the precursor
+            // sits at the edge of the 2 cm default's rejection window and the
+            // self pick hops onto it (+3.9 / +7.8 cm range levels, 2026-11-26
+            // soak). Lateral offset not measured.
+            self_path_length_by_platform_m: BTreeMap::from([("pixel_10_pro_xl".to_string(), 0.16)]),
             default_self_path_length_m: 0.02,
-            speaker_offset_body_frame_by_platform_m: BTreeMap::new(),
-            chirp_output_channel_by_platform: BTreeMap::new(),
+            speaker_offset_body_frame_by_platform_m: BTreeMap::from([("pixel_10_pro_xl".to_string(), [0.0, 0.16, 0.0])]),
+            // Run A1. Pixel 7a: right is the earpiece (by ear, 2026-11-25), so
+            // Left. Pixel 10 Pro XL (2026-11-26, 1.000 m tape): Right is the
+            // earpiece (body precursor above, confirmed by ear). With the d_ii and speaker vector
+            // above it ranges 0.986 m, σ 0.6 mm over a 30 min soak. Left
+            // (presumably the bottom speaker) gave multi-copy arrivals and a
+            // level-dependent 5-9 cm short range, cause not found yet.
+            chirp_output_channel_by_platform: BTreeMap::from([
+                ("pixel_7a".to_string(), StereoOutputChannel::Left),
+                ("pixel_10_pro_xl".to_string(), StereoOutputChannel::Right),
+            ]),
             default_chirp_output_channel: StereoOutputChannel::Right,
             clock_graph: ClockGraphConfig::default(),
             clock_filter: ClockFilterConfig::default(),

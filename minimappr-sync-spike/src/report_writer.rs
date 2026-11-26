@@ -10,6 +10,9 @@ use crate::gate_evaluation::{merge_gate_items, GateItem};
 use crate::pair_ranging_series::CompensationMode;
 use crate::run_analysis::RunReport;
 
+/// Bundles are validated to be 48 kHz capture.
+const CAPTURE_RATE_HZ: f64 = 48_000.0;
+
 fn optional(value: Option<f64>, digits: usize) -> String {
     value.map_or("—".into(), |v| format!("{v:.digits$}"))
 }
@@ -20,14 +23,20 @@ pub fn render_markdown(report: &RunReport, gates: &[GateItem]) -> String {
     let _ = writeln!(out, "- Waveform {} {:.0}–{:.0} Hz, {:.0} ms; period {} ms", report.waveform.kind, report.waveform.band_low_hz, report.waveform.band_high_hz, report.waveform.duration_s * 1e3, report.period_ms);
     let _ = writeln!(out, "- Tape {} m; {:.1} °C{} → c = {:.2} m/s", optional(report.tape_distance_m, 3), report.temperature_c, if report.temperature_assumed { " (assumed)" } else { "" }, report.speed_of_sound_mps);
     let _ = writeln!(out, "- d_ii A/B {:.3}/{:.3} m; speaker correction {}", report.self_paths_m[0], report.self_paths_m[1], if report.speaker_correction_applied { "applied" } else { "not applied (no pose/speaker vectors)" });
-    let _ = writeln!(out, "- Rounds paired: {}\n", report.round_count);
-    let _ = writeln!(out, "## Phones\n\n| role | model | SDK | source | dur s | emissions | self det/miss | self σ µs | max shift µs | remote det | remote SNR dB | gaps | overflows | blind |");
-    let _ = writeln!(out, "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
+    let _ = writeln!(out, "- Rounds paired: {} ({} more left out: a capture/playback break overlaps them)\n", report.round_count, report.rounds_excluded_for_capture_breaks);
+    let _ = writeln!(out, "## Phones\n\n| role | model | SDK | source | dur s | emissions | self det/miss | self σ µs | max shift µs | remote det | remote SNR dB | gaps | silent drops | timeline breaks | self-pick hops | overflows | blind |");
+    let _ = writeln!(out, "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     for phone in &report.phones {
-        let _ = writeln!(out, "| {} | {} | {} | {} | {:.0} | {} | {}/{} | {} | {} | {} | {} | {} | {} | {} |",
+        let _ = writeln!(out, "| {} | {} | {} | {} | {:.0} | {} | {}/{} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             phone.role, phone.platform_name, phone.sdk_int, phone.capture_source, phone.duration_s, phone.emissions_played,
             phone.onset.detected, phone.onset.missed, optional(phone.onset.overall_sigma_us, 1), optional(phone.onset.max_segment_shift_us, 1),
-            phone.remote_detected, optional(phone.median_remote_snr_db, 1), phone.capture_gaps, phone.writer_overflows, phone.blind_scanned);
+            phone.remote_detected, optional(phone.median_remote_snr_db, 1), phone.capture_gaps, phone.capture_continuity.silent_drop_count,
+            phone.capture_continuity.self_interval_break_count, phone.capture_continuity.self_pick_outlier_count, phone.writer_overflows, phone.blind_scanned);
+    }
+    for phone in &report.phones {
+        for gap in phone.capture_continuity.breaks.iter().filter(|gap| gap.kind != crate::capture_continuity::BreakKind::SelfPickOutlier) {
+            let _ = writeln!(out, "- {} {:?} at {:.2}–{:.2} s: {:+.1} samples ({:+.3} ms)", phone.role, gap.kind, gap.start_sample / CAPTURE_RATE_HZ, gap.end_sample / CAPTURE_RATE_HZ, gap.discrepancy_samples, gap.discrepancy_samples / CAPTURE_RATE_HZ * 1e3);
+        }
     }
     let _ = writeln!(out, "\n## Range\n\n| mode | rounds | median m | robust σ mm | std mm | outliers | error vs tape mm |\n|---|---|---|---|---|---|---|");
     for stats in &report.distance {
@@ -43,7 +52,7 @@ pub fn render_markdown(report: &RunReport, gates: &[GateItem]) -> String {
                 let _ = writeln!(out, "- {name}: rms {:.2} µs, p95 {:.2} µs, max {:.2} µs (n = {})", s.rms_s * 1e6, s.p95_abs_s * 1e6, s.max_abs_s * 1e6, s.count);
             }
         }
-        let _ = writeln!(out, "- filter outliers rejected {}, silent gaps {}", clock.filter_outliers_rejected, clock.filter_silent_gaps);
+        let _ = writeln!(out, "- filter outliers rejected {}, silent gaps {}; θ steps stitched out at capture breaks {}", clock.filter_outliers_rejected, clock.filter_silent_gaps, clock.segment_steps_removed);
     }
     let _ = writeln!(out, "\n## Gate items\n\n| item | models | status | evidence |\n|---|---|---|---|");
     for gate in gates {

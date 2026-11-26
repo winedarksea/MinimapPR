@@ -36,25 +36,29 @@ cargo run --release -p minimappr-sync-spike --bin sync_spike -- summarize docs/f
 
 For the 5–20 m runs, run `./adb_wifi.sh` once over USB, then pass `--wifi` to every command.
 
+A phone that chirps from its earpiece (Pixel 10 Pro XL, Right) needs its d_ii at pull time
+(`--self-path-b 0.16`) and its speaker vector in the run frame (`--speaker-offset-b 0.16 0 0` with the
+bottom edges facing).
+Otherwise the self pick can land on the body precursor (see 2026-11-26).
+
 ## Run matrix (two phones)
 
 | Run | Setup | Gate item | Status |
 |---|---|---|---|
 | A0 | Survey, each phone alone | Mic info, UNPROCESSED and near-ultrasound support | session.json from the single-phone loopbacks (see below) |
-| A1 | L / R / both × portrait / landscape, listener 1 m from the bottom edge | Speaker channel map | not run |
+| A1 | L / R / both × portrait / landscape, listener 1 m from the bottom edge | Speaker channel map | Pixel 7a: right = earpiece (by ear, 2026-11-25), so Left. Pixel 10 Pro XL: right = earpiece (body precursor, then confirmed by ear, 2026-11-26), and Right is used (Left ranges badly, see below) |
 | A2 | foam → hand → table markers, 20 chirps each | Self onset within 10 µs; limiter headroom | not run |
 | A3 | Tape 1.000 m, 3 repositionings × 30 rounds | d_ii sum, speaker vectors | not run |
 | A4 | 1/5/10/20 m × 13–16 / 15–18 / 18–20 kHz, LFM vs HFM at 5 m | Range against band | not run |
 | A5 | Hallway or outdoor, 1–20 m × 50 rounds, temperature logged | 10 cm at 20 m (PARTIAL: 2 models) | not run |
-| A6 | 30 min on foam at ~1.5 m, P = 4 s, screens locked | θ residual < 50 µs over 30 min; locked playback | not run |
+| A6 | 30 min on foam at ~1.5 m, P = 4 s, screens locked | θ residual < 50 µs over 30 min; locked playback | run at 1.000 m, flat on backs: Pixel 7a + A03s (2026-11-25), Pixel 7a + Pixel 10 Pro XL (2026-11-26) |
 | A7 | Capture source sweep | Capture path | not run |
 | A8 | Volume 0 | Muted phone → `own_chirp_inaudible` | not run |
 | A9 | Leakage from the A4 1–2 m runs | Below-11 kHz leakage | not run |
 
-A1–A9 need someone to place and tape-measure the phones, so they were not run in the implementation
-session. The per-model tables in `minimappr-core/src/mesh/config.rs`
-(`self_path_length_by_platform_m`, `speaker_offset_body_frame_by_platform_m`,
-`chirp_output_channel_by_platform`) stay empty until A1 and A3 have run.
+The per-model tables in `minimappr-core/src/mesh/config.rs` (`self_path_length_by_platform_m`,
+`speaker_offset_body_frame_by_platform_m`, `chirp_output_channel_by_platform`) hold the Pixel 7a
+channel and the Pixel 10 Pro XL channel, d_ii and speaker vector. The rest wait on A1 and A3.
 
 ## Desk pipeline check (2026-11-25; not a gate run)
 
@@ -97,17 +101,122 @@ The first live runs exposed two core bugs, both fixed with regression tests:
    which locked in 281 ppm live. The rate is now reset to the prior unless it is validated (baseline
    ≥ 20 s).
 
+## 30-minute locked soak at 1.000 m (2026-11-25, A6 + A3 calibration attempt)
+
+`data/field_phase1/20261125_soak_1m`. Setup: both phones flat on their backs, screens up, bottom edges
+1.000 m apart. The tape is accurate to about a centimetre (a few mm either way). 19.89 °C, P = 4 s,
+13–16 kHz up/down HFM, VOICE_RECOGNITION on both, right channel, screens locked for the whole
+1858 s run.
+
+- **Run health:** 464/465 emissions, no capture gaps, writer overflows or playback underruns. Both
+  report the bottom mic as active (Pixel `builtin_mic_1` at y = 5.8 mm). The Pixel's capture
+  timestamp fit residual is 1.29 ms; ranging works in the sample domain, so this does not affect it.
+- **Locked playback:** chirps continued with the screens off for 30 min. Pixel: 0 of 464 self chirps
+  missed. A03s: 5 of 465 missed. The analyser marks the A03s FAIL for those 5.
+- **Range is multimodal:** the levels are 1.029 / 1.072 / 1.109 / **1.148** (253 rounds) /
+  **1.189** (154 rounds) m. They are spaced 41.5 mm, which is one 240 µs (11.5-sample) hop of a
+  single pick. Within a level the spread is about 1 mm. The hops are in the **A03s self pick only**
+  (92/457 rounds deviate ±240 µs from the local median). The Pixel self pick and both remote picks
+  are clean.
+- **Absolute offset:** the raw range is about 13–15 cm longer than the tape, and the implied
+  (d_AA + d_BB)/2 is −0.128 m, which is not physically possible. With both bottom mics active,
+  two-way ranging should read close to 1.0 m regardless of where the speakers are. The likely cause
+  is self picks arriving early. **Confirmed after the run: the Pixel's right channel drives the
+  earpiece**, about 14 cm from its bottom mic. Its self chirp most likely reaches the mic through the
+  body before the airborne path arrives. `chirp_output_channel_by_platform` now maps `pixel_7a` to
+  Left, and so does `devices.json`. **The run cannot be used as a d_ii calibration.**
+- **Clock:** the rate is −12.24 ppm. Round to round, θ moves by a median of 2.6 µs. All rounds
+  under one linear fit give an RMS of 92 µs, because each A03s self-pick hop shifts θ by ~120 µs.
+  **Within one pick mode, a 30-minute linear fit leaves an RMS of 18–29 µs and a p95 of 33–49 µs**,
+  which is inside the 50 µs item. Whether the gate passes depends on fixing the self pick. The
+  remaining wander is about ±80 µs over 30 min, a slow drift of under 0.1 ppm.
+- **Leakage:** 2–11 kHz is at the noise floor (−0.2 dB median) on both. PASS.
+
+Next: make the self pick robust. Try the first-arrival detector for self chirps, or a lower level
+or volume so the self chirp does not limit. Then repeat the soak with the phones raised and upright.
+
+## Two Pixels at 1.000 m (2026-11-26)
+
+Pixel 7a (A) and Pixel 10 Pro XL (B, SDK 37, `pixel_10_pro_xl`). Both flat on their backs, screens
+up, bottom edges facing and 1.000 m apart (cm-level tape). P = 4 s, 13–16 kHz up/down HFM,
+VOICE_RECOGNITION on both, temperature not measured (20 °C assumed). Runs are in
+`data/field_phase1/20261126_*`.
+
+| Run | B channel | Volume | Range (double-sided) | Robust σ | θ linear-fit RMS |
+|---|---|---|---|---|---|
+| `pixels_check` (160 s) | left | 12/25 | 0.948 m | 8.8 mm | 70 µs (one 527 ms silent drop) |
+| `pixels_v18_left` (170 s) | left | 18/25 | 0.913 m | 11.6 mm | 25.8 µs |
+| `pixels_v18_b_right` (180 s) | right | 18/25 | **0.9863 m** | **0.1 mm** | **0.89 µs** |
+| `pixels_soak_1m` (30 min, locked) | right | 18/25 | **0.9861 m** | **0.6 mm** | **5.7 µs** |
+
+The right-channel rows use d_BB = 0.16 m and B's speaker 0.16 m beyond its mic along the axis (the
+manifest's `self_path_m` and `speaker_offset_world_m`). With the 2 cm default, the soak reads 1.037 m
+over three levels (see below).
+
+- **The A03s problems are gone.** Self σ is 0.2–1.9 µs on both Pixels, with no self-pick hops,
+  locked playback misses 0 of 458 chirps on each phone, and there are no writer overflows. The clock
+  rate is −7.4 ppm.
+- **Clock gate passes.** Over 30 min, the 90 s heartbeat prediction residual has a p95 of 9.0 µs and
+  an RMS of 3.4 µs. The A03s soak measured 92 µs RMS, from self-pick hops.
+- **The Pixel 10's right channel is the earpiece** (confirmed by ear after the runs). Its self recording shows a body-borne precursor
+  (−8 dB) 22.3 samples before the airborne arrival. That puts the speaker about 0.16 m from the bottom
+  mic. With the 2 cm default d_ii, the precursor-rejection window is about 21.5 samples, so the
+  precursor sits right at its edge. Over the soak the self pick moved from the airborne peak, to
+  halfway, to the precursor, at about 30 s and about 17 min. That gave range levels of
+  0.996 / 1.036 / 1.074 m, each step half the 22-sample lead in range. With d_BB = 0.16 m the
+  window covers it, and the soak holds one level at σ 0.6 mm. The 3-minute run and the soak agree to
+  0.2 mm. The remaining −14 mm against the tape is within the tape, the unmeasured temperature
+  (~1.7 mm per °C) and the 7a's unmeasured lateral speaker offset. `config.rs` now carries
+  `pixel_10_pro_xl` → Right, d_ii 0.16 m, speaker [0, 0.16, 0] m.
+- **On the left channel (presumably the bottom speaker), the Pixel 10 hears the 7a as three copies**:
+  0 dB at about +45 samples, −6 dB at about +20 and −9 to −12 dB at 0. The first copy is right at
+  the detector's −10 dB first-arrival acceptance, so the B←A pick flips between copies with level and
+  from round to round. The range moved from 0.948 m at volume 12 to 0.913 m at volume 18. On the
+  right channel the same B←A reception is a single clean arrival, even though the 7a's emission did
+  not change. The cause is not known. Logging `activeMicrophones` while playback runs would show
+  whether the Pixel switches capture mics when its bottom speaker is in use.
+- **Silent capture drop (Pixel 10, `pixels_check`).** At 46.6 s the audio server stalled both
+  directions: playback lost about 350 ms and capture lost 527 ms. Every read succeeded, so the app
+  logged no `capture_gap`. Only the capture timestamps show it (frames advanced 22 848 in 1.0 s of
+  monotonic time). It coincided with a laptop `status` (dumpsys) call and a system memory trim. It did
+  not recur in the 30-minute soak, which had no polling. The Pixel 10's capture timestamps also wander
+  by one 256-frame HAL burst (5.33 ms).
+- **Prep bug.** `cmd media_session volume --set` does nothing on Android 17. The 2026-11-25 soak ran
+  the 7a at 19/25, not 12. `prep` now uses `cmd audio set-volume` and checks the readback.
+- **The Pixel 10 charges as "AC" over this USB link,** so `svc power stayon usb` does not keep it
+  awake. Use `svc power stayon true`, and unlock its secure keyguard by hand before `start`. `start`
+  now checks for the keyguard.
+
+Fixes from this session:
+
+- Analyser: `capture_timeline.rs` fits the capture timeline in segments, splitting at timestamp steps
+  over 15 ms. A single fit had put every self prediction after the drop 0.5 s off: 33 of 40 missed.
+  The wall-clock mapping goes through it too. Remote windows are centred on the mapped sample, so a
+  drop no longer shifts them. `capture_continuity.rs` finds breaks in the self-pick interval against
+  the output-frame interval (tolerance 2 samples). It separates single-pick hops (outliers) from
+  lasting steps, leaves out rounds that overlap a break, and numbers capture segments. θ fits,
+  tracked-rate ratio and onset σ remove the steps between segments (`stitch_segments`). The report
+  lists silent drops, timeline breaks and self-pick hops for each phone.
+- App: `SilentCaptureDropDetector` logs a `capture_gap` with `source: timestamp_step` and passes it
+  to the session as a gap. Failed reads log `source: failed_read`.
+- Core FFI: the live `CaptureClockAnchor` jump threshold is raised from 5 ms to 15 ms. The Pixel 10's
+  5.33 ms burst wander would otherwise restart its fit every few seconds.
+
+Re-analysing the 2026-11-25 A03s soak with the segmented analyser classifies 40 of its ±240 µs hops
+as self-pick hops. 35 longer pick-mode switches count as timeline steps. 167 rounds are left out,
+and the 291 kept range at σ 1.7 mm.
+
 ## Gate table
 
 | Item | Status | Evidence |
 |---|---|---|
 | Range 10 cm at 20 m | not run | |
-| θ residual < 50 µs over 30 min | not run | |
-| Self onset stable within 10 µs | not run | |
-| Locked-screen playback (Android 17) | not run | |
+| θ residual < 50 µs over 30 min | PASS (Pixel 7a + Pixel 10 Pro XL); FAIL with the A03s | pixels_soak_1m: heartbeat p95 9.0 µs, linear-fit RMS 5.7 µs over 1824 s. soak_1m (A03s): self-pick hops |
+| Self onset stable within 10 µs | PASS on one surface (both Pixels); FAIL (A03s) | pixels_soak_1m: self σ 0.3 / 1.0 µs, given the right d_ii for an earpiece. soak_1m: A03s hops ±240 µs. A2 (surface changes) not run |
+| Locked-screen playback (Android 17) | PASS (Pixel 7a, Pixel 10 Pro XL, SDK 37); A03s 5/465 missed | pixels_soak_1m: 0/458 missed on each Pixel. soak_1m |
 | Muted phone flagged inaudible | not run | |
-| Bird-band leakage | not run | |
-| Three phone models | PARTIAL by construction | Two models (Pixel 7a, SM-A037F) |
+| Bird-band leakage | PASS | soak_1m: −0.2 dB over floor, 2–11 kHz |
+| Three phone models | Three models measured (Pixel 7a, SM-A037F, Pixel 10 Pro XL), never three at once | |
 
 ## Bundle schema
 
@@ -125,7 +234,9 @@ The schema of record is `minimappr-sync-spike/src/bundle_schema.rs`. Per phone:
   - `emission` (`emission_index`, `output_frame_index`, `target_ns`, `played`, `channel`, `level_dbfs`)
   - `capture_timestamp` (`frame_position`, `nano_time`, `wall_ms`) and `playback_timestamp`
   - `attitude` (`quaternion` w, x, y, z)
-  - `screen`, `route_change`, `capture_gap`, `marker`, `thermal`, `volume`, `writer_overflow`
+  - `capture_gap` (`source`: `failed_read`, or `timestamp_step` for a silent drop the capture
+    timestamps show; `expected_frame`, `got_frame`, `missing_frames`)
+  - `screen`, `route_change`, `marker`, `thermal`, `volume`, `writer_overflow`
 
 Per run, the laptop writes `run_manifest.json` at pull time. It holds `label`, `matrix_run`,
 `tape_distance_m`, `temperature_c`, `surface` and `marker_surfaces`. It also has

@@ -26,6 +26,13 @@ data class FieldCaptureConfiguration(
     val captureTimestampIntervalMilliseconds: Long = 1_000,
     /** Duplex start waits this long for the first valid capture timestamp. */
     val firstCaptureTimestampTimeoutMilliseconds: Long = 3_000,
+    /**
+     * Capture timestamps advancing this much further than their frames is a
+     * silent drop (`SilentCaptureDropDetector`). Above the Pixel 10 Pro XL's
+     * 5.33 ms (one HAL burst) timestamp wander; matches the analyser's
+     * `capture_timestamp_step_threshold_s` and the core anchor's jump gate.
+     */
+    val silentCaptureDropThresholdMilliseconds: Long = 15,
 )
 
 data class FieldPlaybackConfiguration(

@@ -28,6 +28,8 @@ pub struct ClockResidualReport {
     pub heartbeat_cadence_s: f64,
     pub filter_outliers_rejected: usize,
     pub filter_silent_gaps: usize,
+    /// θ steps removed at capture breaks before fitting (see `stitch_segments`).
+    pub segment_steps_removed: usize,
 }
 
 pub fn summarize(residuals: &[f64]) -> Option<ResidualSummary> {
@@ -95,6 +97,45 @@ pub fn polynomial_fit_residuals(points: &[(f64, f64)], degree: usize) -> Option<
     Some((residuals, physical))
 }
 
+/// Removes the steps between continuous segments of a series that is
+/// linear within each segment (θ(t) across silent capture drops, or self
+/// onsets across playback slips): one common slope, one intercept per
+/// segment, and every segment shifted onto the first one's intercept.
+/// Points in a segment of fewer than `MINIMUM_SEGMENT_POINTS` are dropped
+/// (their intercept is not determined). Returns stitched points in order
+/// and the number of steps removed.
+pub fn stitch_segments(points: &[(f64, f64)], segment_ids: &[usize]) -> (Vec<(f64, f64)>, usize) {
+    const MINIMUM_SEGMENT_POINTS: usize = 2;
+    let mut ids: Vec<usize> = segment_ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let members = |id: usize| points.iter().zip(segment_ids).filter(move |(_, s)| **s == id).map(|(p, _)| *p);
+    let usable: Vec<usize> = ids.into_iter().filter(|id| members(*id).count() >= MINIMUM_SEGMENT_POINTS).collect();
+    let means: Vec<(usize, f64, f64)> = usable
+        .iter()
+        .map(|id| {
+            let count = members(*id).count() as f64;
+            (*id, members(*id).map(|p| p.0).sum::<f64>() / count, members(*id).map(|p| p.1).sum::<f64>() / count)
+        })
+        .collect();
+    let (mut sxy, mut sxx) = (0.0, 0.0);
+    for (id, mean_t, mean_y) in &means {
+        for (t, y) in members(*id) {
+            sxy += (t - mean_t) * (y - mean_y);
+            sxx += (t - mean_t).powi(2);
+        }
+    }
+    let slope = if sxx > 0.0 { sxy / sxx } else { 0.0 };
+    let intercept_of = |id: usize| means.iter().find(|m| m.0 == id).map(|(_, mean_t, mean_y)| mean_y - slope * mean_t);
+    let Some(reference) = means.first().map(|m| m.0).and_then(intercept_of) else { return (Vec::new(), 0) };
+    let stitched = points
+        .iter()
+        .zip(segment_ids)
+        .filter_map(|(point, id)| intercept_of(*id).map(|intercept| (point.0, point.1 - (intercept - reference))))
+        .collect();
+    (stitched, means.len().saturating_sub(1))
+}
+
 /// One-step-ahead prediction residuals: predict at each point before
 /// updating with it (the first points only seed the filter).
 fn filter_prediction_residuals(points: &[(f64, f64)], pick_sigma_s: f64) -> (Vec<f64>, usize, usize) {
@@ -126,8 +167,11 @@ fn subsample_at_cadence(points: &[(f64, f64)], cadence_s: f64) -> Vec<(f64, f64)
     kept
 }
 
-/// `points`: (A-clock time s, θ s), time-ordered.
-pub fn clock_residual_report(points: &[(f64, f64)], source_mode: &str, heartbeat_cadence_s: f64) -> ClockResidualReport {
+/// `points`: (A-clock time s, θ s), time-ordered; `segment_ids`: the
+/// continuous capture stretch of each point (θ steps between them).
+pub fn clock_residual_report(points: &[(f64, f64)], segment_ids: &[usize], source_mode: &str, heartbeat_cadence_s: f64) -> ClockResidualReport {
+    let (stitched, segment_steps_removed) = stitch_segments(points, segment_ids);
+    let points = &stitched[..];
     let pick_sigma_s = ClockGraphConfig::default().pick_offset_sigma_s;
     let linear = polynomial_fit_residuals(points, 1);
     let quadratic = polynomial_fit_residuals(points, 2);
@@ -147,6 +191,7 @@ pub fn clock_residual_report(points: &[(f64, f64)], source_mode: &str, heartbeat
         heartbeat_cadence_s,
         filter_outliers_rejected: rejected,
         filter_silent_gaps: silent_gaps,
+        segment_steps_removed,
     }
 }
 
@@ -155,9 +200,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_theta_step_at_a_capture_break_is_stitched_out() {
+        let points: Vec<(f64, f64)> = (0..100).map(|k| (k as f64 * 4.0, 0.25 + 12e-6 * k as f64 * 4.0 + if k >= 40 { 0.527 } else { 0.0 })).collect();
+        let segments: Vec<usize> = (0..100).map(|k| usize::from(k >= 40)).collect();
+        let report = clock_residual_report(&points, &segments, "double_sided", 90.0);
+        assert_eq!(report.segment_steps_removed, 1);
+        assert!((report.rate_offset_ppm.unwrap() - 12.0).abs() < 1e-6);
+        assert!(report.linear_fit.unwrap().rms_s < 1e-12);
+    }
+
+    #[test]
     fn linear_drift_has_tiny_linear_residuals_and_recovers_rate() {
         let points: Vec<(f64, f64)> = (0..300).map(|k| (k as f64 * 4.0, 0.25 + 42e-6 * k as f64 * 4.0)).collect();
-        let report = clock_residual_report(&points, "double_sided", 90.0);
+        let report = clock_residual_report(&points, &vec![0; points.len()], "double_sided", 90.0);
         assert!((report.rate_offset_ppm.unwrap() - 42.0).abs() < 1e-6);
         assert!(report.linear_fit.unwrap().rms_s < 1e-12);
         assert!(report.filter_every_round.unwrap().rms_s < 1e-6);

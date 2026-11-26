@@ -11,6 +11,7 @@ use minimappr_core::sync::two_way_ranging::{
     correct_for_speaker_mic_offsets, range_pair, RateCompensation, SelfPathLengths, TwoWayRangingResult,
 };
 
+use crate::clock_residuals::stitch_segments;
 use crate::round_pairing::PairedRound;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,23 +68,25 @@ pub struct DistanceStatistics {
     pub error_vs_tape_m: Option<f64>,
 }
 
-/// Slope of θ(t) from uncompensated rounds: (1 + slope) = B ticks per A tick.
+/// Slope of θ(t) from uncompensated rounds: (1 + slope) = B ticks per A
+/// tick. One slope across capture segments (θ steps at each break).
 pub fn offset_series_rate_ratio(rounds: &[PairedRound], self_paths: SelfPathLengths, speed_of_sound_mps: f64) -> Option<f64> {
-    let points: Vec<(f64, f64)> = rounds
+    let (points, segment_ids): (Vec<(f64, f64)>, Vec<usize>) = rounds
         .iter()
         .filter_map(|round| {
             let result = range_pair(&round.times, self_paths, speed_of_sound_mps, RateCompensation::None).ok()?;
-            Some((result.offset_reference_time_on_a_s, result.clock_offset_b_minus_a_s))
+            Some(((result.offset_reference_time_on_a_s, result.clock_offset_b_minus_a_s), round.capture_segment))
         })
-        .collect();
-    if points.len() < 2 {
+        .unzip();
+    let (stitched, _) = stitch_segments(&points, &segment_ids);
+    if stitched.len() < 2 {
         return None;
     }
-    let count = points.len() as f64;
-    let mean_t = points.iter().map(|p| p.0).sum::<f64>() / count;
-    let mean_o = points.iter().map(|p| p.1).sum::<f64>() / count;
-    let stt: f64 = points.iter().map(|p| (p.0 - mean_t).powi(2)).sum();
-    let sto: f64 = points.iter().map(|p| (p.0 - mean_t) * (p.1 - mean_o)).sum();
+    let count = stitched.len() as f64;
+    let mean_t = stitched.iter().map(|p| p.0).sum::<f64>() / count;
+    let mean_o = stitched.iter().map(|p| p.1).sum::<f64>() / count;
+    let stt: f64 = stitched.iter().map(|p| (p.0 - mean_t).powi(2)).sum();
+    let sto: f64 = stitched.iter().map(|p| (p.0 - mean_t) * (p.1 - mean_o)).sum();
     (stt > 0.0).then(|| 1.0 + sto / stt)
 }
 

@@ -3,8 +3,8 @@
 //! "Phase 1 — sync spike"; run matrix A0–A9 in
 //! `docs/field_mode_progress/phase1_sync_spike.md`).
 //!
-//! Flow: [`bundle_loader`] → [`round_pairing`] (picks via [`arrival_scan`])
-//! → [`pair_ranging_series`] / [`clock_residuals`] / [`onset_stability`] /
+//! Flow: [`bundle_loader`] ([`capture_timeline`]) → [`round_pairing`] (picks via [`arrival_scan`])
+//! → [`capture_continuity`] → [`pair_ranging_series`] / [`clock_residuals`] / [`onset_stability`] /
 //! [`spectral_leakage`] / [`channel_map`] → [`run_analysis::RunReport`] →
 //! [`gate_evaluation`] → [`report_writer`].
 
@@ -13,6 +13,8 @@ pub mod arrival_scan;
 pub mod bundle_loader;
 pub mod bundle_schema;
 pub mod bundle_validation;
+pub mod capture_continuity;
+pub mod capture_timeline;
 pub mod channel_map;
 pub mod clock_residuals;
 pub mod gate_evaluation;

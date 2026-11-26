@@ -54,9 +54,15 @@ pub fn validate_phone(directory: &Path, label: &str, outcome: &mut ValidationOut
         Some(_) => {}
         None => outcome.warnings.push(format!("{label}: no capture_timestamp events: self picks fall back to a blind scan")),
     }
-    if let Some(anchor) = bundle.capture_anchor {
-        if anchor.residual_rms_ns > ANCHOR_RESIDUAL_WARNING_NS {
-            outcome.warnings.push(format!("{label}: capture timestamp fit residual {:.2} ms (glitches or silent drops)", anchor.residual_rms_ns / 1e6));
+    if let Some(timeline) = &bundle.capture_timeline {
+        if timeline.residual_rms_ns() > ANCHOR_RESIDUAL_WARNING_NS {
+            outcome.warnings.push(format!("{label}: capture timestamp fit residual {:.2} ms within a segment (timestamp glitches)", timeline.residual_rms_ns() / 1e6));
+        }
+        for drop in &timeline.silent_drops {
+            outcome.warnings.push(format!(
+                "{label}: silent capture drop of {:.1} ms before capture sample {:.0} ({:.1} s): no failed read, timestamps only",
+                drop.missing_ns / 1e6, drop.capture_frame, drop.capture_frame / 48_000.0
+            ));
         }
     }
     let emissions = bundle.emissions();
@@ -78,7 +84,7 @@ pub fn validate_phone(directory: &Path, label: &str, outcome: &mut ValidationOut
     if bundle.unparsed_event_lines > 0 {
         outcome.warnings.push(format!("{label}: {} unparseable events.jsonl lines", bundle.unparsed_event_lines));
     }
-    if bundle.wall_clock_anchor().is_none() {
+    if bundle.wall_clock_mapping().is_none() {
         outcome.warnings.push(format!("{label}: no wall_ms on capture timestamps: cross-phone pairing assumes simultaneous starts"));
     }
     if bundle.session.platform_name.is_empty() {
@@ -88,7 +94,7 @@ pub fn validate_phone(directory: &Path, label: &str, outcome: &mut ValidationOut
         "{label}: {} {} (SDK {}), {:.1} s audio, {played} emissions, waveform {} {:.0}-{:.0} Hz, channel {}, anchors {}",
         bundle.session.device.manufacturer, bundle.session.platform_name, bundle.session.device.sdk_int, bundle.duration_s(),
         bundle.session.schedule.waveform.kind, bundle.session.schedule.waveform.band_low_hz, bundle.session.schedule.waveform.band_high_hz,
-        bundle.session.schedule.channel, bundle.capture_anchor.map_or(0, |a| a.anchor_count)
+        bundle.session.schedule.channel, bundle.capture_timeline.as_ref().map_or(0, |t| t.anchor_count())
     ));
 }
 

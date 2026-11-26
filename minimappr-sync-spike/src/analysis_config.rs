@@ -8,6 +8,15 @@ pub struct AnalysisConfig {
     /// predicted capture sample (AudioTrack/AudioRecord timestamp error plus
     /// output latency uncertainty).
     pub self_search_half_window_s: f64,
+    /// A capture-timestamp step larger than this between consecutive
+    /// timestamps is a silent drop (Pixel 10 Pro XL timestamps jitter by
+    /// ~5 ms; the 2026-11-26 drop was 527 ms).
+    pub capture_timestamp_step_threshold_s: f64,
+    /// Consecutive self picks whose capture interval differs from their
+    /// output-frame interval by more than this many samples (after the
+    /// run's median rate ratio) bracket a playback or capture discontinuity.
+    /// Rounds overlapping one are left out of ranging and the clock.
+    pub self_interval_break_tolerance_samples: f64,
     /// First remote matches use a wide window (start skew between phones);
     /// later ones use the median offset ± this.
     pub remote_refined_half_window_s: f64,
@@ -72,6 +81,8 @@ impl Default for AnalysisConfig {
         Self {
             sample_rate_hz: 48_000.0,
             self_search_half_window_s: 0.030,
+            capture_timestamp_step_threshold_s: 0.015,
+            self_interval_break_tolerance_samples: 2.0,
             remote_refined_half_window_s: 0.050,
             coarse_match_count: 8,
             wall_clock_match_half_window_s: 0.4,

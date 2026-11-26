@@ -6,9 +6,10 @@
   "adb": "~/Library/Android/sdk/platform-tools/adb",
   "wifi_adb_port": 5555,
   "devices": {
-    "pixel7a": {"serial": "34081JEHN18099", "wifi_ip": "192.168.1.30", "platform_name": "pixel_7a"},
-    "sm_a037f": {"serial": "R9ZRC0JQ8ZR", "wifi_ip": "192.168.1.35", "platform_name": "sm-a037f"}
+    "pixel7a": {"serial": "34081JEHN18099", "wifi_ip": "192.168.1.30", "platform_name": "pixel_7a", "chirp_channel": "left"},
+    "sm_a037f": {"serial": "R9ZRC0JQ8ZR", "wifi_ip": "192.168.1.35", "platform_name": "sm-a037f", "chirp_channel": "right"},
+    "pixel10proxl": {"serial": "58090DLCQ0090Z", "wifi_ip": "192.168.1.32", "platform_name": "pixel_10_pro_xl", "chirp_channel": "right"}
   },
-  "roles": {"A": "pixel7a", "B": "sm_a037f"},
-  "session_roles": {"host": "pixel7a", "join": "sm_a037f"}
+  "roles": {"A": "pixel7a", "B": "pixel10proxl"},
+  "session_roles": {"host": "pixel7a", "join": "pixel10proxl"}
 }

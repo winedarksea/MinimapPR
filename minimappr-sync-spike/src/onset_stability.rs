@@ -6,7 +6,8 @@
 //! placement moves the onset (body precursor, limiter), which would bias
 //! every two-way range by the shift × c / 2.
 
-use crate::clock_residuals::polynomial_fit_residuals;
+use crate::capture_continuity::CaptureContinuity;
+use crate::clock_residuals::{polynomial_fit_residuals, stitch_segments};
 use crate::pair_ranging_series::{median_of, robust_sigma};
 use crate::round_pairing::SelfPick;
 
@@ -40,18 +41,31 @@ const CLIPPED_PEAK_FRACTION: f32 = 0.98;
 /// Label of the stretch before the first marker.
 const UNMARKED_SEGMENT_LABEL: &str = "before_first_marker";
 
-pub fn onset_stability(self_picks: &[SelfPick], markers: &[(i64, String)], sample_rate_hz: f64) -> OnsetStabilityReport {
+/// A playback/capture break shifts every later onset by the slip, which is
+/// a timeline fault (reported by `capture_continuity`), not onset jitter:
+/// the fit stitches the segments between breaks first.
+pub fn onset_stability(self_picks: &[SelfPick], markers: &[(i64, String)], continuity: &CaptureContinuity, sample_rate_hz: f64) -> OnsetStabilityReport {
     let detected: Vec<&SelfPick> = self_picks.iter().filter(|pick| pick.arrival.is_some()).collect();
-    let points: Vec<(f64, f64)> = detected
+    let detected_count = detected.len();
+    let raw_points: Vec<(f64, f64)> = detected
         .iter()
         .map(|pick| (pick.output_frame_index as f64, pick.arrival.expect("filtered").sample_index))
         .collect();
+    let segment_ids: Vec<usize> = raw_points.iter().map(|(_, sample)| continuity.timeline_breaks_before(*sample)).collect();
+    let (points, _) = stitch_segments(&raw_points, &segment_ids);
+    // A one-pick segment has no intercept and is dropped by the stitch.
+    let detected: Vec<&SelfPick> = if points.len() == detected.len() {
+        detected
+    } else {
+        let kept: Vec<f64> = points.iter().map(|p| p.0).collect();
+        detected.into_iter().filter(|pick| kept.contains(&(pick.output_frame_index as f64))).collect()
+    };
     let fit = polynomial_fit_residuals(&points, 1);
     let clipped_count = detected.iter().filter(|pick| pick.arrival.is_some_and(|a| a.peak_fraction >= CLIPPED_PEAK_FRACTION)).count();
     let Some((residual_samples, coefficients)) = fit else {
         return OnsetStabilityReport {
-            detected: detected.len(),
-            missed: self_picks.len() - detected.len(),
+            detected: detected_count,
+            missed: self_picks.len() - detected_count,
             overall_sigma_us: None,
             loopback_rate_offset_ppm: None,
             segments: Vec::new(),
@@ -92,8 +106,8 @@ pub fn onset_stability(self_picks: &[SelfPick], markers: &[(i64, String)], sampl
         .collect();
     let max_segment_shift_us = segments.first().map(|first| segments.iter().map(|s| (s.mean_residual_us - first.mean_residual_us).abs()).fold(0.0, f64::max));
     OnsetStabilityReport {
-        detected: detected.len(),
-        missed: self_picks.len() - detected.len(),
+        detected: detected_count,
+        missed: self_picks.len() - detected_count,
         overall_sigma_us: robust_sigma(&residual_us),
         loopback_rate_offset_ppm: Some((coefficients[1] - 1.0) * 1e6),
         segments,

@@ -25,7 +25,7 @@ import sys
 import time
 from pathlib import Path
 
-from chirp_lab_devices import REPO_ROOT, LabConfig, adb, broadcast, external_files_directory, is_connected, load_lab_config, service_status, shell, start_activity
+from chirp_lab_devices import REPO_ROOT, Device, LabConfig, adb, broadcast, external_files_directory, is_connected, load_lab_config, service_status, shell, start_activity
 
 DATA_ROOT = REPO_ROOT / "data" / "field_phase1"
 CURRENT_RUN_FILE = DATA_ROOT / ".current_run.json"
@@ -46,6 +46,12 @@ def dump_hardening(config: LabConfig, tag: str, output_directory: Path) -> None:
         print(f"{role} {device.name}: saved dumpsys audio ({tag}, {len(text)} bytes)")
 
 
+def read_stream_volume(config: LabConfig, device: Device, query: str) -> int:
+    """`cmd audio get-stream-volume|get-max-volume` prints `... -> <index>`."""
+    output = shell(config, device, f"cmd audio {query} {MUSIC_STREAM}")
+    return int(output.strip().rsplit("->", 1)[-1])
+
+
 def command_prep(config: LabConfig, arguments: argparse.Namespace) -> int:
     missing = [device.name for _, device in both_devices(config) if not is_connected(config, device)]
     if missing:
@@ -55,9 +61,17 @@ def command_prep(config: LabConfig, arguments: argparse.Namespace) -> int:
         shell(config, device, "settings put system accelerometer_rotation 0")
         shell(config, device, "settings put system user_rotation 0")
         shell(config, device, "settings put system sound_effects_enabled 0")
-        shell(config, device, f"cmd media_session volume --stream {MUSIC_STREAM} --set {arguments.volume}", check=False)
+        # `cmd media_session volume --set` returns success but changes nothing
+        # on Android 17 (Pixel 7a sat at 19/25 through the 2026-11-25 soak);
+        # `cmd audio set-volume` sets the stream index directly. Read it back.
+        shell(config, device, f"cmd audio set-volume {MUSIC_STREAM} {arguments.volume}")
+        volume_index = read_stream_volume(config, device, "get-stream-volume")
+        volume_maximum = read_stream_volume(config, device, "get-max-volume")
+        if volume_index != arguments.volume:
+            print(f"{role} {device.name}: media volume reads {volume_index}/{volume_maximum} after setting {arguments.volume}", file=sys.stderr)
+            return 1
         version = shell(config, device, "getprop ro.build.version.sdk").strip()
-        print(f"{role} {device.name} ({device.serial}): SDK {version}, rotation locked, sound effects off, media volume {arguments.volume}")
+        print(f"{role} {device.name} ({device.serial}): SDK {version}, rotation locked, sound effects off, media volume {volume_index}/{volume_maximum}")
     dump_hardening(config, "prep", DATA_ROOT / "prep" / dt.datetime.now().strftime("%Y%m%d_%H%M%S"))
     return 0
 
@@ -76,9 +90,19 @@ def command_start(config: LabConfig, arguments: argparse.Namespace) -> int:
         "lead_ms": arguments.lead_ms,
     }
     per_role = {
-        "A": {"role": "A", "channel": arguments.channel_a, "source": arguments.source_a},
-        "B": {"role": "B", "channel": arguments.channel_b, "source": arguments.source_b},
+        role: {"role": role, "channel": getattr(arguments, f"channel_{role.lower()}") or device.chirp_channel, "source": getattr(arguments, f"source_{role.lower()}")}
+        for role, device in both_devices(config)
     }
+    for role, device in both_devices(config):
+        # A dark screen refuses the mic foreground-service start; a secure
+        # keyguard (PIN/fingerprint) can't be dismissed from adb, so say so.
+        shell(config, device, "input keyevent KEYCODE_WAKEUP")
+        shell(config, device, "wm dismiss-keyguard", check=False)
+    time.sleep(1)
+    locked = [device.name for _, device in both_devices(config) if "isKeyguardShowing=true" in shell(config, device, "dumpsys window", check=False)]
+    if locked:
+        print(f"keyguard still showing on {', '.join(locked)}: unlock by hand (svc power stayon usb keeps it awake after)", file=sys.stderr)
+        return 1
     started_wall = time.time()
     for role, device in both_devices(config):
         output = start_activity(config, device, {**common, **per_role[role]})
@@ -160,6 +184,9 @@ def command_pull(config: LabConfig, arguments: argparse.Namespace) -> int:
             "self_path_m": getattr(arguments, f"self_path_{role.lower()}"),
             "pose": getattr(arguments, f"pose_{role.lower()}") or "",
         }
+        speaker_offset = getattr(arguments, f"speaker_offset_{role.lower()}")
+        if speaker_offset is not None:
+            roles[role]["speaker_offset_world_m"] = speaker_offset
     manifest = {
         "label": arguments.label or run.get("label", run_id),
         "matrix_run": arguments.matrix_run,
@@ -197,7 +224,7 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--level-dbfs", type=float, default=-6.0)
     start.add_argument("--lead-ms", type=int, default=300)
     for role in ("a", "b"):
-        start.add_argument(f"--channel-{role}", choices=["left", "right", "both"], default="right")
+        start.add_argument(f"--channel-{role}", choices=["left", "right", "both"], help="default: the phone's bottom-speaker channel from devices.json")
         start.add_argument(f"--source-{role}", choices=["unprocessed", "voice_recognition", "mic", "camcorder", "default"], default="voice_recognition")
     mark = sub.add_parser("mark")
     mark.add_argument("label")
@@ -216,6 +243,9 @@ def build_parser() -> argparse.ArgumentParser:
     pull.add_argument("--pose-b")
     pull.add_argument("--self-path-a", type=float)
     pull.add_argument("--self-path-b", type=float)
+    for role in ("a", "b"):
+        pull.add_argument(f"--speaker-offset-{role}", type=float, nargs=3, metavar=("X", "Y", "Z"),
+                          help="speaker minus ranging mic in the run frame (A's mic at the origin, B's at +x tape), m")
     pull.add_argument("--marker-surface", action="append", default=[], help="label=surface, repeatable")
     pull.add_argument("--notes", default="")
     analyse = sub.add_parser("analyse")

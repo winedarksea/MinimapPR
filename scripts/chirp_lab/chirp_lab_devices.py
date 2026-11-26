@@ -27,6 +27,10 @@ class Device:
     serial: str
     platform_name: str
     wifi_ip: str
+    # Stereo channel the chirp plays on (run A1); mirrors
+    # chirp_output_channel_by_platform in minimappr-core mesh/config.rs.
+    # An earpiece channel also needs --self-path-<role> at pull time.
+    chirp_channel: str
 
 
 @dataclass(frozen=True)
@@ -56,6 +60,7 @@ def load_lab_config(use_wifi: bool = False) -> LabConfig:
             serial=f"{entry['wifi_ip']}:{port}" if use_wifi else entry["serial"],
             platform_name=entry["platform_name"],
             wifi_ip=entry["wifi_ip"],
+            chirp_channel=entry["chirp_channel"],
         )
         for name, entry in raw["devices"].items()
     }

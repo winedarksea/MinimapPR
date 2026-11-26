@@ -15,7 +15,11 @@ const NANOSECONDS_PER_SECOND: f64 = 1e9;
 const ANCHOR_WINDOW_COUNT: usize = 64;
 /// A new anchor this far off the current fit means the frame timeline
 /// jumped (capture restart or a silent drop): the fit restarts from it.
-const TIMELINE_JUMP_THRESHOLD_NS: f64 = 5e6;
+/// Above one HAL burst: the Pixel 10 Pro XL's timestamps routinely sit one
+/// 256-frame burst (5.33 ms) off the line, which a 5 ms threshold took for
+/// a jump every few seconds. Smaller real drops are caught by the
+/// chirp-derived θ silent-gap check (`clock_filter.rs`).
+const TIMELINE_JUMP_THRESHOLD_NS: f64 = 15e6;
 /// MAD → σ for a normal distribution.
 const MAD_TO_SIGMA: f64 = 1.4826;
 const OUTLIER_GATE_SIGMA: f64 = 3.0;
@@ -189,6 +193,21 @@ mod tests {
         let ns = anchor.local_ns_at(49_000.0).unwrap();
         assert_eq!(ns, 3_000_000_000);
         assert!((anchor.sample_index_at(ns).unwrap() - 49_000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn one_hal_burst_timestamp_excursions_are_not_jumps() {
+        // Pixel 10 Pro XL, 2026-11-26: some timestamps run 256 frames (5.33 ms) late.
+        let mut anchor = CaptureClockAnchor::default();
+        for step in 0..60u64 {
+            let frame = step * FRAMES_PER_ANCHOR;
+            let burst_late_ns = if step % 7 == 3 { 5_333_333 } else { 0 };
+            anchor.report(frame, ns_for(frame, -8.0, 0) + burst_late_ns);
+        }
+        assert_eq!(anchor.timeline_jump_count, 0);
+        assert!(anchor.anchor_count() > 50);
+        let frame = 50 * FRAMES_PER_ANCHOR;
+        assert!((anchor.sample_index_at(ns_for(frame, -8.0, 0)).unwrap() - frame as f64).abs() < 5.0);
     }
 
     #[test]

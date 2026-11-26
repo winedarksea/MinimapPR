@@ -11,6 +11,7 @@ use crate::analysis_config::AnalysisConfig;
 use crate::arrival_scan::{waveform_from_description, ArrivalScanner};
 use crate::bundle_loader::PhoneBundle;
 use crate::bundle_schema::{RunManifest, DEFAULT_AIR_TEMPERATURE_C};
+use crate::capture_continuity::{capture_continuity, continuous_rounds, CaptureContinuity};
 use crate::channel_map::{dominant_orientation, ChannelMapObservation};
 use crate::clock_residuals::{clock_residual_report, ClockResidualReport};
 use crate::onset_stability::{onset_stability, OnsetStabilityReport};
@@ -30,6 +31,8 @@ pub struct PhoneSummary {
     pub writer_overflows: usize,
     pub capture_anchor_residual_us: Option<f64>,
     pub capture_rate_offset_ppm: Option<f64>,
+    /// Silent drops (timestamp steps) and self-interval breaks.
+    pub capture_continuity: CaptureContinuity,
     pub blind_scanned: bool,
     pub onset: OnsetStabilityReport,
     pub self_leakage: LeakageReport,
@@ -54,6 +57,8 @@ pub struct RunReport {
     pub speaker_correction_applied: bool,
     pub phones: Vec<PhoneSummary>,
     pub round_count: usize,
+    /// Paired rounds left out because a capture/playback break overlaps them.
+    pub rounds_excluded_for_capture_breaks: usize,
     pub distance: Vec<DistanceStatistics>,
     pub implied_mean_self_path_m: Option<f64>,
     pub clock: Option<ClockResidualReport>,
@@ -66,6 +71,11 @@ fn count_events(bundle: &PhoneBundle, predicate: impl Fn(&crate::bundle_schema::
     bundle.events.iter().filter(|e| predicate(e)).count()
 }
 
+fn continuity_of(bundle: &PhoneBundle, picks: &PhonePicks, config: &AnalysisConfig) -> CaptureContinuity {
+    let drops = bundle.capture_timeline.as_ref().map_or(&[][..], |timeline| &timeline.silent_drops[..]);
+    capture_continuity(&picks.self_picks, drops, config.self_interval_break_tolerance_samples, config.sample_rate_hz)
+}
+
 fn phone_summary(role: &str, bundle: &PhoneBundle, picks: &PhonePicks, scanner: &ArrivalScanner, config: &AnalysisConfig) -> PhoneSummary {
     use crate::bundle_schema::BundleEvent as E;
     let self_starts: Vec<f64> = picks.self_picks.iter().filter_map(|p| p.arrival.map(|a| a.sample_index)).collect();
@@ -73,6 +83,7 @@ fn phone_summary(role: &str, bundle: &PhoneBundle, picks: &PhonePicks, scanner: 
     let remote_starts: Vec<f64> = remote.iter().map(|a| a.sample_index).collect();
     let remote_snrs: Vec<f64> = remote.iter().map(|a| a.snr_db).collect();
     let fs = config.sample_rate_hz;
+    let continuity = continuity_of(bundle, picks, config);
     PhoneSummary {
         role: role.into(),
         platform_name: bundle.session.platform_name.clone(),
@@ -82,10 +93,11 @@ fn phone_summary(role: &str, bundle: &PhoneBundle, picks: &PhonePicks, scanner: 
         emissions_played: picks.self_picks.len(),
         capture_gaps: count_events(bundle, |e| matches!(e, E::CaptureGap { .. })),
         writer_overflows: count_events(bundle, |e| matches!(e, E::WriterOverflow { .. })),
-        capture_anchor_residual_us: bundle.capture_anchor.map(|a| a.residual_rms_ns / 1e3),
-        capture_rate_offset_ppm: bundle.capture_anchor.filter(|a| a.anchor_count > 1).map(|a| a.rate_offset_ppm()),
+        capture_anchor_residual_us: bundle.capture_timeline.as_ref().map(|t| t.residual_rms_ns() / 1e3),
+        capture_rate_offset_ppm: bundle.capture_timeline.as_ref().and_then(|t| t.rate_offset_ppm()),
+        onset: onset_stability(&picks.self_picks, &bundle.markers(), &continuity, fs),
+        capture_continuity: continuity,
         blind_scanned: picks.blind_scanned,
-        onset: onset_stability(&picks.self_picks, &bundle.markers(), fs),
         self_leakage: leakage_report(&bundle.audio.samples, &self_starts, scanner.waveform_length(), config.leakage_band_hz, fs),
         remote_leakage: (!remote_starts.is_empty()).then(|| leakage_report(&bundle.audio.samples, &remote_starts, scanner.waveform_length(), config.leakage_band_hz, fs)),
         remote_detected: remote.len(),
@@ -126,7 +138,9 @@ pub fn analyse_run(run_directory: &Path, config: &AnalysisConfig) -> Result<RunR
     let (b_remote, b_offset) = pick_remote_arrivals(&b, &a, &a_self, &scanner, config);
     let a_picks = PhonePicks { self_picks: a_self, remote_picks: a_remote, blind_scanned: a_blind, remote_offset_samples: a_offset };
     let b_picks = PhonePicks { self_picks: b_self, remote_picks: b_remote, blind_scanned: b_blind, remote_offset_samples: b_offset };
-    let rounds = pair_rounds(&a_picks, &b_picks, config.sample_rate_hz);
+    let paired = pair_rounds(&a_picks, &b_picks, config.sample_rate_hz);
+    let (a_continuity, b_continuity) = (continuity_of(&a, &a_picks, config), continuity_of(&b, &b_picks, config));
+    let (rounds, rounds_excluded_for_capture_breaks) = continuous_rounds(paired, &a_continuity, &b_continuity, config.sample_rate_hz);
     let speaker_geometry = match (manifest.tape_distance_m, role_a.speaker_offset_world_m, role_b.speaker_offset_world_m) {
         (Some(distance), Some(speaker_a), Some(speaker_b)) => Some(SpeakerGeometry {
             mic_a_m: [0.0, 0.0, 0.0],
@@ -145,11 +159,11 @@ pub fn analyse_run(run_directory: &Path, config: &AnalysisConfig) -> Result<RunR
         .into_iter()
         .find(|mode| ranged.iter().filter(|r| r.result(*mode).is_some()).count() >= 3);
     let clock = clock_mode.map(|mode| {
-        let points: Vec<(f64, f64)> = ranged
+        let (points, segment_ids): (Vec<(f64, f64)>, Vec<usize>) = ranged
             .iter()
-            .filter_map(|r| r.result(mode).map(|res| (res.offset_reference_time_on_a_s, res.clock_offset_b_minus_a_s)))
-            .collect();
-        clock_residual_report(&points, mode.name(), config.heartbeat_cadence_s)
+            .filter_map(|r| r.result(mode).map(|res| ((res.offset_reference_time_on_a_s, res.clock_offset_b_minus_a_s), r.round.capture_segment)))
+            .unzip();
+        clock_residual_report(&points, &segment_ids, mode.name(), config.heartbeat_cadence_s)
     });
     let phones = vec![phone_summary("A", &a, &a_picks, &scanner, config), phone_summary("B", &b, &b_picks, &scanner, config)];
     let channel_map = [(&a, &b, &phones[1]), (&b, &a, &phones[0])]
@@ -177,6 +191,7 @@ pub fn analyse_run(run_directory: &Path, config: &AnalysisConfig) -> Result<RunR
         speaker_correction_applied: speaker_geometry.is_some(),
         phones,
         round_count: ranged.len(),
+        rounds_excluded_for_capture_breaks,
         distance,
         implied_mean_self_path_m: manifest.tape_distance_m.and_then(|tape| implied_mean_self_path_m(&ranged, tape)),
         clock,
