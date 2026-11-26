@@ -15,6 +15,7 @@ committed (cadbec7) before any held-out seed was scored.
 | What | Command | Cost |
 |---|---|---|
 | Nightly / full | `cargo run --release -p minimappr-mesh-sim --example point_network_bakeoff -- --markdown out.md` | 3 min on 8 threads (measured, see Results) |
+| Historical settings | add `--settings historical_pre_km_range` (see Settings profiles) | same |
 | Fresh held-out seeds | add `--held-out-base <N>`; a nightly can pass the date | same |
 | One scene, every candidate | `... --example point_network_bakeoff -- --seed 7` | about 1 s |
 | Opt-in test | `cargo test --release -p minimappr-mesh-sim --test point_network_bakeoff -- --ignored --nocapture` | same as the full run |
@@ -73,9 +74,34 @@ is 24 kHz mono per node. Ranges are in `bakeoff_config.rs::SceneDrawConfig`.
 
 Every candidate's fixes pass the server's handoff gates (`gate_handoff_localization`):
 
-- an unobservable range mode makes a bearing ray, not a fix;
-- a fix more than 1200 m from the contributing centroid is dropped;
-- the range-proportional covariance ceiling applies.
+- an unobservable range mode makes a bearing ray, not a fix (a scoring
+  protocol choice: the app keeps such a fix with a confidence haircut);
+- a fix more than `localization_max_range_m` (6000 m) from the contributing
+  centroid is dropped;
+- the range-proportional covariance ceiling applies (`min(max(1.0 × range,
+  30 m), 5000 m)`).
+
+## Settings profiles
+
+Every report opens with an "Effective settings" table: the profile name and
+the solver and gate values the run used. Pick a profile with `--settings`:
+
+| Setting | `current_production` (default) | `historical_pre_km_range` |
+|---|---|---|
+| SRP far-field max range | 5000 m | 1000 m |
+| Re-solve radial search bound | 5000 m | unbounded |
+| Gate: max range from centroid | 6000 m | 1200 m |
+| Gate: origin backstop | none | 5000 m |
+| Covariance ceiling (absolute) | 5000 m | 1000 m |
+
+`current_production` is the application's defaults
+(`minimappr/core/localization_overhaul_config.py`, `minimappr/config.py`,
+the sidecar CLI and worker defaults); `tests/bakeoff_settings_parity.rs`
+parses those sources by constant name and fails if they drift apart.
+`historical_pre_km_range` is what E8 still carried after the km-range change
+(7191046) moved the app's envelope, and it is the configuration behind every
+result recorded before 2026-11-26, including the 0.491 recall run.
+Everything else (scenes, band policy, event span, trigger, scoring) is shared.
 
 The confidence and GDOP gates ship disabled and are not modelled. Neither is
 the low-frequency lateral widening, which never fires at these baselines.
@@ -287,6 +313,31 @@ held-out seeds: production recall 0.491 (156 calls fixed), median 1.0 m, p90
 57.7 m, 95 % coverage 0.769, two-caller attribution error 0.362. Production now
 equals `production_uncapped_window` on every bake-off layout. The verdict is
 unchanged: onset clustering (recall 0.298, p90 133.5 m) stays shadow-only.
+
+### Under the application's current settings (2026-11-26)
+
+Both settings profiles re-run on the same 40 tuning and 200 held-out seeds
+(release build, 8 threads, other builds sharing the machine):
+
+| production_gcc_phat_lsq, held-out | `historical_pre_km_range` | `current_production` |
+|---|---|---|
+| recall | 0.491 | 0.491 |
+| calls fixed | 156 | 157 |
+| median / p90 error (m) | 1.0 / 57.7 | 1.0 / 63.1 |
+| 95 % coverage | 0.769 | 0.771 |
+| two-caller attribution error | 0.362 | 0.373 |
+| solves gated: range unobservable / out of range | 3 / 2 | 2 / 2 |
+| wall time | 269 s | 213 s |
+
+The historical profile reproduces the recorded run exactly (every
+production and onset figure above it). The current settings leave recall
+unchanged: one two-caller call that the unbounded re-solve sent to an
+unobservable range now gets a bounded fix, but it lands outside the gate,
+which raises p90 and the attribution error slightly. Every 3-node site still
+fails (`srp_phat_degraded_partial_array` ×32), and no bake-off site is larger
+than 1 km, so the wider envelope has nothing to recover here. These figures
+do not establish kilometre-range bearing recall. Onset clustering is
+identical under both (recall 0.298, p90 133.5 m), and so is the verdict.
 
 ## Production findings (reported when found)
 

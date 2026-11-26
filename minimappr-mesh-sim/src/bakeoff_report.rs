@@ -1,4 +1,5 @@
-//! Markdown rendering of a bake-off report: the headline held-out table,
+//! Markdown rendering of a bake-off report: the effective solver and gate
+//! settings it ran, the headline held-out table,
 //! slices by site and event, the decision with each criterion, and the
 //! commonest reasons a solve published nothing.
 
@@ -10,6 +11,7 @@ use crate::bakeoff_decision::BakeoffDecision;
 use crate::bakeoff_localizers::PointBakeoffReport;
 use crate::bakeoff_scenes::BakeoffEventKind;
 use crate::bakeoff_scoring::{SceneClass, SceneScore};
+use crate::bakeoff_settings_profile::effective_settings_markdown;
 use crate::bakeoff_summary::{summarize, CandidateSummary};
 
 /// Site spread bands (m): the upper edge of the middle band is the distance
@@ -128,6 +130,7 @@ pub fn render_markdown(report: &PointBakeoffReport) -> String {
         report.failed_seeds.len(),
         report.elapsed_seconds
     );
+    let _ = writeln!(text, "{}", effective_settings_markdown(&report.config));
     let _ = writeln!(text, "Onset grid reach tuned on the tuning seeds (multiple of aperture, recall, p90 m):");
     for (multiple, recall, p90) in &report.tuning.variants {
         let _ = writeln!(text, "- {multiple:.1}: recall {recall:.3}, p90 {}", optional(*p90, 1));
