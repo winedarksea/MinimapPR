@@ -123,11 +123,35 @@ def _chirp_burst(scenario: HotPathScenario) -> np.ndarray:
     return (scenario.event_amplitude * (0.65 * chirp + tone) * np.hanning(burst_samples)).astype(np.float64)
 
 
+def call_emission_offsets_seconds(scenario: HotPathScenario) -> np.ndarray:
+    """When the source emits each known call, relative to the scenario's first sample."""
+    return np.arange(scenario.event_interval_seconds / 2.0, scenario.duration_seconds, scenario.event_interval_seconds)
+
+
+def call_arrival_windows_seconds(scenario: HotPathScenario) -> list[tuple[float, float]]:
+    """Per known call: (first arrival at any sensor, last sample at the farthest sensor), scenario-relative.
+
+    Every call is heard by at least one member node (membership never empties),
+    so each window is a call the server could have detected.
+    """
+    source = np.asarray(scenario.source_position_m, dtype=np.float64)
+    propagation_delays_s = [
+        float(np.linalg.norm(source - (np.asarray(node.position_m) + np.asarray(offset)))) / SPEED_OF_SOUND_MPS
+        for node in scenario.nodes
+        for offset in SIRITH_TETRA_SENSOR_OFFSETS_M
+    ]
+    earliest_delay_s, latest_delay_s = min(propagation_delays_s), max(propagation_delays_s)
+    return [
+        (float(emission_s) + earliest_delay_s, float(emission_s) + latest_delay_s + scenario.event_duration_seconds)
+        for emission_s in call_emission_offsets_seconds(scenario)
+    ]
+
+
 def render_node_channels(scenario: HotPathScenario) -> dict[str, np.ndarray]:
     """Channels-first float32 audio for each node over the whole scenario (silence outside membership)."""
     total_samples = int(round(scenario.duration_seconds * scenario.sample_rate_hz))
     burst = _chirp_burst(scenario)
-    event_starts_s = np.arange(scenario.event_interval_seconds / 2.0, scenario.duration_seconds, scenario.event_interval_seconds)
+    event_starts_s = call_emission_offsets_seconds(scenario)
     source = np.asarray(scenario.source_position_m, dtype=np.float64)
     rng = np.random.default_rng(scenario.signal_seed)
     channels_by_node: dict[str, np.ndarray] = {}

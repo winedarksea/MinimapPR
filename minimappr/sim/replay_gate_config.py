@@ -172,8 +172,12 @@ def _default_hot_path_tolerances() -> dict[str, HotPathMetricTolerance]:
         "raw_audio_out_of_order_span_count": HotPathMetricTolerance(gated=False),
         "solve_count": HotPathMetricTolerance(gated=False),
         "detection_count": HotPathMetricTolerance(gated=False),
+        # Judged against HotPathGateConfig's absolute floor, not the baseline:
+        # a baseline that lost every call must not license a candidate to.
+        "known_call_detection_count": HotPathMetricTolerance(gated=False),
         "detection_snippet_bytes_written": HotPathMetricTolerance(gated=False),
-        "classification_backlog_drop_count": HotPathMetricTolerance(gated=False),
+        # Judged against HotPathGateConfig's absolute budget; worst run, like the other drop counters.
+        "classification_backlog_drop_count": HotPathMetricTolerance(gated=False, **counter),
         "classification_max_completed_lag_seconds": HotPathMetricTolerance(gated=False),
     }
 
@@ -186,6 +190,15 @@ class HotPathGateConfig:
     # A candidate that lost this fraction of the baseline's solves is not
     # measuring the same workload; its latency percentiles would be misleading.
     min_candidate_solve_count_fraction: float = 0.5
+    # A healthy solve stream whose render handoff loses every classification
+    # stores nothing; solve and latency metrics alone pass that. The slow
+    # classifier deliberately backlogs, so only a few of the full scenario's
+    # 27 calls are stored (baseline commit: 4-7 per run); the floor asks that
+    # the classification path delivers at all, not a recall figure.
+    min_candidate_known_call_detection_count: int = 1
+    # Drop-oldest classification backlog: each drop is a lost call. Same slack
+    # as the ingest queue-drop counter; the recorded baseline drops none.
+    max_candidate_classification_backlog_drop_count: int = 2
 
 
 @dataclass(frozen=True)
