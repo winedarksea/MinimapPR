@@ -176,6 +176,7 @@ fn run_window(case: WindowCase) -> Result<Value, String> {
                 "loudest_node_id": c.loudest_node_id,
                 "height_resolution": c.height_resolution,
                 "range_interval_m": c.range_interval_m.map(|(near, far)| [near, far]),
+                "range_lower_bound_m": c.range_lower_bound_m,
                 "attribution_evidence": c.attribution_evidence.as_ref().map(evidence_json),
             })
         })

@@ -56,7 +56,9 @@ EXACT_CLUSTER_FIELDS = (
     "independent_onset_count",
 )
 SPECTRAL_CLUSTER_FIELDS = ("band_min_hz", "band_max_hz", "weight", "used_envelope_fraction")
-GEOMETRY_CLUSTER_FIELDS = ("position_m", "range_interval_m", "range_observability", "residual_rms_seconds")
+GEOMETRY_CLUSTER_FIELDS = (
+    "position_m", "range_interval_m", "range_lower_bound_m", "range_observability", "residual_rms_seconds",
+)
 COVARIANCE_CLUSTER_FIELDS = ("covariance_m2", "gdop")
 
 

@@ -111,6 +111,7 @@ class ResolvedClusterGeometry:
     range_observability: float | None
     height_resolution: str
     range_interval_m: tuple[float, float] | None
+    range_lower_bound_m: float | None
 
 
 def _layout_aperture_m(sensor_positions: dict[str, np.ndarray]) -> float:
@@ -145,7 +146,7 @@ def resolve_cluster_geometry(
     """Height twin first (it moves z only), then the range verdict along the bearing."""
     unchanged = ResolvedClusterGeometry(
         refined.position_m, refined.covariance_m2, refined.range_projection_mode, refined.range_observability,
-        HEIGHT_NOT_APPLICABLE, None,
+        HEIGHT_NOT_APPLICABLE, None, None,
     )
     if grid.is_direction_grid:
         return unchanged
@@ -168,7 +169,8 @@ def resolve_cluster_geometry(
             height_position, covariance = apply_vertical_support(height_position, covariance, vertical)
     if not config.range_profile_enabled:
         return ResolvedClusterGeometry(
-            height_position, covariance, refined.range_projection_mode, refined.range_observability, height.status, None
+            height_position, covariance, refined.range_projection_mode, refined.range_observability, height.status,
+            None, None,
         )
     support = range_support_along_bearing(
         height_position,
@@ -187,7 +189,7 @@ def resolve_cluster_geometry(
     )
     return ResolvedClusterGeometry(
         judged.position_m, judged.covariance_m2, judged.range_projection_mode, judged.range_observability,
-        height.status, judged.range_interval_m,
+        height.status, judged.range_interval_m, judged.range_lower_bound_m,
     )
 
 

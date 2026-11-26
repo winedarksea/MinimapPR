@@ -469,6 +469,7 @@ def _finalize_cluster(
         attribution_evidence=attribution_evidence,
         height_resolution=geometry.height_resolution,
         range_interval_m=geometry.range_interval_m,
+        range_lower_bound_m=geometry.range_lower_bound_m,
     )
 
 

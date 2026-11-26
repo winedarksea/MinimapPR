@@ -230,6 +230,7 @@ pub(super) fn finalize_cluster(
         loudest_node_id: loudest,
         height_resolution: Some(resolved.height_resolution.to_string()),
         range_interval_m: resolved.range_interval_m,
+        range_lower_bound_m: resolved.range_lower_bound_m,
         attribution_evidence,
     }
 }
