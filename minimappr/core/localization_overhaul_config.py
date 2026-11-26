@@ -55,6 +55,10 @@ DEFAULT_LOCALIZATION_TRIGGER_NOISE_FLOOR_RELATIVE_ENABLED = True
 # Shared with the Python-ingest ``trigger_noise_floor_relative_snr_db`` so both
 # ingest paths admit the same events by default.
 DEFAULT_NOISE_FLOOR_RELATIVE_TRIGGER_SNR_DB = 8.0
+# Short-block excess candidate (both ingest paths, default off): 5 ms resolves a
+# chip inside a 20 ms frame while a block still holds 240 samples at 48 kHz, so
+# its noise-RMS spread stays ~0.4 dB (docs/faint_call_admission_results.md).
+DEFAULT_TRIGGER_SHORT_BLOCK_SECONDS = 0.005
 # The relative trigger only admits windows >= its SNR above the floor, so a
 # solver floor 3 dB above the noise floor never rejects an admitted faint event
 # while still rejecting dead or muted channels.
@@ -134,6 +138,8 @@ RUST_FORWARDED_LOCALIZATION_SETTING_KEYS: tuple[str, ...] = (
     "localization_timeline_drift_slew_fraction",
     "localization_trigger_noise_floor_relative_enabled",
     "localization_trigger_noise_floor_relative_db",
+    "localization_trigger_short_block_excess_enabled",
+    "localization_trigger_short_block_seconds",
     "localization_solver_floor_relative_db",
     "localization_sensor_registry_stale_seconds",
     "localization_coverage_delivery_margin_seconds",

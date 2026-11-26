@@ -3164,6 +3164,7 @@ async def get_config(request: Request) -> dict:
         "omni_scan_interval_seconds": settings.omni_scan_interval_seconds,
         "omni_scan_window_seconds": settings.omni_scan_window_seconds,
         "omni_scan_min_rms": settings.omni_scan_min_rms,
+        "omni_scan_clearest_channel_gate_enabled": settings.omni_scan_clearest_channel_gate_enabled,
         "yamnet_min_confidence": settings.yamnet_min_confidence,
         "detection_min_confidence": settings.detection_min_confidence,
         "cop": {
@@ -3425,6 +3426,8 @@ async def get_config(request: Request) -> dict:
         "trigger_noise_floor_warmup_seconds": settings.trigger_noise_floor_warmup_seconds,
         "trigger_noise_floor_minimum_rms": settings.trigger_noise_floor_minimum_rms,
         "trigger_noise_floor_fluctuation_multiplier": settings.trigger_noise_floor_fluctuation_multiplier,
+        "trigger_short_block_excess_enabled": settings.trigger_short_block_excess_enabled,
+        "trigger_short_block_seconds": settings.trigger_short_block_seconds,
         # --- end Field Mode W3-attribution ---
         "classifier_stage_timeout_seconds": settings.classifier_stage_timeout_seconds,
         "classification_stage_timeout_seconds": settings.classification_stage_timeout_seconds,

@@ -205,3 +205,44 @@ fn a_far_nodes_onset_inside_the_inter_node_lag_is_the_same_event() {
     assert!(same_node_onset(seconds_ns(10.5)).is_none());
     assert!(same_node_onset(seconds_ns(10.0 + DEFAULT_COOLDOWN_SECONDS + 0.01)).is_some());
 }
+
+/// A 5 ms chip 12 dB over the floor, at the end of an otherwise quiet frame.
+fn tetra_frame_with_chip(seed: u32) -> Vec<Vec<f32>> {
+    let chip_samples = (SAMPLE_RATE_HZ as usize) / 200;
+    let mut frame = tetra_frame(seed, QUIET_SITE_NOISE_RMS);
+    for (channel_index, channel) in frame.iter_mut().enumerate() {
+        let chip = white_noise(
+            seed.wrapping_add(31 * channel_index as u32),
+            chip_samples,
+            QUIET_SITE_NOISE_RMS * 4.0,
+        );
+        channel[FRAME_SAMPLES - chip_samples..].copy_from_slice(&chip);
+    }
+    frame
+}
+
+#[test]
+fn short_block_excess_candidate_admits_a_chip_only_when_enabled() {
+    let mut enabled_config = trigger_config(true);
+    enabled_config
+        .localization_solve
+        .localization_trigger_short_block_excess_enabled = true;
+    let mut short_block = LocalizationEventTrigger::new(&enabled_config);
+    let mut whole_frame = LocalizationEventTrigger::new(&trigger_config(true));
+    assert_eq!(settle_quiet_floor(&mut short_block), 0);
+    assert_eq!(settle_quiet_floor(&mut whole_frame), 0);
+
+    let chip_frame = tetra_frame_with_chip(77_001);
+    assert!(
+        !whole_frame
+            .observe_node_frame(NODE, &chip_frame, SAMPLE_RATE_HZ)
+            .relatively_loud
+    );
+    assert!(
+        short_block
+            .observe_node_frame(NODE, &chip_frame, SAMPLE_RATE_HZ)
+            .relatively_loud
+    );
+    // The floor follows the frame level either way.
+    assert_eq!(short_block.node_floor_rms(NODE), whole_frame.node_floor_rms(NODE));
+}

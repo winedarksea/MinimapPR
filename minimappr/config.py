@@ -1200,6 +1200,9 @@ class Settings:
     omni_scan_interval_seconds: float = 30.0
     omni_scan_window_seconds: float = 21.0
     omni_scan_min_rms: float = 0.001
+    # Gate (and classify) the clearest single channel instead of the channel mean:
+    # the mean can phase-cancel a narrowband call one microphone hears well.
+    omni_scan_clearest_channel_gate_enabled: bool = False
     t3t4_enabled: bool = True
     t3t4_min_confidence: float = 0.5
     t3t4_min_repeats: int = 3
@@ -1474,6 +1477,10 @@ class Settings:
     # Raise the relative bar by this x the slow mean excess of non-triggering frames over the
     # floor, so gusty wind/rain peaks do not trigger every cooldown (0 = bare snr_db bar).
     trigger_noise_floor_fluctuation_multiplier: float = 1.5
+    # Relative trigger also judges each frame's loudest short block (OR), so a call
+    # shorter than a frame is not diluted by the frame's quiet remainder.
+    trigger_short_block_excess_enabled: bool = False
+    trigger_short_block_seconds: float = overhaul_defaults.DEFAULT_TRIGGER_SHORT_BLOCK_SECONDS
     # --- end Field Mode W3-attribution ---
     detection_min_confidence: float = 0.4
     cop_detections_max_items: int = 150
@@ -1847,6 +1854,8 @@ class Settings:
         overhaul_defaults.DEFAULT_LOCALIZATION_TRIGGER_NOISE_FLOOR_RELATIVE_ENABLED
     )
     localization_trigger_noise_floor_relative_db: float = overhaul_defaults.DEFAULT_NOISE_FLOOR_RELATIVE_TRIGGER_SNR_DB
+    localization_trigger_short_block_excess_enabled: bool = False
+    localization_trigger_short_block_seconds: float = overhaul_defaults.DEFAULT_TRIGGER_SHORT_BLOCK_SECONDS
     localization_solver_floor_relative_db: float = overhaul_defaults.DEFAULT_LOCALIZATION_SOLVER_FLOOR_RELATIVE_DB
     localization_sensor_registry_stale_seconds: float = (
         overhaul_defaults.DEFAULT_LOCALIZATION_SENSOR_REGISTRY_STALE_SECONDS
@@ -2188,6 +2197,9 @@ class Settings:
             raise ValueError("MINIMAPPR_OMNI_SCAN_WINDOW_SECONDS must be > 0")
         if self.omni_scan_min_rms < 0.0:
             raise ValueError("MINIMAPPR_OMNI_SCAN_MIN_RMS must be >= 0")
+        for _short_block_key in ("trigger_short_block_seconds", "localization_trigger_short_block_seconds"):
+            if not (math.isfinite(getattr(self, _short_block_key)) and getattr(self, _short_block_key) > 0.0):
+                raise ValueError(f"{_short_block_key} must be a finite value > 0")
         if self.t3t4_min_repeats < 2:
             raise ValueError("MINIMAPPR_T3T4_MIN_REPEATS must be >= 2")
         if not 0.0 <= self.t3t4_min_confidence <= 1.0:
@@ -2989,6 +3001,7 @@ class Settings:
             omni_scan_interval_seconds=_env_float("MINIMAPPR_OMNI_SCAN_INTERVAL_SECONDS", 30.0),
             omni_scan_window_seconds=_env_float("MINIMAPPR_OMNI_SCAN_WINDOW_SECONDS", 21.0),
             omni_scan_min_rms=_env_float("MINIMAPPR_OMNI_SCAN_MIN_RMS", 0.001),
+            omni_scan_clearest_channel_gate_enabled=_env_bool("MINIMAPPR_OMNI_SCAN_CLEAREST_CHANNEL_GATE_ENABLED", False),
             t3t4_enabled=_env_bool("MINIMAPPR_T3T4_ENABLED", True),
             t3t4_min_confidence=_env_float("MINIMAPPR_T3T4_MIN_CONFIDENCE", 0.5),
             t3t4_min_repeats=_env_int("MINIMAPPR_T3T4_MIN_REPEATS", 3),
@@ -3200,6 +3213,10 @@ class Settings:
             trigger_noise_floor_minimum_rms=_env_float("MINIMAPPR_TRIGGER_NOISE_FLOOR_MINIMUM_RMS", 1e-5),
             trigger_noise_floor_fluctuation_multiplier=_env_float(
                 "MINIMAPPR_TRIGGER_NOISE_FLOOR_FLUCTUATION_MULTIPLIER", 1.5
+            ),
+            trigger_short_block_excess_enabled=_env_bool("MINIMAPPR_TRIGGER_SHORT_BLOCK_EXCESS_ENABLED", False),
+            trigger_short_block_seconds=_env_float(
+                "MINIMAPPR_TRIGGER_SHORT_BLOCK_SECONDS", overhaul_defaults.DEFAULT_TRIGGER_SHORT_BLOCK_SECONDS
             ),
             # --- end Field Mode W3-attribution ---
             detection_min_confidence=_env_float("MINIMAPPR_DETECTION_MIN_CONFIDENCE", 0.4),
@@ -3531,6 +3548,13 @@ class Settings:
             localization_trigger_noise_floor_relative_db=_env_float(
                 "MINIMAPPR_LOCALIZATION_TRIGGER_NOISE_FLOOR_RELATIVE_DB",
                 overhaul_defaults.DEFAULT_NOISE_FLOOR_RELATIVE_TRIGGER_SNR_DB,
+            ),
+            localization_trigger_short_block_excess_enabled=_env_bool(
+                "MINIMAPPR_LOCALIZATION_TRIGGER_SHORT_BLOCK_EXCESS_ENABLED", False
+            ),
+            localization_trigger_short_block_seconds=_env_float(
+                "MINIMAPPR_LOCALIZATION_TRIGGER_SHORT_BLOCK_SECONDS",
+                overhaul_defaults.DEFAULT_TRIGGER_SHORT_BLOCK_SECONDS,
             ),
             localization_solver_floor_relative_db=_env_float(
                 "MINIMAPPR_LOCALIZATION_SOLVER_FLOOR_RELATIVE_DB",

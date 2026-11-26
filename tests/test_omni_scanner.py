@@ -64,6 +64,7 @@ class _Settings:
     omni_scan_interval_seconds = 30.0
     omni_scan_window_seconds = 15.0
     omni_scan_min_rms = 0.01
+    omni_scan_clearest_channel_gate_enabled = False
 
 
 def _node(node_id="node-a"):
@@ -96,6 +97,40 @@ async def test_scan_once_uses_normalized_sum_and_retains_loudest_sensor_as_prove
     assert np.allclose(results[0].audio, 0.11)  # normalized sum of 0.02 and 0.2
     assert results[0].classification.label == "Bird"
     assert scanner.stats()["scans_completed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_clearest_channel_gate_admits_a_call_the_channel_mean_cancels():
+    """Two microphones half a cycle apart: the mean is silent, each channel is not."""
+    tone = (0.05 * np.sin(2 * np.pi * 2500.0 * np.arange(16000) / 16000.0)).astype(np.float32)
+    windows = {"node-a:ch0": tone, "node-a:ch1": -tone}
+    runtimes = [_Runtime(_node(), ["node-a:ch0", "node-a:ch1"])]
+
+    class _ClearestChannel(_Settings):
+        omni_scan_clearest_channel_gate_enabled = True
+
+    mean_results: list[OmniScanResult] = []
+    mean_scanner = ContinuousOmniScanner(
+        settings=_Settings(),
+        classifier=_StubClassifier(),
+        registry=_StubRegistry(runtimes),
+        buffer=_StubBuffer(windows),
+        sink=lambda r: mean_results.append(r) or _noop(),
+    )
+    await mean_scanner.scan_once()
+    assert mean_results == [] and mean_scanner.stats()["scans_skipped_rms"] == 1
+
+    clearest_results: list[OmniScanResult] = []
+    clearest_scanner = ContinuousOmniScanner(
+        settings=_ClearestChannel(),
+        classifier=_StubClassifier(),
+        registry=_StubRegistry(runtimes),
+        buffer=_StubBuffer(windows),
+        sink=lambda r: clearest_results.append(r) or _noop(),
+    )
+    await clearest_scanner.scan_once()
+    assert len(clearest_results) == 1
+    assert np.array_equal(clearest_results[0].audio, windows[clearest_results[0].sensor_id])
 
 
 @pytest.mark.asyncio

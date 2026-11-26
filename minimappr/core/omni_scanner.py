@@ -73,6 +73,7 @@ class ContinuousOmniScanner:
         self._interval_seconds = max(1.0, float(settings.omni_scan_interval_seconds))
         self._window_seconds = max(0.5, float(settings.omni_scan_window_seconds))
         self._min_rms = max(0.0, float(settings.omni_scan_min_rms))
+        self._clearest_channel_gate_enabled = bool(settings.omni_scan_clearest_channel_gate_enabled)
 
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
@@ -173,26 +174,31 @@ class ContinuousOmniScanner:
             self._scans_skipped_no_audio += 1
             return
         aligned, sample_rate_hz, end_time_ns = window
-        # Use a normalized sum rather than one microphone. For a coherent
-        # source this preserves the sum's SNR improvement without changing the
-        # RMS scale used by the configured gate. It is intentionally not a
-        # steerable beamformer: phase differences at higher frequencies can
-        # reduce, rather than improve, a particular source.
-        sensor_id, _ = max(aligned.items(), key=lambda kv: _rms(kv[1]))
+        sensor_id, clearest_channel = max(aligned.items(), key=lambda kv: _rms(kv[1]))
         common_sample_count = min(channel.size for channel in aligned.values())
         if common_sample_count == 0:
             self._scans_skipped_no_audio += 1
             return
-        audio = np.mean(
-            np.stack(
-                [
-                    np.asarray(channel[:common_sample_count], dtype=np.float32)
-                    for channel in aligned.values()
-                ]
-            ),
-            axis=0,
-            dtype=np.float32,
-        )
+        if self._clearest_channel_gate_enabled:
+            # Candidate (default off): the channel mean can phase-cancel a
+            # narrowband call that one microphone hears clearly.
+            audio = np.asarray(clearest_channel, dtype=np.float32)
+        else:
+            # Use a normalized sum rather than one microphone. For a coherent
+            # source this preserves the sum's SNR improvement without changing
+            # the RMS scale used by the configured gate. It is intentionally
+            # not a steerable beamformer: phase differences at higher
+            # frequencies can reduce, rather than improve, a particular source.
+            audio = np.mean(
+                np.stack(
+                    [
+                        np.asarray(channel[:common_sample_count], dtype=np.float32)
+                        for channel in aligned.values()
+                    ]
+                ),
+                axis=0,
+                dtype=np.float32,
+            )
         rms = _rms(audio)
         if rms < self._min_rms:
             self._scans_skipped_rms += 1
@@ -225,6 +231,7 @@ class ContinuousOmniScanner:
             "interval_seconds": self._interval_seconds,
             "window_seconds": self._window_seconds,
             "min_rms": self._min_rms,
+            "clearest_channel_gate_enabled": self._clearest_channel_gate_enabled,
             "scans_completed": self._scans_completed,
             "scans_skipped_rms": self._scans_skipped_rms,
             "scans_skipped_no_audio": self._scans_skipped_no_audio,
