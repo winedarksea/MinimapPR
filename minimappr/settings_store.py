@@ -273,6 +273,8 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "multi_node_bearing_min_separation_deg": float,
     "multi_node_bearing_ttl_seconds": float,
     "multi_node_bearing_max_condition": float,
+    "multi_node_bearing_max_miss_sigma": float,
+    "multi_node_bearing_min_lateral_std_m": float,
     # Phase 5 cross-node sensor admission (see FusionNode._admit_cross_node_sensors).
     "localization_cross_node_admission_enabled": bool,
     "localization_cross_node_relative_energy_floor": float,

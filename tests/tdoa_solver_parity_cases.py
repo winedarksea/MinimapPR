@@ -97,7 +97,10 @@ def _unit(vector: tuple[float, float, float]) -> list[float]:
     return (array / np.linalg.norm(array)).tolist()
 
 
-def _fusion_observation(node_id, origin, toward, *, lateral_std_m=0.5, confidence=0.8, event_time_ns=0):
+def _fusion_observation(
+    node_id, origin, toward, *, lateral_std_m=0.5, confidence=0.8, event_time_ns=0, range_prior_m=None
+):
+    """Cone toward ``toward``; ``lateral_std_m`` is stated at ``range_prior_m`` (default: that distance)."""
     direction = np.asarray(toward, dtype=np.float64) - np.asarray(origin, dtype=np.float64)
     return {
         "node_id": node_id,
@@ -106,6 +109,7 @@ def _fusion_observation(node_id, origin, toward, *, lateral_std_m=0.5, confidenc
         "lateral_std_m": lateral_std_m,
         "confidence": confidence,
         "event_time_ns": event_time_ns,
+        "range_prior_m": float(np.linalg.norm(direction)) if range_prior_m is None else range_prior_m,
     }
 
 
@@ -179,6 +183,22 @@ def build_cases() -> list[dict]:
             _fusion_observation("a", (0.0, 0.0, 0.0), (1500.0, 900.0, 0.0)),
             _fusion_observation("b", (300.0, 0.0, 0.0), (1500.0, 900.0, 0.0)),
         ]},
+        # Review reproductions: lines that intersect 10 m behind both arrays, and
+        # perpendicular forward rays 30 m apart vertically (15 m miss per ray).
+        {"kind": "bearing_fusion", "observations": [
+            _fusion_observation("a", (0.0, 0.0, 0.0), (-10.0, 0.0, 0.0), lateral_std_m=1.0),
+            _fusion_observation("b", (10.0, 10.0, 0.0), (10.0, 20.0, 0.0), lateral_std_m=1.0),
+        ], "config": {"max_range_m": 6000.0}},
+        {"kind": "bearing_fusion", "observations": [
+            _fusion_observation("a", (0.0, 0.0, 0.0), (20.0, 0.0, 0.0), lateral_std_m=1.0),
+            _fusion_observation("b", (20.0, -20.0, 30.0), (20.0, 0.0, 30.0), lateral_std_m=1.0),
+        ], "config": {"max_range_m": 6000.0}},
+        # Cones stated at a 50 m solve range, fused ~300 m out: the agreement test
+        # must scale lateral std to the fused range or it rejects this pair.
+        {"kind": "bearing_fusion", "observations": [
+            _fusion_observation("a", (0.0, 0.0, 1.5), (150.0, 200.0, 10.0), lateral_std_m=2.0, range_prior_m=50.0),
+            _fusion_observation("b", (60.0, 0.0, 1.5), (160.0, 190.0, 0.0), lateral_std_m=2.0, range_prior_m=50.0),
+        ], "config": {"max_range_m": 6000.0, "max_miss_sigma": 3.0, "min_lateral_std_m": 1.0}},
     ]
     return cases
 
@@ -195,7 +215,7 @@ def run_python_case(case: dict) -> dict:
                 lateral_std_m=raw["lateral_std_m"],
                 confidence=raw["confidence"],
                 event_time_ns=raw["event_time_ns"],
-                range_prior_m=0.0,
+                range_prior_m=raw["range_prior_m"],
                 expiry_ns=0,
             )
             for raw in case["observations"]

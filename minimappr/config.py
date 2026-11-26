@@ -1086,6 +1086,11 @@ class Settings:
     multi_node_bearing_ttl_seconds: float = 4.0
     multi_node_bearing_min_separation_deg: float = 5.0
     multi_node_bearing_max_condition: float = 1e4
+    # Agreement gate: reject when a ray misses the fused point by more than this
+    # many lateral std (scaled to the fused range, floored at min_lateral_std_m,
+    # which stands in for node-position uncertainty the cone does not carry).
+    multi_node_bearing_max_miss_sigma: float = 3.0
+    multi_node_bearing_min_lateral_std_m: float = 1.0
     # True enables cross-node TDOA automatically whenever the localization window
     # contains sensors from two or more nodes.  A single-node window has no
     # cross-node pairs, so it retains the normal per-node behavior.
@@ -2828,6 +2833,14 @@ class Settings:
             multi_node_bearing_max_condition=_env_float(
                 "MINIMAPPR_MULTI_NODE_BEARING_MAX_CONDITION",
                 1e4,
+            ),
+            multi_node_bearing_max_miss_sigma=_env_float(
+                "MINIMAPPR_MULTI_NODE_BEARING_MAX_MISS_SIGMA",
+                3.0,
+            ),
+            multi_node_bearing_min_lateral_std_m=_env_float(
+                "MINIMAPPR_MULTI_NODE_BEARING_MIN_LATERAL_STD_M",
+                1.0,
             ),
             localization_cross_node_tdoa_enabled=_env_bool(
                 "MINIMAPPR_LOCALIZATION_CROSS_NODE_TDOA_ENABLED",

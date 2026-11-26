@@ -3330,6 +3330,8 @@ async def get_config(request: Request) -> dict:
         "multi_node_bearing_min_separation_deg": settings.multi_node_bearing_min_separation_deg,
         "multi_node_bearing_ttl_seconds": settings.multi_node_bearing_ttl_seconds,
         "multi_node_bearing_max_condition": settings.multi_node_bearing_max_condition,
+        "multi_node_bearing_max_miss_sigma": settings.multi_node_bearing_max_miss_sigma,
+        "multi_node_bearing_min_lateral_std_m": settings.multi_node_bearing_min_lateral_std_m,
         "multi_node_bearing_fusion_enabled": settings.multi_node_bearing_fusion_enabled,
         "localization_cross_node_admission_enabled": settings.localization_cross_node_admission_enabled,
         "localization_cross_node_relative_energy_floor": settings.localization_cross_node_relative_energy_floor,
@@ -4054,6 +4056,8 @@ async def patch_config(request: Request) -> dict:
             errors.append("multi_node_bearing_ttl_seconds: must be > 0")
         elif key == "multi_node_bearing_max_condition" and value <= 0.0:  # type: ignore[operator]
             errors.append("multi_node_bearing_max_condition: must be > 0")
+        elif key in {"multi_node_bearing_max_miss_sigma", "multi_node_bearing_min_lateral_std_m"} and value <= 0.0:  # type: ignore[operator]
+            errors.append(f"{key}: must be > 0")
         elif key == "coordinate_mode":
             v = str(value).strip().lower()
             if v not in _COORDINATE_MODES:
