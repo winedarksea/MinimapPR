@@ -93,6 +93,8 @@ CONFIG_STAGE_GROUPS: tuple[tuple[str, str, PipelineStageKind | None, tuple[str, 
             "multi_node_bearing_min_separation_deg",
             "multi_node_bearing_ttl_seconds",
             "multi_node_bearing_max_condition",
+            "multi_node_bearing_max_miss_sigma",
+            "multi_node_bearing_min_lateral_std_m",
             "localization_cross_node_admission_enabled",
             "localization_cross_node_relative_energy_floor",
             # --- coverage race fix ---

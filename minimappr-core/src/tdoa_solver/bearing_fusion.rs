@@ -2,6 +2,10 @@
 //! `minimappr/core/multi_node_bearing_fusion.py::fuse_bearings` (the async
 //! TTL store stays server-side). The same per-node rays feed the joint solver
 //! as DOA residuals; this closed form is the fast path and a start point.
+//!
+//! Inputs carry no solve ID, so "same call" is geometric: the fused point must
+//! be in front of every array and within `max_miss_sigma` range-scaled lateral
+//! standard deviations of every ray; confidence is discounted by agreement.
 
 use nalgebra::{Matrix3, Vector3};
 use serde::{Deserialize, Serialize};
@@ -31,18 +35,27 @@ pub struct BearingObservation {
     pub origin_m: [f64; 3],
     /// Unit bearing from origin toward the source.
     pub direction: [f64; 3],
+    /// Perpendicular uncertainty of the cone, stated at `range_prior_m`.
     pub lateral_std_m: f64,
     pub confidence: f64,
     pub event_time_ns: i64,
+    /// Solve range at which `lateral_std_m` is stated.
+    pub range_prior_m: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// Missing keys deserialize to the Python keyword defaults.
+#[serde(default)]
 pub struct BearingFusionConfig {
     pub min_separation_deg: f64,
     pub max_condition: f64,
     pub max_range_m: f64,
     pub sound_speed_mps: f64,
     pub window_seconds: f64,
+    /// Largest per-ray miss distance, in lateral std at the fused range.
+    pub max_miss_sigma: f64,
+    /// Floor on the range-scaled lateral std in the agreement test (metres).
+    pub min_lateral_std_m: f64,
 }
 
 impl Default for BearingFusionConfig {
@@ -54,6 +67,8 @@ impl Default for BearingFusionConfig {
             max_range_m: 1200.0,
             sound_speed_mps: SPEED_OF_SOUND_FALLBACK_MPS,
             window_seconds: 1.5,
+            max_miss_sigma: 3.0,
+            min_lateral_std_m: 1.0,
         }
     }
 }
@@ -74,6 +89,8 @@ pub enum BearingFusionRejection {
     NearParallel,
     Stale,
     Degenerate,
+    BehindArray,
+    RaysDisagree,
     OutOfRange,
 }
 
@@ -84,6 +101,8 @@ impl BearingFusionRejection {
             Self::NearParallel => "near_parallel",
             Self::Stale => "stale",
             Self::Degenerate => "degenerate",
+            Self::BehindArray => "behind_array",
+            Self::RaysDisagree => "rays_disagree",
             Self::OutOfRange => "out_of_range",
         }
     }
@@ -93,15 +112,44 @@ fn vector(values: &[f64; 3]) -> Vector3<f64> {
     Vector3::new(values[0], values[1], values[2])
 }
 
-fn min_pairwise_separation_deg(directions: &[Vector3<f64>]) -> f64 {
+/// Smallest angle between bearing lines from the signed ray angle: parallel
+/// and anti-parallel rays both leave range along the shared axis unobservable.
+fn min_pairwise_line_separation_deg(directions: &[Vector3<f64>]) -> f64 {
     let mut smallest = 180.0_f64;
     for (index, first) in directions.iter().enumerate() {
         for second in &directions[index + 1..] {
-            let dot = first.dot(second).clamp(-1.0, 1.0);
-            smallest = smallest.min(dot.abs().acos().to_degrees());
+            let signed_dot = first.dot(second).clamp(-1.0, 1.0);
+            let ray_angle_deg = signed_dot.acos().to_degrees();
+            smallest = smallest.min(ray_angle_deg).min(180.0 - ray_angle_deg);
         }
     }
     smallest
+}
+
+/// Per-ray miss distance over lateral std at the fused range.
+fn normalized_ray_misses(
+    selected: &[&BearingObservation],
+    directions: &[Vector3<f64>],
+    position_m: &Vector3<f64>,
+    min_lateral_std_m: f64,
+) -> Result<Vec<f64>, BearingFusionRejection> {
+    let mut normalized_misses = Vec::with_capacity(selected.len());
+    for (observation, direction) in selected.iter().zip(directions) {
+        let offset = position_m - vector(&observation.origin_m);
+        let ray_parameter_m = offset.dot(direction);
+        if !(ray_parameter_m > 0.0) {
+            return Err(BearingFusionRejection::BehindArray);
+        }
+        let range_prior_m = observation.range_prior_m;
+        if !(range_prior_m.is_finite() && range_prior_m > EPSILON) {
+            return Err(BearingFusionRejection::Degenerate);
+        }
+        let miss_distance_m = (offset - direction * ray_parameter_m).norm();
+        let lateral_std_at_fused_range_m =
+            (observation.lateral_std_m * ray_parameter_m / range_prior_m).max(min_lateral_std_m);
+        normalized_misses.push(miss_distance_m / lateral_std_at_fused_range_m);
+    }
+    Ok(normalized_misses)
 }
 
 /// Clamp covariance eigenvalues up to `max(minimum_std, 1e-3)²`.
@@ -146,7 +194,7 @@ pub fn fuse_bearings(
         return Err(BearingFusionRejection::InsufficientNodes);
     }
     let directions: Vec<Vector3<f64>> = selected.iter().map(|obs| vector(&obs.direction)).collect();
-    if min_pairwise_separation_deg(&directions) < config.min_separation_deg {
+    if min_pairwise_line_separation_deg(&directions) < config.min_separation_deg {
         return Err(BearingFusionRejection::NearParallel);
     }
     let speed = if config.sound_speed_mps > EPSILON {
@@ -199,6 +247,18 @@ pub fn fuse_bearings(
     {
         return Err(BearingFusionRejection::Degenerate);
     }
+    let normalized_misses = normalized_ray_misses(
+        &selected,
+        &directions,
+        &position_m,
+        config.min_lateral_std_m,
+    )?;
+    if normalized_misses
+        .iter()
+        .any(|&normalized_miss| normalized_miss > config.max_miss_sigma)
+    {
+        return Err(BearingFusionRejection::RaysDisagree);
+    }
     let covariance_m2 = stabilize_covariance(&inverse_information, STABILIZED_MINIMUM_STD_M)
         .ok_or(BearingFusionRejection::Degenerate)?;
     let origin_centroid = selected
@@ -213,12 +273,18 @@ pub fn fuse_bearings(
         .iter()
         .map(|obs| 1.0 - obs.confidence.min(MAXIMUM_OBSERVATION_CONFIDENCE))
         .product();
+    let mean_squared_normalized_miss = normalized_misses
+        .iter()
+        .map(|normalized_miss| normalized_miss * normalized_miss)
+        .sum::<f64>()
+        / normalized_misses.len() as f64;
+    let agreement_factor = (-0.5 * mean_squared_normalized_miss).exp();
     Ok(BearingFusionResult {
         position_m,
         covariance_m2,
         contributor_node_ids: selected.iter().map(|obs| obs.node_id.clone()).collect(),
         range_m,
-        confidence: (1.0 - miss_probability).min(MAXIMUM_COMBINED_CONFIDENCE),
+        confidence: ((1.0 - miss_probability) * agreement_factor).min(MAXIMUM_COMBINED_CONFIDENCE),
     })
 }
 
@@ -227,7 +293,8 @@ mod tests {
     use super::*;
 
     fn observation(node_id: &str, origin: [f64; 3], toward: [f64; 3]) -> BearingObservation {
-        let direction = (vector(&toward) - vector(&origin)).normalize();
+        let offset = vector(&toward) - vector(&origin);
+        let direction = offset.normalize();
         BearingObservation {
             node_id: node_id.into(),
             origin_m: origin,
@@ -235,6 +302,7 @@ mod tests {
             lateral_std_m: 0.5,
             confidence: 0.8,
             event_time_ns: 0,
+            range_prior_m: offset.norm(),
         }
     }
 
@@ -250,7 +318,45 @@ mod tests {
         )
         .unwrap();
         assert!((fused.position_m - vector(&source)).norm() < 1e-9);
+        // Exact intersection: agreement factor is 1, so only the cap applies.
         assert!((fused.confidence - 0.95).abs() < 1e-12);
+    }
+
+    #[test]
+    fn partial_agreement_lowers_confidence_below_noisy_or() {
+        let fused = fuse_bearings(
+            &[
+                observation("a", [0.0, 0.0, 0.0], [20.0, 30.0, 5.0]),
+                observation("b", [40.0, 0.0, 0.0], [20.0, 30.0, 7.0]),
+            ],
+            &BearingFusionConfig::default(),
+        )
+        .unwrap();
+        assert!(fused.confidence < 0.95 && fused.confidence > 0.0);
+    }
+
+    #[test]
+    fn contradictory_rays_are_rejected() {
+        let config = BearingFusionConfig {
+            max_range_m: 6000.0,
+            ..BearingFusionConfig::default()
+        };
+        let behind = [
+            observation("a", [0.0, 0.0, 0.0], [-10.0, 0.0, 0.0]),
+            observation("b", [10.0, 10.0, 0.0], [10.0, 20.0, 0.0]),
+        ];
+        assert_eq!(
+            fuse_bearings(&behind, &config),
+            Err(BearingFusionRejection::BehindArray)
+        );
+        let vertically_skewed = [
+            observation("a", [0.0, 0.0, 0.0], [20.0, 0.0, 0.0]),
+            observation("b", [20.0, -20.0, 30.0], [20.0, 0.0, 30.0]),
+        ];
+        assert_eq!(
+            fuse_bearings(&vertically_skewed, &config),
+            Err(BearingFusionRejection::RaysDisagree)
+        );
     }
 
     #[test]

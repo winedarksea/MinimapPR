@@ -3241,6 +3241,48 @@ async def test_phase4_bearing_fusion_hook_upgrades_second_node_cone(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_phase4_bearing_fusion_disagreement_keeps_original_cone(tmp_path: Path) -> None:
+    """A corroborating cone whose line crosses node A's behind node B is rejected
+    (``behind_array``); node B's branch comes back unchanged and is counted."""
+    settings = Settings(
+        db_path=tmp_path / "phase4_disagree.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        multi_node_bearing_fusion_enabled=True,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    fusion = _make_fusion_node(settings, storage)
+
+    ca = np.array([0.0, 0.0, 0.0])
+    cb = np.array([30.0, 0.0, 0.0])
+    event_ns = 1_739_950_000_000_000_000
+    await fusion._maybe_fuse_multi_node_bearing(
+        _cone_branch(np.array([15.0, 200.0, 0.0]), ca),
+        node_id="node-a",
+        contributing_centroid_m=ca,
+        event_time_ns=event_ns,
+        sound_speed_mps=343.0,
+    )
+    branch_b_in = _cone_branch(np.array([100.0, -200.0, 0.0]), cb)
+    branch_b_out = await fusion._maybe_fuse_multi_node_bearing(
+        branch_b_in,
+        node_id="node-b",
+        contributing_centroid_m=cb,
+        event_time_ns=event_ns + 100_000_000,
+        sound_speed_mps=343.0,
+    )
+    assert branch_b_out == branch_b_in
+    assert fusion._metrics.localization_bearing_fusion_attempt_count == 1
+    assert fusion._metrics.localization_bearing_fusion_disagreement_count == 1
+    assert fusion._metrics.localization_bearing_fusion_fused_count == 0
+
+    await storage.close()
+
+
+@pytest.mark.asyncio
 async def test_phase4_bearing_fusion_disabled_by_default(tmp_path: Path) -> None:
     """Regression: with the flag off (default), the hook is a no-op."""
     settings = Settings(

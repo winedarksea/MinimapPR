@@ -238,6 +238,7 @@ fn bearing_fusion_extreme_timestamps_are_stale_not_overflow() {
         lateral_std_m: 0.5,
         confidence: 0.8,
         event_time_ns,
+        range_prior_m: 40.0,
     };
     let mut observations = vec![
         observation("a", [0.0, 0.0, 0.0], i64::MIN),

@@ -201,6 +201,7 @@ class FusionMetrics:
     localization_bearing_fusion_fused_count: int = 0
     localization_bearing_fusion_degenerate_count: int = 0
     localization_bearing_fusion_stale_count: int = 0
+    localization_bearing_fusion_disagreement_count: int = 0
     last_bearing_fusion_contributor_count: int = 0
     # Wired from PairMeasurementStats via the localization result (Phase 5).
     # (`candidates_coalesced` / `cross_node_wait_timeout` were removed: they
@@ -2277,10 +2278,15 @@ class FusionNode:
             max_range_m=self.localization_config.localization_max_range_m,
             sound_speed_mps=sound_speed_mps or 343.0,
             window_seconds=self.settings.multi_node_bearing_window_seconds,
+            max_miss_sigma=self.settings.multi_node_bearing_max_miss_sigma,
+            min_lateral_std_m=self.settings.multi_node_bearing_min_lateral_std_m,
         )
         if not isinstance(result, BearingFusionResult):
+            # Every rejection keeps this node's original cone unchanged.
             if result == "stale":
                 self._metrics.localization_bearing_fusion_stale_count += 1
+            elif result in {"behind_array", "rays_disagree"}:
+                self._metrics.localization_bearing_fusion_disagreement_count += 1
             else:
                 self._metrics.localization_bearing_fusion_degenerate_count += 1
             return branch
