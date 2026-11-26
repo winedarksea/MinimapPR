@@ -64,7 +64,7 @@ fn onset_late_in_the_trigger_frame_is_located_to_a_block() {
 }
 
 #[test]
-fn relative_trigger_window_starts_at_the_onset_instead_of_ending_at_the_frame() {
+fn triggered_window_starts_at_the_onset_instead_of_ending_at_the_frame() {
     let frame_end_ns: i128 = 10_000_000_000;
     let buffered_center_ns = frame_end_ns - 40_000_000;
     let node_frame = NodeFrameTrigger {
@@ -83,7 +83,8 @@ fn relative_trigger_window_starts_at_the_onset_instead_of_ending_at_the_frame() 
     // Window [onset, onset + 80 ms]: onset 8.5 ms before the frame end.
     assert_eq!(center, frame_end_ns - 8_500_000 + 40_000_000);
 
-    // The absolute gate judged the buffered window itself: it stays.
+    // The absolute gate judged only the reporter's window; a cross-node
+    // cluster's farther arrivals need the same onset placement.
     let absolute = event_window_center_time_ns(
         Some(LocalizationTriggerSource::AbsoluteRms),
         node_frame,
@@ -92,7 +93,21 @@ fn relative_trigger_window_starts_at_the_onset_instead_of_ending_at_the_frame() 
         WINDOW_SECONDS,
         true,
     );
-    assert_eq!(absolute, buffered_center_ns);
+    assert_eq!(absolute, center);
+    // A frame that located no onset (not above its floor) keeps the buffered window.
+    let absolute_without_onset = event_window_center_time_ns(
+        Some(LocalizationTriggerSource::AbsoluteRms),
+        NodeFrameTrigger {
+            relatively_loud: false,
+            onset_offset_seconds: None,
+            frame_seconds: 0.1,
+        },
+        frame_end_ns,
+        buffered_center_ns,
+        WINDOW_SECONDS,
+        true,
+    );
+    assert_eq!(absolute_without_onset, buffered_center_ns);
     // Without the coverage wait no later audio can be read.
     let no_wait = event_window_center_time_ns(
         Some(LocalizationTriggerSource::NoiseFloorRelative),

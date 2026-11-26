@@ -1,12 +1,13 @@
 use crate::map::bindings::{
     clear_detection_layer, remove_bearing_wedge, set_bearing_wedge, set_detection_layer_data,
 };
-use crate::state::{AppState, Detection};
+use crate::state::{AppState, Detection, GeoPoint};
 use leptos::prelude::*;
 use std::collections::HashSet;
 
 const DEFAULT_BEARING_HALF_ANGLE_DEG: f64 = 15.0;
 const DEFAULT_BEARING_RANGE_M: f64 = 500.0;
+const MAX_BEARING_RANGE_M: f64 = 10_000.0;
 const EARTH_RADIUS_M: f64 = 6_371_000.0;
 
 fn bearing_degrees_between_points(
@@ -39,27 +40,69 @@ fn distance_m_between_points(
     2.0 * EARTH_RADIUS_M * a.sqrt().atan2((1.0 - a).sqrt())
 }
 
-fn bearing_half_angle_degrees(detection: &Detection) -> f64 {
+/// Half angle for a detection without a stored solve bearing (Python-ingest
+/// path, rows stored before the bearing was): a guess from range observability.
+fn legacy_bearing_half_angle_degrees(detection: &Detection) -> f64 {
     detection
-        .position_geo_uncertainty
-        .as_ref()
-        .and_then(|uncertainty| {
-            uncertainty
-                .get("bearing_half_angle_deg")
-                .or_else(|| uncertainty.get("half_angle_deg"))
-                .or_else(|| uncertainty.get("bearing_uncertainty_deg"))
-        })
-        .and_then(|value| value.as_f64())
-        .or_else(|| {
-            detection
-                .localization_range_observability
-                .map(|observability| {
-                    let clamped = observability.clamp(0.0, 1.0);
-                    30.0 - (clamped * 20.0)
-                })
+        .localization_range_observability
+        .map(|observability| {
+            let clamped = observability.clamp(0.0, 1.0);
+            30.0 - (clamped * 20.0)
         })
         .unwrap_or(DEFAULT_BEARING_HALF_ANGLE_DEG)
         .clamp(5.0, 45.0)
+}
+
+struct BearingWedge {
+    source_lat: f64,
+    source_lon: f64,
+    bearing_deg: f64,
+    half_angle_deg: f64,
+    range_m: f64,
+}
+
+fn wedge_range_m(source_lat: f64, source_lon: f64, target: &GeoPoint) -> f64 {
+    distance_m_between_points(source_lat, source_lon, target.lat, target.lon)
+        .clamp(DEFAULT_BEARING_RANGE_M, MAX_BEARING_RANGE_M)
+}
+
+/// The stored solve bearing (origin = contributing-sensor centroid, width from
+/// the covariance), else the reporting node toward the projected point.
+fn bearing_wedge(
+    detection: &Detection,
+    position_geo: &GeoPoint,
+    node_positions: &[(String, f64, f64)],
+) -> Option<BearingWedge> {
+    if let Some(bearing) = &detection.solve_bearing {
+        if let Some(origin) = &bearing.origin_geo {
+            return Some(BearingWedge {
+                source_lat: origin.lat,
+                source_lon: origin.lon,
+                bearing_deg: bearing.bearing_deg,
+                half_angle_deg: bearing.half_width_deg,
+                range_m: bearing
+                    .range_max_m
+                    .filter(|range_m| bearing.range_observable && *range_m > 0.0)
+                    .unwrap_or_else(|| wedge_range_m(origin.lat, origin.lon, position_geo)),
+            });
+        }
+    }
+    let node_id = detection.node_id.as_ref()?;
+    let (_, source_lat, source_lon) = node_positions
+        .iter()
+        .find(|(candidate, _, _)| candidate == node_id)?;
+    Some(BearingWedge {
+        source_lat: *source_lat,
+        source_lon: *source_lon,
+        bearing_deg: bearing_degrees_between_points(
+            *source_lat,
+            *source_lon,
+            position_geo.lat,
+            position_geo.lon,
+        ),
+        half_angle_deg: legacy_bearing_half_angle_degrees(detection),
+        range_m: wedge_range_m(*source_lat, *source_lon, position_geo),
+    })
 }
 
 pub fn mount(state: &AppState) {
@@ -110,31 +153,17 @@ pub fn mount(state: &AppState) {
                         let mut source_lat = 0.0;
                         let mut source_lon = 0.0;
                         let mut has_source = false;
-                        if d.spatial_display_mode() == "bearing_only" {
-                            let source = d.node_id.as_ref().and_then(|node_id| {
-                                node_positions
-                                    .iter()
-                                    .find(|(candidate, _, _)| candidate == node_id)
-                                    .map(|(_, lat, lon)| (*lat, *lon))
-                            });
-                            (source_lat, source_lon, has_source) = source
-                                .map(|(lat, lon)| (lat, lon, true))
-                                .unwrap_or((0.0, 0.0, false));
-                            if let Some((source_lat, source_lon)) = source {
-                                let bearing_deg = bearing_degrees_between_points(
-                                    source_lat, source_lon, geo.lat, geo.lon,
-                                );
-                                let range_m = distance_m_between_points(
-                                    source_lat, source_lon, geo.lat, geo.lon,
-                                )
-                                .clamp(DEFAULT_BEARING_RANGE_M, 10_000.0);
+                        if display_mode == "bearing_only" {
+                            if let Some(wedge) = bearing_wedge(d, geo, &node_positions) {
+                                (source_lat, source_lon, has_source) =
+                                    (wedge.source_lat, wedge.source_lon, true);
                                 set_bearing_wedge(
                                     &d.event_id,
-                                    source_lat,
-                                    source_lon,
-                                    bearing_deg,
-                                    bearing_half_angle_degrees(d),
-                                    range_m,
+                                    wedge.source_lat,
+                                    wedge.source_lon,
+                                    wedge.bearing_deg,
+                                    wedge.half_angle_deg,
+                                    wedge.range_m,
                                 );
                                 current_bearing_wedge_ids.insert(d.event_id.clone());
                             }
@@ -181,4 +210,55 @@ pub fn mount(state: &AppState) {
             current_bearing_wedge_ids
         })
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn detection(feature_summary: serde_json::Value) -> Detection {
+        serde_json::from_value(serde_json::json!({
+            "id": "det-1",
+            "source_node_id": "tetra-d",
+            "reporting_modality": "localized",
+            "spatial_display_mode": "bearing_only",
+            "position_geo": {"lat": 37.001, "lon": -122.0, "alt_m": 10.0},
+            "feature_summary": feature_summary,
+        }))
+        .expect("detection")
+    }
+
+    #[test]
+    fn stored_solve_bearing_sets_the_wedge_origin_direction_and_width() {
+        let d = detection(serde_json::json!({
+            "localization_solve_bearing": {
+                "origin_node_id": "tetra-d",
+                "origin_position_m": [1.0, 2.0, 3.0],
+                "origin_geo": {"lat": 37.0, "lon": -122.0001, "alt_m": 3.0},
+                "bearing_deg": 56.5,
+                "half_width_deg": 6.8,
+                "elevation_deg": 20.0,
+                "range_min_m": null,
+                "range_max_m": null,
+                "range_projection_mode": "range_boundary",
+                "range_observable": false
+            }
+        }));
+        let node_positions = vec![("tetra-d".to_string(), 36.9, -121.9)];
+        let wedge = bearing_wedge(&d, d.position_geo.as_ref().unwrap(), &node_positions).unwrap();
+        assert_eq!((wedge.source_lat, wedge.source_lon), (37.0, -122.0001));
+        assert_eq!(wedge.bearing_deg, 56.5);
+        assert_eq!(wedge.half_angle_deg, 6.8);
+        assert_eq!(wedge.range_m, DEFAULT_BEARING_RANGE_M);
+    }
+
+    #[test]
+    fn without_a_stored_bearing_the_wedge_starts_at_the_reporting_node() {
+        let d = detection(serde_json::json!({"localization_range_observability": 0.0}));
+        let node_positions = vec![("tetra-d".to_string(), 37.0, -122.0)];
+        let wedge = bearing_wedge(&d, d.position_geo.as_ref().unwrap(), &node_positions).unwrap();
+        assert_eq!((wedge.source_lat, wedge.source_lon), (37.0, -122.0));
+        assert!(wedge.bearing_deg.abs() < 1e-6);
+        assert_eq!(wedge.half_angle_deg, 30.0);
+    }
 }

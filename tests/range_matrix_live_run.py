@@ -58,6 +58,8 @@ class LiveCellResult:
     detection_count: int
     manifest_count: int
     manifests_by_id: dict[str, dict] | None = None
+    # Stored detections whose render overlaps the event (what the cell is scored on).
+    event_detections: list[dict] | None = None
 
 
 def run_range_matrix_cell(
@@ -122,9 +124,13 @@ def run_range_matrix_cell(
         emission_packet_time_ns=run.capture_start_packet_time_ns + emission_offset_ns,
         burst_seconds=source_burst.duration_seconds,
     )
+    event_span_ns = event_arrival_span_ns(
+        realized, run.capture_start_packet_time_ns + emission_offset_ns, source_burst.duration_seconds
+    )
     return LiveCellResult(
         outcome=outcome,
         detection_count=len(run.detections),
         manifest_count=len(run.manifests_by_id),
         manifests_by_id=run.manifests_by_id,
+        event_detections=detections_overlapping_span(run.detections, event_span_ns),
     )
