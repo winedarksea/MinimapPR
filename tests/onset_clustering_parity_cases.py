@@ -292,6 +292,7 @@ def run_python_window(signals, positions, node_ids, consumed, attribution_audibl
             "loudest_node_id": cluster.loudest_node_id,
             "height_resolution": cluster.height_resolution,
             "range_interval_m": list(cluster.range_interval_m) if cluster.range_interval_m is not None else None,
+            "range_lower_bound_m": cluster.range_lower_bound_m,
             "attribution_evidence": _evidence_json(cluster.attribution_evidence),
         }
         for cluster in result.clusters

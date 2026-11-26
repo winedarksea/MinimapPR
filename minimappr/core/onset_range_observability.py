@@ -18,6 +18,13 @@ ridge's bend near the array is followed), and the ranges scoring within
   profile peak on the ridge (the SRP's best range, inside the interval), and the
   radial standard deviation is the interval half-width. The interval itself is
   exported so consumers can show "somewhere 50-1000 m along this bearing".
+* Far-open interval (the supported set reaches the last profile sample): the
+  score is still rising where the search stops, so the far edge is the search
+  limit, not evidence. Its width says nothing (a monotonic tail clipped at
+  1000 m gave 923-1000 m and passed the ratio test), so it is never observable;
+  only its near edge is measured and is exported as ``range_lower_bound_m``.
+  An admissibility prior that blanks the far samples closes the interval
+  instead (the supported set then ends before the last sample).
 """
 
 from __future__ import annotations
@@ -59,6 +66,14 @@ class RangeSupport:
     peak_position_m: np.ndarray
     bearing: np.ndarray
     observable: bool
+    # Supported set touches the first / last profile sample: that edge is the search limit.
+    open_near_side: bool
+    open_far_side: bool
+
+    @property
+    def range_lower_bound_m(self) -> float | None:
+        """Measured near edge of a far-open interval (the only range the data bounds)."""
+        return self.interval_m[0] if self.open_far_side and not self.open_near_side else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +83,7 @@ class RangeJudgedPosition:
     range_projection_mode: str | None
     range_observability: float | None
     range_interval_m: tuple[float, float] | None
+    range_lower_bound_m: float | None
 
 
 def _cone_directions(bearing: np.ndarray, half_angle_deg: float, step_deg: float) -> np.ndarray:
@@ -112,12 +128,17 @@ def range_support_along_bearing(
     peak_index = int(np.argmax(profile))
     supported = np.flatnonzero(profile >= settings.support_ratio * profile[peak_index])
     near_m, far_m = float(ranges[supported[0]]), float(ranges[supported[-1]])
+    open_near_side = bool(supported[0] == 0)
+    open_far_side = bool(supported[-1] == ranges.size - 1)
+    interval_is_narrow = far_m <= settings.max_interval_ratio * near_m or far_m - near_m <= settings.interval_floor_m
     return RangeSupport(
         interval_m=(near_m, far_m),
         peak_range_m=float(ranges[peak_index]),
         peak_position_m=points.reshape(ranges.size, -1, 3)[peak_index, best_direction_index[peak_index]],
         bearing=bearing,
-        observable=far_m <= settings.max_interval_ratio * near_m or far_m - near_m <= settings.interval_floor_m,
+        observable=interval_is_narrow and not open_far_side,
+        open_near_side=open_near_side,
+        open_far_side=open_far_side,
     )
 
 
@@ -140,7 +161,7 @@ def judge_range_from_profile(
 ) -> RangeJudgedPosition:
     """Apply the profile verdict. Never upgrades an already-unobservable range."""
     position = np.asarray(position_m, dtype=np.float64)
-    unchanged = RangeJudgedPosition(position, covariance_m2, range_projection_mode, range_observability, None)
+    unchanged = RangeJudgedPosition(position, covariance_m2, range_projection_mode, range_observability, None, None)
     if support is None or covariance_m2 is None or range_mode_is_unobservable(range_projection_mode):
         return unchanged
     near_m, far_m = support.interval_m
@@ -158,6 +179,7 @@ def judge_range_from_profile(
             range_projection_mode=range_projection_mode,
             range_observability=range_observability_from_covariance(covariance, position - origin_m),
             range_interval_m=support.interval_m,
+            range_lower_bound_m=None,
         )
     # The profile peak is the SRP's own best range on the ridge; an arbitrary default range
     # could sit far from every supported range's evidence (flock scene: ghosts 30 m up).
@@ -175,4 +197,5 @@ def judge_range_from_profile(
         range_projection_mode=RANGE_BEARING_PROJECTED,
         range_observability=BEARING_PROJECTED_RANGE_OBSERVABILITY_CAP,
         range_interval_m=support.interval_m,
+        range_lower_bound_m=support.range_lower_bound_m,
     )

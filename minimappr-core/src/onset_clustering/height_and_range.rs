@@ -12,7 +12,10 @@
 //! is sampled along its bearing ridge (max over a small cone per range); the
 //! ranges within `support_ratio` of the peak form the supported interval. A
 //! narrow interval keeps the fix (radial variance >= half-width²); a wide one
-//! becomes `range_bearing_projected` at the profile peak.
+//! becomes `range_bearing_projected` at the profile peak. A far-open interval
+//! (supported set reaches the last profile sample: still rising at the search
+//! limit) is never observable whatever its width; its near edge is exported as
+//! `range_lower_bound_m`. Admissibility-blanked far samples close it instead.
 
 use nalgebra::{Matrix3, Vector3};
 
@@ -186,6 +189,16 @@ pub struct RangeSupport {
     pub peak_range_m: f64,
     pub peak_position_m: Point3,
     pub observable: bool,
+    /// Supported set touches the first / last profile sample: that edge is the search limit.
+    pub open_near_side: bool,
+    pub open_far_side: bool,
+}
+
+impl RangeSupport {
+    /// Measured near edge of a far-open interval (the only range the data bounds).
+    pub fn range_lower_bound_m(&self) -> Option<f64> {
+        (self.open_far_side && !self.open_near_side).then_some(self.interval_m.0)
+    }
 }
 
 fn cone_directions(bearing: &Point3, half_angle_deg: f64, step_deg: f64) -> Vec<Point3> {
@@ -285,12 +298,17 @@ pub fn range_support_along_bearing(
     let first = profile.iter().position(|v| *v >= threshold)?;
     let last = profile.iter().rposition(|v| *v >= threshold)?;
     let (near_m, far_m) = (ranges[first], ranges[last]);
+    let open_near_side = first == 0;
+    let open_far_side = last == ranges.len() - 1;
+    let interval_is_narrow = far_m <= settings.max_interval_ratio * near_m
+        || far_m - near_m <= settings.interval_floor_m;
     Some(RangeSupport {
         interval_m: (near_m, far_m),
         peak_range_m: ranges[peak],
         peak_position_m: points[peak * width + best_direction[peak]],
-        observable: far_m <= settings.max_interval_ratio * near_m
-            || far_m - near_m <= settings.interval_floor_m,
+        observable: interval_is_narrow && !open_far_side,
+        open_near_side,
+        open_far_side,
     })
 }
 
@@ -301,6 +319,7 @@ pub struct RangeJudgedPosition {
     pub range_projection_mode: Option<String>,
     pub range_observability: Option<f64>,
     pub range_interval_m: Option<(f64, f64)>,
+    pub range_lower_bound_m: Option<f64>,
 }
 
 fn radial_inflated(
@@ -331,6 +350,7 @@ pub fn judge_range_from_profile(
         range_projection_mode: range_projection_mode.map(str::to_string),
         range_observability,
         range_interval_m: None,
+        range_lower_bound_m: None,
     };
     let (Some(support), Some(rows)) = (support, covariance) else {
         return unchanged;
@@ -357,6 +377,7 @@ pub fn judge_range_from_profile(
             range_projection_mode: range_projection_mode.map(str::to_string),
             range_observability: range_observability_from_covariance(&inflated, Some(offset)),
             range_interval_m: Some(support.interval_m),
+            range_lower_bound_m: None,
         };
     }
     // The profile peak is the SRP's own best range on the ridge.
@@ -376,5 +397,10 @@ pub fn judge_range_from_profile(
         range_projection_mode: Some(RANGE_BEARING_PROJECTED.to_string()),
         range_observability: Some(BEARING_PROJECTED_RANGE_OBSERVABILITY),
         range_interval_m: Some(support.interval_m),
+        range_lower_bound_m: support.range_lower_bound_m(),
     }
 }
+
+#[cfg(test)]
+#[path = "height_and_range_tests.rs"]
+mod tests;
