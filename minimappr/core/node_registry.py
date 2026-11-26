@@ -226,16 +226,25 @@ class NodeRegistry:
         covariance (``core/node_position_covariance.py``).
         """
         async with self._lock:
-            node_position_std_m: dict[str, float] = dict(self._node_position_std_m)
-            for node_id, override in self._overrides.items():
-                override_std_m = operator_override_position_std_m(override)
-                if override_std_m is not None:
-                    node_position_std_m[node_id] = override_std_m
+            node_position_std_m = self._node_position_std_m_locked()
             return {
                 sensor_id: node_position_std_m[descriptor.node_id]
                 for sensor_id, descriptor in self._sensors.items()
                 if descriptor.node_id in node_position_std_m
             }
+
+    async def node_position_std_m(self, node_id: str) -> float | None:
+        """One node's position 1σ (m), same precedence as ``sensor_position_std_m``."""
+        async with self._lock:
+            return self._node_position_std_m_locked().get(node_id)
+
+    def _node_position_std_m_locked(self) -> dict[str, float]:
+        node_position_std_m: dict[str, float] = dict(self._node_position_std_m)
+        for node_id, override in self._overrides.items():
+            override_std_m = operator_override_position_std_m(override)
+            if override_std_m is not None:
+                node_position_std_m[node_id] = override_std_m
+        return node_position_std_m
 
     async def record_node_clock_evidence(self, node_id: str, evidence: NodeClockEvidence) -> None:
         async with self._lock:

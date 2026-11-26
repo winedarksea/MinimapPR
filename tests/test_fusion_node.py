@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from pathlib import Path
 
@@ -3280,6 +3281,75 @@ async def test_phase4_bearing_fusion_disagreement_keeps_original_cone(tmp_path: 
     assert fusion._metrics.localization_bearing_fusion_fused_count == 0
 
     await storage.close()
+
+
+@contextlib.asynccontextmanager
+async def _bearing_fusion_node(tmp_path: Path, name: str):
+    """Flag-on fusion node whose storage closes even when an assertion fails."""
+    settings = Settings(
+        db_path=tmp_path / f"{name}.db",
+        snippet_dir=tmp_path / "snippets",
+        snippet_retention_seconds=0,
+        multi_node_bearing_fusion_enabled=True,
+    )
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.snippet_dir.mkdir(parents=True, exist_ok=True)
+    storage = Storage(settings.db_path)
+    await storage.initialize()
+    try:
+        yield _make_fusion_node(settings, storage)
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_phase4_bearing_fusion_dropping_the_probe_node_keeps_its_cone(tmp_path: Path) -> None:
+    """a and b agree on (100, 100); node c's cone points at another bird. Outlier
+    rejection fuses a+b without c, so c's branch must come back unchanged rather
+    than inherit the other source's position."""
+    bird_one, bird_two = np.array([100.0, 100.0, 5.0]), np.array([-60.0, 140.0, 5.0])
+    event_ns = 1_739_950_000_000_000_000
+    async with _bearing_fusion_node(tmp_path, "phase4_probe_dropped") as fusion:
+        for node_id, centroid in (("node-a", np.array([0.0, 0.0, 1.5])), ("node-b", np.array([60.0, 0.0, 1.5]))):
+            await fusion._maybe_fuse_multi_node_bearing(
+                _cone_branch(bird_one, centroid, lateral_std_m=1.0),
+                node_id=node_id,
+                contributing_centroid_m=centroid,
+                event_time_ns=event_ns,
+                sound_speed_mps=343.0,
+            )
+        fused_before_probe = fusion._metrics.localization_bearing_fusion_fused_count
+        centroid_c = np.array([120.0, 20.0, 1.5])
+        branch_c_in = _cone_branch(bird_two, centroid_c, lateral_std_m=1.0)
+        branch_c_out = await fusion._maybe_fuse_multi_node_bearing(
+            branch_c_in,
+            node_id="node-c",
+            contributing_centroid_m=centroid_c,
+            event_time_ns=event_ns,
+            sound_speed_mps=343.0,
+        )
+        assert branch_c_out == branch_c_in
+        assert fusion._metrics.localization_bearing_fusion_fused_count == fused_before_probe
+        assert fusion._metrics.localization_bearing_fusion_disagreement_count == 1
+
+
+@pytest.mark.asyncio
+async def test_phase4_bearing_cone_splits_off_the_node_position_term(tmp_path: Path) -> None:
+    """The branch's lateral variance (5 m)² includes the node's stated (3 m)² position
+    error, which does not grow with range: the cone carries 4 m angular + 3 m position."""
+    async with _bearing_fusion_node(tmp_path, "phase4_position_term") as fusion:
+        await fusion.registry.set_node_position_std_m("node-a", 3.0)
+        centroid = np.array([0.0, 0.0, 0.0])
+        await fusion._maybe_fuse_multi_node_bearing(
+            _cone_branch(np.array([15.0, 200.0, 0.0]), centroid, lateral_std_m=5.0),
+            node_id="node-a",
+            contributing_centroid_m=centroid,
+            event_time_ns=1_000,
+            sound_speed_mps=343.0,
+        )
+        (cone,) = fusion._bearing_fusion_store._observations
+        assert cone.position_std_m == pytest.approx(3.0)
+        assert cone.lateral_std_m == pytest.approx(4.0)
 
 
 @pytest.mark.asyncio

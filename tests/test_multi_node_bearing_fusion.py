@@ -262,10 +262,116 @@ def _two_bird_scores(trial_count: int, seed: int) -> tuple[int, int]:
 
 def test_two_simultaneous_birds_false_promotions_vs_recovered_ranges() -> None:
     """Seed 7, 1000 trials: before the agreement gates 983 cross-bird pairs fused
-    (701 true ranges recovered); now 204 fuse and 699 are recovered. The remainder
-    cross in front of both arrays within the cones and are geometrically
-    indistinguishable from a real fix without a label or solve ID."""
+    (701 true ranges recovered); with the gates 204 fused / 699 recovered, and with
+    the weights re-evaluated at the fused range (consistent with the gate) 225 /
+    700. The re-weighted point sits nearer the closer, tighter cone, so a few more
+    cross pairs land within both cones. The remainder cross in front of both arrays
+    within the cones and are geometrically indistinguishable from a real fix
+    without a label or solve ID."""
     trial_count = 1000
     recovered, false_promotions = _two_bird_scores(trial_count, seed=7)
     assert recovered >= 0.65 * trial_count
     assert false_promotions <= 0.25 * trial_count
+
+
+# --- Review round 2: outlier rejection, position term, zero-width cones -------------
+
+
+def test_one_node_hearing_another_bird_does_not_veto_a_consistent_pair() -> None:
+    """a and b fuse at (100, 100); c's cone points at a second bird. Formerly the
+    whole set returned ``rays_disagree``; now c is dropped and a+b still fuse."""
+    bird_one, bird_two = np.array([100.0, 100.0, 5.0]), np.array([-60.0, 140.0, 5.0])
+    oa, ob, oc = np.array([0.0, 0.0, 1.5]), np.array([60.0, 0.0, 1.5]), np.array([120.0, 20.0, 1.5])
+    pair = [_obs("a", oa, bird_one, lateral_std_m=1.0), _obs("b", ob, bird_one, lateral_std_m=1.0)]
+    assert isinstance(fuse_bearings(pair, max_range_m=PRODUCTION_MAX_RANGE_M), BearingFusionResult)
+    with_outlier = fuse_bearings(
+        [*pair, _obs("c", oc, bird_two, lateral_std_m=1.0)], max_range_m=PRODUCTION_MAX_RANGE_M
+    )
+    assert isinstance(with_outlier, BearingFusionResult)
+    assert with_outlier.contributor_node_ids == ["a", "b"]
+    assert float(np.linalg.norm(with_outlier.position_m - bird_one)) < 1.0
+
+
+def test_per_node_cone_is_chosen_by_agreement_not_confidence() -> None:
+    """b has a confident cone at bird two and a weaker one at bird one; a only hears
+    bird one. The agreeing cone wins, so a+b fuse at bird one."""
+    bird_one, bird_two = np.array([100.0, 100.0, 5.0]), np.array([150.0, -80.0, 5.0])
+    oa, ob, oc = np.array([0.0, 0.0, 1.5]), np.array([60.0, 0.0, 1.5]), np.array([-40.0, 60.0, 1.5])
+    result = fuse_bearings(
+        [
+            _obs("a", oa, bird_one, lateral_std_m=1.0),
+            _obs("b", ob, bird_two, lateral_std_m=1.0, confidence=0.9),
+            _obs("b", ob, bird_one, lateral_std_m=1.0, confidence=0.4),
+            _obs("c", oc, bird_one, lateral_std_m=1.0),
+        ],
+        max_range_m=PRODUCTION_MAX_RANGE_M,
+    )
+    assert isinstance(result, BearingFusionResult)
+    assert result.contributor_node_ids == ["a", "b", "c"]
+    assert float(np.linalg.norm(result.position_m - bird_one)) < 1.0
+
+
+def test_two_mutually_inconsistent_rays_are_still_rejected() -> None:
+    """Outlier rejection never goes below two rays."""
+    result = fuse_bearings(
+        [_ray("a", [0, 0, 0], [1, 0, 0]), _ray("b", [20, -20, 30], [0, 1, 0])],
+        max_range_m=PRODUCTION_MAX_RANGE_M,
+    )
+    assert result == "rays_disagree"
+
+
+def test_zero_width_cone_with_zero_floor_is_degenerate_not_a_crash() -> None:
+    oa, ob = np.array([0.0, 0.0, 0.0]), np.array([40.0, 0.0, 0.0])
+    source = [20.0, 30.0, 5.0]
+    result = fuse_bearings(
+        [_obs("a", oa, source, lateral_std_m=0.0), _obs("b", ob, source, lateral_std_m=0.0)],
+        min_lateral_std_m=0.0,
+    )
+    assert result == "degenerate"
+
+
+def test_only_the_angular_part_scales_with_range() -> None:
+    """1 m angular at 50 m plus 3 m position error, at 1 km: sqrt(20² + 3²), not
+    20 × sqrt(1² + 3²) (which over-loosens the far-field gate ~3×)."""
+    from minimappr.core.multi_node_bearing_fusion import _lateral_std_at_ray_parameter_m
+
+    cone = _ray("a", [0, 0, 0], [1, 0, 0], lateral_std_m=1.0, range_prior_m=50.0)
+    cone.position_std_m = 3.0
+    assert _lateral_std_at_ray_parameter_m(cone, 1000.0, 1.0) == pytest.approx(np.hypot(20.0, 3.0))
+    assert _lateral_std_at_ray_parameter_m(cone, 50.0, 1.0) == pytest.approx(np.hypot(1.0, 3.0))
+
+
+def _gps_error_dropped_ray_count(*, split_position_term: bool, stated_at_50_m: bool) -> int:
+    """3 nodes, source ~15 m, 3 m node-position error, 2 deg bearing noise: number of
+    200 trials where any ray is rejected (fusion fails or drops a node)."""
+    rng = np.random.default_rng(3)
+    angular_std_rad, position_std_m = np.radians(2.0), 3.0
+    nodes = [np.array([0.0, 0.0, 1.5]), np.array([20.0, 0.0, 1.5]), np.array([10.0, 17.0, 1.5])]
+    dropped = 0
+    for _ in range(200):
+        source = np.array([10.0, 6.0, 4.0]) + rng.normal(0.0, 2.0, 3)
+        cones = []
+        for index, node in enumerate(nodes):
+            believed_origin = node + rng.normal(0.0, position_std_m, 3) * np.array([1.0, 1.0, 0.3])
+            direction = (source - node) / np.linalg.norm(source - node) + rng.normal(0.0, angular_std_rad, 3)
+            range_prior_m = 50.0 if stated_at_50_m else float(np.linalg.norm(source - node))
+            angular_m = range_prior_m * np.tan(angular_std_rad)
+            cone = _ray(f"n{index}", believed_origin, direction, range_prior_m=range_prior_m,
+                        lateral_std_m=angular_m if split_position_term else float(np.hypot(angular_m, position_std_m)))
+            cone.position_std_m = position_std_m if split_position_term else 0.0
+            cones.append(cone)
+        result = fuse_bearings(cones, max_range_m=PRODUCTION_MAX_RANGE_M)
+        dropped += int(not isinstance(result, BearingFusionResult) or len(result.contributor_node_ids) < 3)
+    return dropped
+
+
+def test_node_position_term_does_not_scale_with_the_stated_cone_range() -> None:
+    """Lumped (position error scaled with the angular part) cones stated at 50 m
+    shrink to ~sqrt(1.75² + 3²)·0.3 at 15 m and reject good rays (28/200); the
+    split model matches true-range priors (3/200 each, the normal 3σ tail)."""
+    split_stated_50 = _gps_error_dropped_ray_count(split_position_term=True, stated_at_50_m=True)
+    split_true_range = _gps_error_dropped_ray_count(split_position_term=True, stated_at_50_m=False)
+    lumped_stated_50 = _gps_error_dropped_ray_count(split_position_term=False, stated_at_50_m=True)
+    assert split_stated_50 <= split_true_range + 2
+    assert split_stated_50 <= 6
+    assert lumped_stated_50 >= 15

@@ -82,3 +82,22 @@ def test_collapse_long_exact_zero_runs_keeps_signal_when_no_long_gap() -> None:
     )
 
     np.testing.assert_allclose(compacted, signal)
+
+
+def test_merged_row_drops_the_replaced_solves_bearing() -> None:
+    """A Python-ingest solve (no solve bearing) merging into a Rust-render row must
+    not keep the old solve's ray: the frontend would draw it against the new position."""
+    from minimappr.core.assembly import carried_over_feature_summary
+    from minimappr.core.handoff_spatial_status import LOCALIZATION_SOLVE_BEARING_FEATURE_KEY
+
+    existing = {
+        "feature_summary": {
+            LOCALIZATION_SOLVE_BEARING_FEATURE_KEY: {"bearing_deg": 40.0, "origin_position_m": [0.0, 0.0, 1.5]},
+            "classification_audio_modality": "localized",
+        }
+    }
+    carried = carried_over_feature_summary(existing)
+    assert LOCALIZATION_SOLVE_BEARING_FEATURE_KEY not in carried
+    assert carried["classification_audio_modality"] == "localized"
+    assert LOCALIZATION_SOLVE_BEARING_FEATURE_KEY in existing["feature_summary"]  # input untouched
+    assert carried_over_feature_summary(None) == {}

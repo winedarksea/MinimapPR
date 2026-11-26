@@ -1087,8 +1087,8 @@ class Settings:
     multi_node_bearing_min_separation_deg: float = 5.0
     multi_node_bearing_max_condition: float = 1e4
     # Agreement gate: reject when a ray misses the fused point by more than this
-    # many lateral std (scaled to the fused range, floored at min_lateral_std_m,
-    # which stands in for node-position uncertainty the cone does not carry).
+    # many lateral std (angular part scaled to the fused range, in quadrature with
+    # the node's stated position std; min_lateral_std_m is a numerical floor).
     multi_node_bearing_max_miss_sigma: float = 3.0
     multi_node_bearing_min_lateral_std_m: float = 1.0
     # True enables cross-node TDOA automatically whenever the localization window
