@@ -18,9 +18,18 @@ import pytest
 from minimappr.sim.replay_gate_config import HotPathGateConfig
 from tests.hot_path_release_gate import run_hot_path_release_gate
 from tests.hot_path_release_gate_compare import compare_hot_path_results
-from tests.hot_path_release_gate_metrics import aggregate_repeated_run_metrics, classify_disk_writes
+from tests.hot_path_release_gate_metrics import (
+    account_known_call_detections,
+    aggregate_repeated_run_metrics,
+    classify_disk_writes,
+)
 from tests.hot_path_release_gate_probes import account_raw_audio_forwarding, written_files
-from tests.hot_path_release_gate_scenario import FULL_SCENARIO, SMOKE_SCENARIO, build_post_schedule
+from tests.hot_path_release_gate_scenario import (
+    FULL_SCENARIO,
+    SMOKE_SCENARIO,
+    build_post_schedule,
+    call_arrival_windows_seconds,
+)
 from tests.rust_sidecar_binary import REPOSITORY_ROOT, cargo_is_available
 
 FULL_GATE_ENV = "MINIMAPPR_ENABLE_HOT_PATH_RELEASE_GATE"
@@ -46,6 +55,8 @@ def _result(**metric_overrides) -> dict:
         "raw_audio_disk_bytes_written": 0.0,
         "raw_audio_disk_files_written": 0.0,
         "detection_count": 5.0,
+        "known_call_detection_count": 4.0,
+        "classification_backlog_drop_count": 0.0,
     }
     metrics.update(metric_overrides)
     return {
@@ -85,9 +96,45 @@ def test_latency_and_memory_have_relative_headroom():
 
 
 def test_ungated_metrics_never_fail():
-    comparison = compare_hot_path_results(_result(), _result(detection_count=0.0, novel_metric=9.0), HotPathGateConfig())
+    comparison = compare_hot_path_results(_result(), _result(novel_metric=9.0), HotPathGateConfig())
     assert comparison.passed
     assert any(row.metric_name == "novel_metric" and not row.gated for row in comparison.rows)
+
+
+def test_healthy_solve_stream_with_zero_stored_detections_fails():
+    # Solves, latency and ingest all match the baseline; only the render handoff lost every classification.
+    silent_candidate = _result(detection_count=0.0, known_call_detection_count=0.0)
+    comparison = compare_hot_path_results(_result(), silent_candidate, HotPathGateConfig())
+    assert not comparison.passed
+    assert any("known_call_detection_count" in error for error in comparison.errors)
+    # The floor is absolute: a baseline that also stored nothing does not excuse the candidate.
+    assert not compare_hot_path_results(silent_candidate, silent_candidate, HotPathGateConfig()).passed
+
+
+def test_detection_requirements_fail_when_the_harness_did_not_measure_them():
+    for metric_name in ("known_call_detection_count", "classification_backlog_drop_count"):
+        unmeasured = _result()
+        del unmeasured["metrics"][metric_name]
+        comparison = compare_hot_path_results(unmeasured, unmeasured, HotPathGateConfig())
+        assert not comparison.passed
+        assert any(metric_name in error for error in comparison.errors)
+
+
+def test_classification_backlog_drops_over_budget_fail():
+    config = HotPathGateConfig()
+    budget = config.max_candidate_classification_backlog_drop_count
+    within_budget = _result(classification_backlog_drop_count=float(budget))
+    assert compare_hot_path_results(_result(), within_budget, config).passed
+    over_budget = _result(classification_backlog_drop_count=float(budget + 1))
+    comparison = compare_hot_path_results(_result(), over_budget, config)
+    assert not comparison.passed
+    assert any("classification_backlog_drop_count" in error for error in comparison.errors)
+
+
+def test_committed_baseline_passes_against_itself():
+    baseline = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
+    comparison = compare_hot_path_results(baseline, baseline, HotPathGateConfig())
+    assert comparison.passed, comparison.format_table()
 
 
 def test_incomparable_runs_are_errors():
@@ -132,6 +179,28 @@ def test_disk_write_classification_excludes_db_and_reports_snippets_apart():
     raw_audio, snippets = classify_disk_writes(writes, "/d/snippets")
     assert raw_audio == {"/d/ingest/journal/streams/x/seg.bin": 4096}
     assert snippets == {"/d/snippets/a.wav": 7}
+
+
+def test_known_call_accounting_counts_calls_not_detection_rows():
+    start_ns = 1_000_000_000_000
+    windows = call_arrival_windows_seconds(FULL_SCENARIO)
+    half_interval_s = FULL_SCENARIO.event_interval_seconds / 2.0
+
+    def detection_at(offset_s: float) -> dict:
+        return {"timestamp_ns": start_ns + int(offset_s * 1e9)}
+
+    detections = [
+        detection_at(windows[0][0]),
+        detection_at(windows[0][1]),  # second row (e.g. omni + localized) on the same call
+        detection_at(windows[3][0] - 0.55),  # block-quantized event time ahead of the arrival
+        detection_at(windows[5][1] + 0.1),  # just after call 5: nearer it than call 6
+        detection_at(windows[-1][1] + half_interval_s + 0.5),  # after the last call: no call to blame
+        {"timestamp_ns": None},
+    ]
+    accounting = account_known_call_detections(FULL_SCENARIO, start_ns, detections)
+    assert accounting.known_call_count == len(windows)
+    assert accounting.detected_known_call_count == 3
+    assert accounting.unmatched_detection_count == 2
 
 
 def test_aggregate_metrics_ignores_missing_values():
@@ -190,6 +259,9 @@ def test_smoke_gate_run_against_this_checkout(tmp_path: Path):
     assert metrics["ingest_rejected_post_count"] == 0
     assert metrics["packet_gap_count"] == 0, components
     assert metrics["raw_audio_disk_bytes_written"] == 0, components["raw_audio_written_paths"]
+    # The harness must emit the detection requirements the comparator gates (absent would fail the gate).
+    assert metrics["known_call_detection_count"] is not None
+    assert metrics["classification_backlog_drop_count"] is not None
 
 
 @pytest.mark.skipif(
