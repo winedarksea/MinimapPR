@@ -6,7 +6,8 @@ capture instant plus that node's own clock error, tagged with its clock class
 hand-measured node the operator enters its position and stated accuracy as
 an override before it streams (the app pushes that placement to the
 sidecar; its packets carry the firmware's untrusted fallback fix). Shared by
-the range matrix (E5) and the faint funnel (E7).
+the range matrix (E5) and the faint funnel (E7); E7's admission sweep also
+streams the same uploads through Python direct ingest.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from minimappr.sim.binary_ingest_encoder import (
     frames_from_continuous_capture,
 )
 from tests.acoustic_scene_synthesis import AcousticScene, SceneNode
+from tests.sidecar_manifest_collector import LiveSidecarManifestCollector
 from tests.rust_sidecar_e2e_helpers import (
     POLL_INTERVAL_SECONDS,
     configure_full_app_with_rust_sidecar,
@@ -42,6 +44,8 @@ from tests.rust_sidecar_e2e_helpers import (
     write_fake_sidecar_classifier_helper,
 )
 
+INGEST_BACKEND_RUST_SIDECAR = "rust_sidecar"
+INGEST_BACKEND_PYTHON_DIRECT = "python_direct"
 FRAME_SAMPLES = 960
 # 100 ms uploads, as the firmware sends: the live trigger inspects the window
 # ending at each upload, so one large upload would hide the onset.
@@ -53,7 +57,7 @@ UPLOAD_ROUND_PACING_SECONDS = 0.05
 DETECTION_SETTLE_SECONDS = 3.0
 # The replay stream's first byte can lag while the sidecar finishes renders.
 SSE_REPLAY_IDLE_SECONDS = 3.0
-DETECTIONS_QUERY_LIMIT = 200
+DETECTIONS_QUERY_LIMIT = 1000
 GEOMETRY_PUSH_WAIT_SECONDS = 10.0
 # A node without a GPS fix still sends a position: its compiled-in fallback
 # (``NmeaGpsSource::updateDescriptor``), tagged ``fallback_static``, which the
@@ -73,11 +77,43 @@ class StreamingNode:
     entered_position_std_m: float | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class UploadReceipt:
+    """What ingest answered for one upload. The sidecar only acknowledges the
+    enqueue; direct ingest also counts frames and carries per-frame
+    ``triggered`` flags in ``frame_results``."""
+
+    node_id: str
+    upload_index: int
+    accepted: bool
+    total_frames: int | None = None
+    accepted_frames: int | None = None
+    frame_results: tuple[dict, ...] = ()
+
+    @classmethod
+    def from_response(cls, node_id: str, upload_index: int, response: dict) -> "UploadReceipt":
+        return cls(
+            node_id=node_id,
+            upload_index=upload_index,
+            accepted=bool(response.get("accepted")),
+            total_frames=response.get("total_frames"),
+            accepted_frames=response.get("accepted_frames"),
+            frame_results=tuple(response.get("results") or ()),
+        )
+
+    @property
+    def fully_received(self) -> bool:
+        return self.accepted and (self.total_frames is None or self.accepted_frames == self.total_frames)
+
+
 @dataclass(slots=True)
 class FullAppRunResult:
     capture_start_packet_time_ns: int
+    ingest_backend: str = INGEST_BACKEND_RUST_SIDECAR
     detections: list[dict] = field(default_factory=list)
     manifests_by_id: dict[str, dict] = field(default_factory=dict)
+    upload_receipts: list[UploadReceipt] = field(default_factory=list)
+    manifest_replay_gap_count: int = 0
 
 
 def _node_header(node: StreamingNode) -> BinaryIngestNodeHeader:
@@ -126,7 +162,7 @@ def build_uploads_by_node(
     return uploads
 
 
-def _enter_hand_measured_positions(client: TestClient, nodes: Sequence[StreamingNode]) -> int:
+def enter_hand_measured_positions(client: TestClient, nodes: Sequence[StreamingNode]) -> int:
     entered_count = 0
     for node in nodes:
         if node.entered_position_enu_m is None:
@@ -179,6 +215,40 @@ def _rust_handoff_detections(client: TestClient, node_ids: set[str]) -> list[dic
     ]
 
 
+def stream_uploads(
+    nodes: Sequence[StreamingNode],
+    uploads: Mapping[str, list[bytes]],
+    post_upload: Callable[[bytes], dict],
+    result: FullAppRunResult,
+) -> None:
+    upload_count = max(len(node_uploads) for node_uploads in uploads.values())
+    for upload_index in range(upload_count):
+        for node in nodes:
+            node_uploads = uploads[node.scene_node.node_id]
+            if upload_index < len(node_uploads):
+                response = post_upload(node_uploads[upload_index])
+                result.upload_receipts.append(UploadReceipt.from_response(node.scene_node.node_id, upload_index, response))
+        # Nodes stream concurrently in the field: every node's upload k is in
+        # before anyone's k+1, so solves and renders see the cluster covered.
+        time.sleep(UPLOAD_ROUND_PACING_SECONDS)
+
+
+def wait_for_detections(
+    fetch_detections: Callable[[], list[dict]],
+    result: FullAppRunResult,
+    detection_wait_seconds: float,
+    detections_complete: Callable[[FullAppRunResult], bool],
+) -> None:
+    deadline = time.monotonic() + detection_wait_seconds
+    while time.monotonic() < deadline:
+        result.detections = fetch_detections()
+        if detections_complete(result):
+            break
+        time.sleep(POLL_INTERVAL_SECONDS)
+    time.sleep(DETECTION_SETTLE_SECONDS)
+    result.detections = fetch_detections()
+
+
 def run_streaming_scene_through_full_app(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -190,16 +260,36 @@ def run_streaming_scene_through_full_app(
     detection_wait_seconds: float,
     detections_complete: Callable[[FullAppRunResult], bool],
     replay_manifests_over_sse: bool = False,
+    ingest_backend: str = INGEST_BACKEND_RUST_SIDECAR,
+    collect_manifests_live: bool = False,
 ) -> FullAppRunResult:
     """Stream every node's capture (uploads interleaved in node order) and collect
-    the stored Rust-handoff detections and sidecar manifests.
+    the stored detections, the per-upload ingest receipts and (sidecar) manifests.
 
+    ``ingest_backend`` picks the real Rust sidecar or the app's Python direct
+    ingest (``tests/realistic_scene_direct_ingest.py``) for identical uploads.
     ``detections_complete(result)`` ends the wait early; a settle period
     always follows so later renders and merges still land. Manifests come
-    from the short results ring unless ``replay_manifests_over_sse``: the SSE
-    replay keeps every event (512) but a busy sidecar can stall it, so only
-    callers that score manifests pay for it.
+    from the short results ring unless ``replay_manifests_over_sse`` (the 512
+    event SSE replay, which a busy sidecar can stall) or
+    ``collect_manifests_live`` (follows the stream during the run; for runs
+    long enough to overflow the replay ring).
     """
+    if ingest_backend == INGEST_BACKEND_PYTHON_DIRECT:
+        from tests.realistic_scene_direct_ingest import run_streaming_scene_through_direct_ingest
+
+        return run_streaming_scene_through_direct_ingest(
+            monkeypatch,
+            tmp_path,
+            scene=scene,
+            nodes=nodes,
+            captures_by_node=captures_by_node,
+            app_environment=app_environment,
+            detection_wait_seconds=detection_wait_seconds,
+            detections_complete=detections_complete,
+        )
+    if ingest_backend != INGEST_BACKEND_RUST_SIDECAR:
+        raise ValueError(f"unknown ingest backend {ingest_backend!r}")
     sidecar_port = pick_free_tcp_port()
     helper_path = write_fake_sidecar_classifier_helper(tmp_path)
     configure_full_app_with_rust_sidecar(
@@ -213,38 +303,33 @@ def run_streaming_scene_through_full_app(
     )
     node_ids = {node.scene_node.node_id for node in nodes}
     with TestClient(app) as client:
-        entered_count = _enter_hand_measured_positions(client, nodes)
+        entered_count = enter_hand_measured_positions(client, nodes)
         if entered_count:
             _wait_for_sidecar_placements(sidecar_port, entered_count)
-        result = FullAppRunResult(capture_start_packet_time_ns=time.time_ns() - PACKET_TIME_BEHIND_RECEIPT_NS)
+        result = FullAppRunResult(
+            capture_start_packet_time_ns=time.time_ns() - PACKET_TIME_BEHIND_RECEIPT_NS,
+            ingest_backend=INGEST_BACKEND_RUST_SIDECAR,
+        )
         uploads = build_uploads_by_node(
             nodes,
             captures_by_node,
             sample_rate_hz=scene.sample_rate_hz,
             capture_start_packet_time_ns=result.capture_start_packet_time_ns,
         )
-        upload_count = max(len(node_uploads) for node_uploads in uploads.values())
-        for upload_index in range(upload_count):
-            for node in nodes:
-                node_uploads = uploads[node.scene_node.node_id]
-                if upload_index < len(node_uploads):
-                    post_binary_ingest(sidecar_port, node_uploads[upload_index])
-            # Nodes stream concurrently in the field: every node's upload k is in
-            # before anyone's k+1, so solves and renders see the cluster covered.
-            time.sleep(UPLOAD_ROUND_PACING_SECONDS)
-        deadline = time.monotonic() + detection_wait_seconds
-        while time.monotonic() < deadline:
-            result.detections = _rust_handoff_detections(client, node_ids)
-            if detections_complete(result):
-                break
-            time.sleep(POLL_INTERVAL_SECONDS)
-        time.sleep(DETECTION_SETTLE_SECONDS)
-        result.detections = _rust_handoff_detections(client, node_ids)
-        manifests = (
-            replay_dsp_event_manifests(sidecar_port, idle_seconds=SSE_REPLAY_IDLE_SECONDS)
-            if replay_manifests_over_sse
-            else fetch_live_dsp_results(sidecar_port)
+        collector = LiveSidecarManifestCollector(sidecar_port) if collect_manifests_live else None
+        if collector is not None:
+            collector.start()
+        stream_uploads(nodes, uploads, lambda payload: post_binary_ingest(sidecar_port, payload), result)
+        wait_for_detections(
+            lambda: _rust_handoff_detections(client, node_ids), result, detection_wait_seconds, detections_complete
         )
+        if collector is not None:
+            manifests = collector.stop()
+            result.manifest_replay_gap_count = collector.replay_gap_count
+        elif replay_manifests_over_sse:
+            manifests = replay_dsp_event_manifests(sidecar_port, idle_seconds=SSE_REPLAY_IDLE_SECONDS)
+        else:
+            manifests = fetch_live_dsp_results(sidecar_port)
         result.manifests_by_id = {
             str(manifest.get("manifest_id")): manifest
             for manifest in manifests

@@ -268,4 +268,41 @@ mod tests {
         assert!(with_blocks.observe_with_short_blocks("n", chip_frame_rms, frame_seconds, Some(chip_block_rms)));
         assert!(!with_blocks.observe_with_short_blocks("n", 1e-4, frame_seconds, Some(f64::NAN)));
     }
+
+    /// Per-frame cost for `docs/faint_call_admission_results.md`:
+    /// `cargo test --release -p minimappr-core short_block_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing report, not a check"]
+    fn short_block_cost_per_frame_report() {
+        const FRAMES: usize = 50_000;
+        const CHANNELS: usize = 4;
+        const FRAME_SAMPLES: usize = 960;
+        let mut seed = 1_u32;
+        let frame: Vec<Vec<f32>> = (0..CHANNELS)
+            .map(|_| {
+                (0..FRAME_SAMPLES)
+                    .map(|_| {
+                        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        (seed as i32 as f32) / (i32::MAX as f32) * 1e-4
+                    })
+                    .collect()
+            })
+            .collect();
+        let frame_rms = |frame: &[Vec<f32>]| frame.iter().map(|channel| mean_square(channel).sqrt()).fold(0.0, f64::max);
+        let mut whole_frame = NoiseFloorRelativeTrigger::new(RelativeTriggerConfig::default());
+        let started = std::time::Instant::now();
+        for _ in 0..FRAMES {
+            whole_frame.observe("n", frame_rms(std::hint::black_box(&frame)), 0.02);
+        }
+        let whole_frame_ns = started.elapsed().as_nanos() as f64 / FRAMES as f64;
+        let mut short_block = NoiseFloorRelativeTrigger::new(RelativeTriggerConfig::default());
+        let started = std::time::Instant::now();
+        for _ in 0..FRAMES {
+            let frame = std::hint::black_box(&frame);
+            let peak = peak_short_block_rms(frame, 48_000.0, 0.005);
+            short_block.observe_with_short_blocks("n", frame_rms(frame), 0.02, Some(peak));
+        }
+        let short_block_ns = started.elapsed().as_nanos() as f64 / FRAMES as f64;
+        println!("relative trigger per 4x960 frame: whole-frame {whole_frame_ns:.0} ns, with 5 ms short blocks {short_block_ns:.0} ns");
+    }
 }
