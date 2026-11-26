@@ -23,6 +23,7 @@ pub mod bakeoff_production_candidate;
 pub mod bakeoff_report;
 pub mod bakeoff_scenes;
 pub mod bakeoff_scoring;
+pub mod bakeoff_settings_profile;
 pub mod bakeoff_summary;
 pub mod bakeoff_windows;
 pub mod device_harness;

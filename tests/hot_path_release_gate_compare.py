@@ -19,6 +19,7 @@ class MetricComparison:
     allowed_maximum: float | None
     gated: bool
     passed: bool
+    allowed_minimum: float | None = None
 
 
 @dataclass
@@ -35,9 +36,10 @@ class HotPathComparison:
         lines = [f"{'metric':42s} {'baseline':>12s} {'candidate':>12s} {'allowed':>12s}  verdict"]
         for row in self.rows:
             verdict = ("ok" if row.passed else "FAIL") if row.gated else "info"
+            allowed = f">={_format(row.allowed_minimum)}" if row.allowed_minimum is not None else _format(row.allowed_maximum)
             lines.append(
                 f"{row.metric_name:42s} {_format(row.baseline_value):>12s} {_format(row.candidate_value):>12s} "
-                f"{_format(row.allowed_maximum):>12s}  {verdict}"
+                f"{allowed:>12s}  {verdict}"
             )
         lines.extend(f"WARNING: {warning}" for warning in self.warnings)
         lines.extend(f"ERROR: {error}" for error in self.errors)
@@ -75,6 +77,52 @@ def _compare_metric(
     return MetricComparison(metric_name, baseline_value, candidate_value, allowed, True, passed), error
 
 
+KNOWN_CALL_DETECTION_METRIC = "known_call_detection_count"
+CLASSIFICATION_BACKLOG_DROP_METRIC = "classification_backlog_drop_count"
+
+
+def _compare_absolute_detection_requirements(
+    baseline_metrics: dict, candidate_metrics: dict, config: HotPathGateConfig
+) -> list[tuple[MetricComparison, str | None]]:
+    """Baseline-independent checks that the classification path delivered.
+
+    A missing value fails: it means the harness did not measure the metric
+    (e.g. a result recorded before it existed), and passing would let a run
+    that stored nothing through.
+    """
+    results = []
+    known_calls = candidate_metrics.get(KNOWN_CALL_DETECTION_METRIC)
+    floor = float(config.min_candidate_known_call_detection_count)
+    if known_calls is None:
+        error = f"{KNOWN_CALL_DETECTION_METRIC}: candidate has no value; re-record it with the current harness"
+    elif float(known_calls) < floor:
+        error = (
+            f"{KNOWN_CALL_DETECTION_METRIC}: only {known_calls:.0f} known calls reached stored detections "
+            f"(need >= {floor:.0f}); solves without detections mean the classification handoff is losing calls"
+        )
+    else:
+        error = None
+    results.append((
+        MetricComparison(KNOWN_CALL_DETECTION_METRIC, baseline_metrics.get(KNOWN_CALL_DETECTION_METRIC), known_calls,
+                         None, True, error is None, allowed_minimum=floor),
+        error,
+    ))
+    backlog_drops = candidate_metrics.get(CLASSIFICATION_BACKLOG_DROP_METRIC)
+    budget = float(config.max_candidate_classification_backlog_drop_count)
+    if backlog_drops is None:
+        error = f"{CLASSIFICATION_BACKLOG_DROP_METRIC}: candidate has no value; re-record it with the current harness"
+    elif float(backlog_drops) > budget:
+        error = f"{CLASSIFICATION_BACKLOG_DROP_METRIC}: candidate dropped {backlog_drops:.0f} classifications (budget {budget:.0f})"
+    else:
+        error = None
+    results.append((
+        MetricComparison(CLASSIFICATION_BACKLOG_DROP_METRIC, baseline_metrics.get(CLASSIFICATION_BACKLOG_DROP_METRIC),
+                         backlog_drops, budget, True, error is None),
+        error,
+    ))
+    return results
+
+
 def compare_hot_path_results(baseline: dict, candidate: dict, config: HotPathGateConfig) -> HotPathComparison:
     comparison = HotPathComparison()
     if baseline.get("schema_version") != candidate.get("schema_version"):
@@ -106,7 +154,12 @@ def compare_hot_path_results(baseline: dict, candidate: dict, config: HotPathGat
     metric_names = list(config.metric_tolerances) + sorted(
         (set(baseline_metrics) | set(candidate_metrics)) - set(config.metric_tolerances)
     )
-    for metric_name in metric_names:
+    for row, error in _compare_absolute_detection_requirements(baseline_metrics, candidate_metrics, config):
+        comparison.rows.append(row)
+        if error:
+            comparison.errors.append(error)
+    absolute_requirement_metrics = {KNOWN_CALL_DETECTION_METRIC, CLASSIFICATION_BACKLOG_DROP_METRIC}
+    for metric_name in (name for name in metric_names if name not in absolute_requirement_metrics):
         tolerance = config.metric_tolerances.get(metric_name, HotPathMetricTolerance(gated=False))
         if tolerance.depends_on_machine and not same_machine:
             tolerance = replace(tolerance, gated=False)

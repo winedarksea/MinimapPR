@@ -64,6 +64,7 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "omni_scan_interval_seconds": float,
     "omni_scan_window_seconds": float,
     "omni_scan_min_rms": float,
+    "omni_scan_clearest_channel_gate_enabled": bool,
     "min_localization_confidence": float,
     "localization_min_reportable_confidence": float,
     "localization_max_reportable_gdop": float,
@@ -273,6 +274,8 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "multi_node_bearing_min_separation_deg": float,
     "multi_node_bearing_ttl_seconds": float,
     "multi_node_bearing_max_condition": float,
+    "multi_node_bearing_max_miss_sigma": float,
+    "multi_node_bearing_min_lateral_std_m": float,
     # Phase 5 cross-node sensor admission (see FusionNode._admit_cross_node_sensors).
     "localization_cross_node_admission_enabled": bool,
     "localization_cross_node_relative_energy_floor": float,
@@ -362,6 +365,8 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "localization_collinear_mirror_max_aspect_ratio": float,
     "trigger_noise_floor_relative_enabled": bool,
     "trigger_noise_floor_relative_snr_db": float,
+    "trigger_short_block_excess_enabled": bool,
+    "trigger_short_block_seconds": float,
     "trigger_noise_floor_rise_seconds": float,
     "trigger_noise_floor_fall_seconds": float,
     "trigger_noise_floor_warmup_seconds": float,
@@ -386,6 +391,8 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     # Live: the sidecar geometry publisher re-reads both on every cycle.
     "sidecar_geometry_push_estimate_move_threshold_m": float,
     "sidecar_geometry_reconcile_interval_seconds": float,
+    # Live: the render handoff reads it per render.
+    "omni_audio_bearing_min_localization_confidence": float,
     # Sidecar-restart-required: forwarded to the sidecar as launch env. The
     # dict-valued clock-class map is not patchable (no dict coercion here).
     "localization_max_solve_sensors": int,
@@ -402,6 +409,8 @@ CONFIG_PATCH_ALLOWLIST: dict[str, type] = {
     "localization_timeline_drift_slew_fraction": float,
     "localization_trigger_noise_floor_relative_enabled": bool,
     "localization_trigger_noise_floor_relative_db": float,
+    "localization_trigger_short_block_excess_enabled": bool,
+    "localization_trigger_short_block_seconds": float,
     "localization_solver_floor_relative_db": float,
     "localization_sensor_registry_stale_seconds": float,
     "localization_coverage_delivery_margin_seconds": float,

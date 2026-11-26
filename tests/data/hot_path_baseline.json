@@ -24,6 +24,7 @@
     "ingest_post_round_trip_p95_ms": 5.598373349999999,
     "ingest_queue_drop_count": 0.0,
     "ingest_rejected_post_count": 0.0,
+    "known_call_detection_count": 5.0,
     "packet_gap_count": 0.0,
     "raw_audio_disk_bytes_written": 0.0,
     "raw_audio_disk_files_written": 0.0,
@@ -279,5 +280,18 @@
     ]
   },
   "schema_version": 1,
-  "sidecar_build_profile": "debug"
+  "sidecar_build_profile": "debug",
+  "supplementary_measurements": {
+    "known_call_detection_count": {
+      "aggregate": "median",
+      "checkout_commit": "440e6bb2904a61f8cc4cd913d4f81f46d77c6762",
+      "per_run_values": [
+        5,
+        4,
+        7
+      ],
+      "reason": "Metric added after the original recording. Re-measured on the same commit and machine with `scripts/hot_path_release_gate.py run --checkout <440e6bb worktree> --scenario full --repeat 3`. That session ran at load average ~110 (other agents building), so its latency/RSS/packet-gap figures were discarded and every other metric above is still the original 2026-11-24 recording. The gate judges this metric against an absolute floor, so its baseline value is informational.",
+      "recorded": "2026-11-26"
+    }
+  }
 }

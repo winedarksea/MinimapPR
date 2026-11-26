@@ -30,7 +30,7 @@ import numpy as np
 
 from minimappr.config import Settings
 from minimappr.core.classification import ClassifiedResult
-from minimappr.core.ingest_relative_trigger import NoiseFloorRelativeTrigger
+from minimappr.core.ingest_relative_trigger import NoiseFloorRelativeTrigger, peak_short_block_rms
 from minimappr.core.onset_cluster_attribution import AttributionThresholds, ClusterAttributionContext, loco_decision
 from minimappr.core.onset_cluster_attribution_evidence import ClusterAttributionEvidence, ClusterOnsetArrival
 from minimappr.core.onset_cluster_attribution_stage import ATTRIBUTION_FEATURE_KEY, OnsetClusterAttributor
@@ -64,6 +64,45 @@ def relative_trigger_case(seed: int) -> tuple[dict, dict]:
         triggered = trigger.observe(node, float("nan") if rms is None else rms, seconds)
         outputs.append([triggered, trigger.floor_rms(node)])
     return {"kind": "relative_trigger", "frames": frames}, {"steps": outputs}
+
+
+def relative_trigger_short_block_case(seed: int) -> tuple[dict, dict]:
+    """Short-block excess candidate: frame RMS plus the frame's loudest block (chips, rain clicks)."""
+    rng = np.random.default_rng(seed)
+    trigger = NoiseFloorRelativeTrigger(Settings(trigger_noise_floor_relative_enabled=True).relative_trigger_config())
+    floors = {node: float(10 ** rng.uniform(-4.5, -3.0)) for node in NODES[:2]}
+    frames = []
+    for index in range(600):
+        node = NODES[index % 2]
+        frame_rms = floors[node] * float(np.exp(rng.normal(scale=0.1)))
+        block_rms = frame_rms * float(10 ** rng.uniform(0.02, 0.08))
+        if rng.uniform() < 0.05:
+            block_rms *= float(10 ** rng.uniform(0.2, 1.0))  # a chip inside the frame
+            frame_rms *= float(10 ** rng.uniform(0.0, 0.3))
+        if 250 <= index < 350:
+            block_rms *= float(np.exp(abs(rng.normal(scale=1.0))))  # rain clicks
+        frames.append([node, frame_rms, None if rng.uniform() < 0.005 else block_rms, 0.02])
+    outputs = []
+    for node, frame_rms, block_rms, seconds in frames:
+        triggered = trigger.observe(node, frame_rms, seconds, float("nan") if block_rms is None else block_rms)
+        outputs.append([triggered, trigger.floor_rms(node)])
+    return {"kind": "relative_trigger_short_block", "frames": frames}, {"steps": outputs}
+
+
+def peak_short_block_rms_case(seed: int) -> tuple[dict, dict]:
+    """The block tiling itself: remainders, blocks longer than the frame, odd rates."""
+    rng = np.random.default_rng(seed)
+    frames = []
+    peaks = []
+    for _ in range(12):
+        channel_count = int(rng.integers(1, 5))
+        frame_samples = int(rng.integers(40, 500))
+        sample_rate_hz = float(rng.choice([16_000.0, 24_000.0, 44_100.0, 48_000.0]))
+        block_seconds = float(rng.choice([0.0005, 0.0025, 0.005, 0.0123, 0.05]))
+        channels = (rng.normal(scale=10 ** rng.uniform(-4, -1), size=(channel_count, frame_samples))).astype(np.float32)
+        frames.append({"channels": channels.tolist(), "sample_rate_hz": sample_rate_hz, "block_seconds": block_seconds})
+        peaks.append(peak_short_block_rms(channels, sample_rate_hz, block_seconds))
+    return {"kind": "peak_short_block_rms", "frames": frames}, {"peaks": peaks}
 
 
 def relative_trigger_lru_case() -> tuple[dict, dict]:
@@ -336,6 +375,8 @@ def window_label_reconciliation_case(seed: int) -> tuple[dict, dict]:
 def all_cases() -> list[tuple[dict, dict]]:
     cases = [relative_trigger_case(seed) for seed in range(4)]
     cases.append(relative_trigger_lru_case())
+    cases.extend(relative_trigger_short_block_case(500 + seed) for seed in range(2))
+    cases.append(peak_short_block_rms_case(600))
     cases.extend(loco_decision_case(700 + seed) for seed in range(2))
     attribution_inputs = [attribution_case(seed) for seed in range(160)]
     attribution_inputs += [attribution_band_overlap_case(900 + seed) for seed in range(6)]

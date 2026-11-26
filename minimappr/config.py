@@ -361,7 +361,7 @@ class LocalizationConfig:
     # from the localization snapshot.
     classification_audio_source: str = "beamformed"
     # Min localization confidence for nearest-node omni selection (else omni fallback).
-    min_localization_confidence: float = 0.20
+    min_localization_confidence: float = overhaul_defaults.DEFAULT_MIN_LOCALIZATION_CONFIDENCE
     # Default ON: a defined cluster is the unit of cross-node localization on both
     # the Python and Rust paths. When a node is not a member of any cluster,
     # `cluster_for_node` returns None and the pipeline keeps its global-sensor
@@ -838,7 +838,7 @@ class FusionConfig:
     retention_permanent_labels: tuple[str, ...]
     retention_long_security_confidence: float
     classification_audio_source: str = "beamformed"
-    min_localization_confidence: float = 0.20
+    min_localization_confidence: float = overhaul_defaults.DEFAULT_MIN_LOCALIZATION_CONFIDENCE
     # Pre-render report-window gate (0 = off). When >0, a localized candidate is
     # skipped BEFORE the beamform render + classifier inference once this many
     # localized detections were already emitted for its (node, reporting window).
@@ -1086,6 +1086,11 @@ class Settings:
     multi_node_bearing_ttl_seconds: float = 4.0
     multi_node_bearing_min_separation_deg: float = 5.0
     multi_node_bearing_max_condition: float = 1e4
+    # Agreement gate: reject when a ray misses the fused point by more than this
+    # many lateral std (angular part scaled to the fused range, in quadrature with
+    # the node's stated position std; min_lateral_std_m is a numerical floor).
+    multi_node_bearing_max_miss_sigma: float = 3.0
+    multi_node_bearing_min_lateral_std_m: float = 1.0
     # True enables cross-node TDOA automatically whenever the localization window
     # contains sensors from two or more nodes.  A single-node window has no
     # cross-node pairs, so it retains the normal per-node behavior.
@@ -1128,7 +1133,7 @@ class Settings:
     classification_audio_source: str = "beamformed"
     # Minimum localization confidence for nearest_node_omni sensor selection.
     # Previously hardcoded 0.20 in the Rust dsp_worker; now configurable both sides.
-    min_localization_confidence: float = 0.20
+    min_localization_confidence: float = overhaul_defaults.DEFAULT_MIN_LOCALIZATION_CONFIDENCE
     beamformer_type: str = "band_split_das"
     beamformed_classification_min_sensor_count: int = 2
     beamformed_classification_confidence_margin: float = 0.0
@@ -1195,6 +1200,9 @@ class Settings:
     omni_scan_interval_seconds: float = 30.0
     omni_scan_window_seconds: float = 21.0
     omni_scan_min_rms: float = 0.001
+    # Gate (and classify) the clearest single channel instead of the channel mean:
+    # the mean can phase-cancel a narrowband call one microphone hears well.
+    omni_scan_clearest_channel_gate_enabled: bool = False
     t3t4_enabled: bool = True
     t3t4_min_confidence: float = 0.5
     t3t4_min_repeats: int = 3
@@ -1469,6 +1477,10 @@ class Settings:
     # Raise the relative bar by this x the slow mean excess of non-triggering frames over the
     # floor, so gusty wind/rain peaks do not trigger every cooldown (0 = bare snr_db bar).
     trigger_noise_floor_fluctuation_multiplier: float = 1.5
+    # Relative trigger also judges each frame's loudest short block (OR), so a call
+    # shorter than a frame is not diluted by the frame's quiet remainder.
+    trigger_short_block_excess_enabled: bool = False
+    trigger_short_block_seconds: float = overhaul_defaults.DEFAULT_TRIGGER_SHORT_BLOCK_SECONDS
     # --- end Field Mode W3-attribution ---
     detection_min_confidence: float = 0.4
     cop_detections_max_items: int = 150
@@ -1842,6 +1854,8 @@ class Settings:
         overhaul_defaults.DEFAULT_LOCALIZATION_TRIGGER_NOISE_FLOOR_RELATIVE_ENABLED
     )
     localization_trigger_noise_floor_relative_db: float = overhaul_defaults.DEFAULT_NOISE_FLOOR_RELATIVE_TRIGGER_SNR_DB
+    localization_trigger_short_block_excess_enabled: bool = False
+    localization_trigger_short_block_seconds: float = overhaul_defaults.DEFAULT_TRIGGER_SHORT_BLOCK_SECONDS
     localization_solver_floor_relative_db: float = overhaul_defaults.DEFAULT_LOCALIZATION_SOLVER_FLOOR_RELATIVE_DB
     localization_sensor_registry_stale_seconds: float = (
         overhaul_defaults.DEFAULT_LOCALIZATION_SENSOR_REGISTRY_STALE_SECONDS
@@ -1867,6 +1881,9 @@ class Settings:
     )
     localized_handoff_duplicate_merge_max_separation_m: float = (
         overhaul_defaults.DEFAULT_LOCALIZED_HANDOFF_DUPLICATE_MERGE_MAX_SEPARATION_M
+    )
+    omni_audio_bearing_min_localization_confidence: float = (
+        overhaul_defaults.DEFAULT_OMNI_AUDIO_BEARING_MIN_LOCALIZATION_CONFIDENCE
     )
     tracking_mode_by_category: dict = field(default_factory=overhaul_defaults.default_tracking_mode_by_category)
     position_observation_queue_max_items: int = overhaul_defaults.DEFAULT_POSITION_OBSERVATION_QUEUE_MAX_ITEMS
@@ -2183,6 +2200,9 @@ class Settings:
             raise ValueError("MINIMAPPR_OMNI_SCAN_WINDOW_SECONDS must be > 0")
         if self.omni_scan_min_rms < 0.0:
             raise ValueError("MINIMAPPR_OMNI_SCAN_MIN_RMS must be >= 0")
+        for _short_block_key in ("trigger_short_block_seconds", "localization_trigger_short_block_seconds"):
+            if not (math.isfinite(getattr(self, _short_block_key)) and getattr(self, _short_block_key) > 0.0):
+                raise ValueError(f"{_short_block_key} must be a finite value > 0")
         if self.t3t4_min_repeats < 2:
             raise ValueError("MINIMAPPR_T3T4_MIN_REPEATS must be >= 2")
         if not 0.0 <= self.t3t4_min_confidence <= 1.0:
@@ -2829,6 +2849,14 @@ class Settings:
                 "MINIMAPPR_MULTI_NODE_BEARING_MAX_CONDITION",
                 1e4,
             ),
+            multi_node_bearing_max_miss_sigma=_env_float(
+                "MINIMAPPR_MULTI_NODE_BEARING_MAX_MISS_SIGMA",
+                3.0,
+            ),
+            multi_node_bearing_min_lateral_std_m=_env_float(
+                "MINIMAPPR_MULTI_NODE_BEARING_MIN_LATERAL_STD_M",
+                1.0,
+            ),
             localization_cross_node_tdoa_enabled=_env_bool(
                 "MINIMAPPR_LOCALIZATION_CROSS_NODE_TDOA_ENABLED",
                 True,
@@ -2884,7 +2912,9 @@ class Settings:
                 False,
             ),
             classification_audio_source=classification_audio_source,
-            min_localization_confidence=_env_float("MINIMAPPR_MIN_LOCALIZATION_CONFIDENCE", 0.20),
+            min_localization_confidence=_env_float(
+                "MINIMAPPR_MIN_LOCALIZATION_CONFIDENCE", overhaul_defaults.DEFAULT_MIN_LOCALIZATION_CONFIDENCE
+            ),
             beamformer_type=_env_str("MINIMAPPR_BEAMFORMER_TYPE", "band_split_das"),
             beamform_render_highpass_hz=_env_float("MINIMAPPR_BEAMFORM_RENDER_HIGHPASS_HZ", 100.0),
             beamform_low_crossover_width_hz=_env_float("MINIMAPPR_BEAMFORM_LOW_CROSSOVER_WIDTH_HZ", 100.0),
@@ -2976,6 +3006,7 @@ class Settings:
             omni_scan_interval_seconds=_env_float("MINIMAPPR_OMNI_SCAN_INTERVAL_SECONDS", 30.0),
             omni_scan_window_seconds=_env_float("MINIMAPPR_OMNI_SCAN_WINDOW_SECONDS", 21.0),
             omni_scan_min_rms=_env_float("MINIMAPPR_OMNI_SCAN_MIN_RMS", 0.001),
+            omni_scan_clearest_channel_gate_enabled=_env_bool("MINIMAPPR_OMNI_SCAN_CLEAREST_CHANNEL_GATE_ENABLED", False),
             t3t4_enabled=_env_bool("MINIMAPPR_T3T4_ENABLED", True),
             t3t4_min_confidence=_env_float("MINIMAPPR_T3T4_MIN_CONFIDENCE", 0.5),
             t3t4_min_repeats=_env_int("MINIMAPPR_T3T4_MIN_REPEATS", 3),
@@ -3187,6 +3218,10 @@ class Settings:
             trigger_noise_floor_minimum_rms=_env_float("MINIMAPPR_TRIGGER_NOISE_FLOOR_MINIMUM_RMS", 1e-5),
             trigger_noise_floor_fluctuation_multiplier=_env_float(
                 "MINIMAPPR_TRIGGER_NOISE_FLOOR_FLUCTUATION_MULTIPLIER", 1.5
+            ),
+            trigger_short_block_excess_enabled=_env_bool("MINIMAPPR_TRIGGER_SHORT_BLOCK_EXCESS_ENABLED", False),
+            trigger_short_block_seconds=_env_float(
+                "MINIMAPPR_TRIGGER_SHORT_BLOCK_SECONDS", overhaul_defaults.DEFAULT_TRIGGER_SHORT_BLOCK_SECONDS
             ),
             # --- end Field Mode W3-attribution ---
             detection_min_confidence=_env_float("MINIMAPPR_DETECTION_MIN_CONFIDENCE", 0.4),
@@ -3519,6 +3554,13 @@ class Settings:
                 "MINIMAPPR_LOCALIZATION_TRIGGER_NOISE_FLOOR_RELATIVE_DB",
                 overhaul_defaults.DEFAULT_NOISE_FLOOR_RELATIVE_TRIGGER_SNR_DB,
             ),
+            localization_trigger_short_block_excess_enabled=_env_bool(
+                "MINIMAPPR_LOCALIZATION_TRIGGER_SHORT_BLOCK_EXCESS_ENABLED", False
+            ),
+            localization_trigger_short_block_seconds=_env_float(
+                "MINIMAPPR_LOCALIZATION_TRIGGER_SHORT_BLOCK_SECONDS",
+                overhaul_defaults.DEFAULT_TRIGGER_SHORT_BLOCK_SECONDS,
+            ),
             localization_solver_floor_relative_db=_env_float(
                 "MINIMAPPR_LOCALIZATION_SOLVER_FLOOR_RELATIVE_DB",
                 overhaul_defaults.DEFAULT_LOCALIZATION_SOLVER_FLOOR_RELATIVE_DB,
@@ -3554,6 +3596,10 @@ class Settings:
             localized_handoff_duplicate_merge_max_separation_m=_env_float(
                 "MINIMAPPR_LOCALIZED_HANDOFF_DUPLICATE_MERGE_MAX_SEPARATION_M",
                 overhaul_defaults.DEFAULT_LOCALIZED_HANDOFF_DUPLICATE_MERGE_MAX_SEPARATION_M,
+            ),
+            omni_audio_bearing_min_localization_confidence=_env_float(
+                "MINIMAPPR_OMNI_AUDIO_BEARING_MIN_LOCALIZATION_CONFIDENCE",
+                overhaul_defaults.DEFAULT_OMNI_AUDIO_BEARING_MIN_LOCALIZATION_CONFIDENCE,
             ),
             tracking_mode_by_category=_env_json_dict(
                 "MINIMAPPR_TRACKING_MODE_BY_CATEGORY",

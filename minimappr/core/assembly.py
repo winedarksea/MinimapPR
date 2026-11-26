@@ -22,6 +22,7 @@ from minimappr.core.amplitude_range import received_level_db_from_rms
 from minimappr.core.assembly_track_resolution import resolve_detection_track
 from minimappr.core.entity_canonical_row_position import persisted_row_position
 from minimappr.core.geo import LocalCoordinateFrame
+from minimappr.core.handoff_spatial_status import LOCALIZATION_SOLVE_BEARING_FEATURE_KEY
 from minimappr.core.node_registry import NodeRegistry
 from minimappr.audio_processing.chain import NodePreprocessorFactory
 from minimappr.core.retention import RetentionPolicy
@@ -35,6 +36,21 @@ from minimappr.models import (
     spatial_display_mode_for_detection,
 )
 from minimappr.utils.audio import rms, write_wav_mono
+
+
+def carried_over_feature_summary(existing_detection: dict[str, Any] | None) -> dict[str, Any]:
+    """Features a merged row inherits from the row it replaces.
+
+    The merged row takes the new solve's position, so the earlier solve's bearing
+    (origin + direction) would draw its ray against the wrong point; it is dropped
+    and only the new solve's own bearing, if any, arrives via its features.
+    """
+
+    if existing_detection is None or not isinstance(existing_detection.get("feature_summary"), dict):
+        return {}
+    carried = dict(existing_detection["feature_summary"])
+    carried.pop(LOCALIZATION_SOLVE_BEARING_FEATURE_KEY, None)
+    return carried
 
 
 @dataclass(slots=True)
@@ -301,9 +317,7 @@ class DetectionAssembler:
         )
 
         # -- feature summary ---------------------------------------------------
-        feature_summary = {}
-        if existing_detection is not None and isinstance(existing_detection.get("feature_summary"), dict):
-            feature_summary.update(existing_detection["feature_summary"])
+        feature_summary = carried_over_feature_summary(existing_detection)
         feature_summary.update(classification_features)
         feature_summary["capability_tier"] = capability_tier
         feature_summary["localization_method"] = localization_method

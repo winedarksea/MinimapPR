@@ -54,7 +54,7 @@ pub fn publish_detection(state: &AppState, report: FieldDetectionReport, feed_ca
         localization_range_observability: None,
         localization_method: Some(LOCAL_LOCALIZATION_METHOD.to_string()),
         capability_tier: None,
-        position_geo_uncertainty: None,
+        solve_bearing: None,
         label: Some(report.label),
         confidence: Some(report.confidence),
         label_confidence: Some(report.confidence),

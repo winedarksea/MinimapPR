@@ -18,7 +18,7 @@ use minimappr_core::onset_clustering::attribution_evidence::{
 use minimappr_core::mesh::call_attribution::reconcile_window_labels;
 use minimappr_core::protocol::wire_codes::SpeciesScore;
 use minimappr_core::stage1::noise_floor_relative_trigger::{
-    NoiseFloorRelativeTrigger, RelativeTriggerConfig,
+    peak_short_block_rms, NoiseFloorRelativeTrigger, RelativeTriggerConfig,
 };
 use minimappr_core::wildlife_tracking::species_log_odds::round_decimal;
 use serde_json::{json, Value};
@@ -51,6 +51,44 @@ fn run_relative_trigger_case(case: &Value, with_probes: bool) -> OracleResult {
         .map(|probe| probe.as_str().and_then(|node| trigger.floor_rms(node)))
         .collect();
     Ok(json!({ "tracked": trigger.tracked_node_count(), "probe_floors": probe_floors }))
+}
+
+/// Frames are `[node, frame_rms, peak_short_block_rms | null (NaN), seconds]`.
+fn run_relative_trigger_short_block_case(case: &Value) -> OracleResult {
+    let mut trigger = NoiseFloorRelativeTrigger::new(RelativeTriggerConfig::default());
+    let mut steps = Vec::new();
+    for frame in case["frames"].as_array().ok_or("frames")? {
+        let node = frame[0].as_str().ok_or("node")?;
+        let frame_rms = frame[1].as_f64().ok_or("frame_rms")?;
+        let block_rms = frame[2].as_f64().unwrap_or(f64::NAN);
+        let seconds = frame[3].as_f64().ok_or("seconds")?;
+        let triggered = trigger.observe_with_short_blocks(node, frame_rms, seconds, Some(block_rms));
+        steps.push(json!([triggered, trigger.floor_rms(node)]));
+    }
+    Ok(json!({ "steps": steps }))
+}
+
+fn run_peak_short_block_rms_case(case: &Value) -> OracleResult {
+    let mut peaks = Vec::new();
+    for frame in case["frames"].as_array().ok_or("frames")? {
+        let channels: Vec<Vec<f32>> = frame["channels"]
+            .as_array()
+            .ok_or("channels")?
+            .iter()
+            .map(|channel| {
+                channel
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|sample| sample.as_f64().map(|value| value as f32))
+                    .collect()
+            })
+            .collect();
+        let sample_rate_hz = frame["sample_rate_hz"].as_f64().ok_or("sample_rate_hz")?;
+        let block_seconds = frame["block_seconds"].as_f64().ok_or("block_seconds")?;
+        peaks.push(json!(peak_short_block_rms(&channels, sample_rate_hz, block_seconds)));
+    }
+    Ok(json!({ "peaks": peaks }))
 }
 
 fn classifier_answer(value: &Value) -> ClassifierAnswer {
@@ -290,6 +328,8 @@ pub fn run_attribution_oracle() -> Result<(), Box<dyn std::error::Error + Send +
         results.push(match case["kind"].as_str().ok_or("kind")? {
             "relative_trigger" => run_relative_trigger_case(case, false)?,
             "relative_trigger_lru" => run_relative_trigger_case(case, true)?,
+            "relative_trigger_short_block" => run_relative_trigger_short_block_case(case)?,
+            "peak_short_block_rms" => run_peak_short_block_rms_case(case)?,
             "attribution_batch" => run_attribution_batch(case)?,
             "loco_decision" => run_loco_decision_case(case)?,
             "window_label_reconciliation" => run_window_label_reconciliation_case(case)?,

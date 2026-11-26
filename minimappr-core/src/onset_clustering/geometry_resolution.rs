@@ -103,6 +103,7 @@ pub struct ResolvedClusterGeometry {
     pub range_observability: Option<f64>,
     pub height_resolution: &'static str,
     pub range_interval_m: Option<(f64, f64)>,
+    pub range_lower_bound_m: Option<f64>,
 }
 
 fn layout_aperture_m(sensor_positions: &BTreeMap<String, Point3>) -> f64 {
@@ -133,6 +134,7 @@ pub fn resolve_cluster_geometry(
             range_observability: refined.range_observability,
             height_resolution: HEIGHT_NOT_APPLICABLE,
             range_interval_m: None,
+            range_lower_bound_m: None,
         };
     }
     let height = resolve_node_plane_mirror(
@@ -165,6 +167,7 @@ pub fn resolve_cluster_geometry(
             range_observability: refined.range_observability,
             height_resolution: height.status,
             range_interval_m: None,
+            range_lower_bound_m: None,
         };
     }
     let settings = RangeProfileSettings {
@@ -205,6 +208,7 @@ pub fn resolve_cluster_geometry(
         range_observability: judged.range_observability,
         height_resolution: height.status,
         range_interval_m: judged.range_interval_m,
+        range_lower_bound_m: judged.range_lower_bound_m,
     }
 }
 

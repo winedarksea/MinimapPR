@@ -282,6 +282,8 @@ fn fusion_cones_as_doa_terms_agree_with_closed_form_triangulation() {
             lateral_std_m: 0.5,
             confidence: 0.8,
             event_time_ns: 0,
+            range_prior_m: 30.0,
+            position_std_m: 0.0,
         }
     };
     let cones = [cone("a", [0.0, 0.0, 1.5]), cone("b", [40.0, 0.0, 1.5])];

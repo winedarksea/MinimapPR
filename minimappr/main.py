@@ -3164,6 +3164,7 @@ async def get_config(request: Request) -> dict:
         "omni_scan_interval_seconds": settings.omni_scan_interval_seconds,
         "omni_scan_window_seconds": settings.omni_scan_window_seconds,
         "omni_scan_min_rms": settings.omni_scan_min_rms,
+        "omni_scan_clearest_channel_gate_enabled": settings.omni_scan_clearest_channel_gate_enabled,
         "yamnet_min_confidence": settings.yamnet_min_confidence,
         "detection_min_confidence": settings.detection_min_confidence,
         "cop": {
@@ -3330,6 +3331,8 @@ async def get_config(request: Request) -> dict:
         "multi_node_bearing_min_separation_deg": settings.multi_node_bearing_min_separation_deg,
         "multi_node_bearing_ttl_seconds": settings.multi_node_bearing_ttl_seconds,
         "multi_node_bearing_max_condition": settings.multi_node_bearing_max_condition,
+        "multi_node_bearing_max_miss_sigma": settings.multi_node_bearing_max_miss_sigma,
+        "multi_node_bearing_min_lateral_std_m": settings.multi_node_bearing_min_lateral_std_m,
         "multi_node_bearing_fusion_enabled": settings.multi_node_bearing_fusion_enabled,
         "localization_cross_node_admission_enabled": settings.localization_cross_node_admission_enabled,
         "localization_cross_node_relative_energy_floor": settings.localization_cross_node_relative_energy_floor,
@@ -3423,6 +3426,8 @@ async def get_config(request: Request) -> dict:
         "trigger_noise_floor_warmup_seconds": settings.trigger_noise_floor_warmup_seconds,
         "trigger_noise_floor_minimum_rms": settings.trigger_noise_floor_minimum_rms,
         "trigger_noise_floor_fluctuation_multiplier": settings.trigger_noise_floor_fluctuation_multiplier,
+        "trigger_short_block_excess_enabled": settings.trigger_short_block_excess_enabled,
+        "trigger_short_block_seconds": settings.trigger_short_block_seconds,
         # --- end Field Mode W3-attribution ---
         "classifier_stage_timeout_seconds": settings.classifier_stage_timeout_seconds,
         "classification_stage_timeout_seconds": settings.classification_stage_timeout_seconds,
@@ -4054,6 +4059,8 @@ async def patch_config(request: Request) -> dict:
             errors.append("multi_node_bearing_ttl_seconds: must be > 0")
         elif key == "multi_node_bearing_max_condition" and value <= 0.0:  # type: ignore[operator]
             errors.append("multi_node_bearing_max_condition: must be > 0")
+        elif key in {"multi_node_bearing_max_miss_sigma", "multi_node_bearing_min_lateral_std_m"} and value <= 0.0:  # type: ignore[operator]
+            errors.append(f"{key}: must be > 0")
         elif key == "coordinate_mode":
             v = str(value).strip().lower()
             if v not in _COORDINATE_MODES:

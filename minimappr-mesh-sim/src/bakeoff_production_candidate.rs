@@ -180,6 +180,7 @@ fn python_cartesian_resolve(inputs: &ResolveInputs<'_>) -> Option<CandidateFix> 
     );
     request.bearing_prior = bearing_prior(evaluation.localization.steering_direction, mean_confidence, config.node_bearing_strength);
     request.far_field_initial_range_m = config.far_field_default_range_m;
+    request.far_field_max_range_m = config.resolve_far_field_max_range_m;
     request.bearing_observed_obs_floor = config.bearing_observed_obs_floor;
     // One sensor per node: the sensor id doubles as the node id.
     request.node_position_uncertainty = Some(NodePositionUncertainty {

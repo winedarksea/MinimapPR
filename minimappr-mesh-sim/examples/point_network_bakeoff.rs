@@ -1,7 +1,8 @@
 //! Nightly point-only localizer bake-off (E8, `docs/point_network_bakeoff.md`).
 //!
 //! cargo run --release -p minimappr-mesh-sim --example point_network_bakeoff -- \
-//!     [--tuning-seeds 40] [--held-out-seeds 200] [--held-out-base B] [--threads T] [--markdown PATH]
+//!     [--tuning-seeds 40] [--held-out-seeds 200] [--held-out-base B] [--threads T] [--markdown PATH] \
+//!     [--settings current_production|historical_pre_km_range]
 //! cargo run --release -p minimappr-mesh-sim --example point_network_bakeoff -- --seed S
 //!
 //! The full run tunes the onset grid reach on seeds 1..=N, then scores the
@@ -10,11 +11,14 @@
 //! `--held-out-base` draws fresh held-out seeds (a nightly can pass the date). Exit
 //! code 0 either way: the verdict is a finding, not a failure. `--seed S`
 //! scores one scene and prints every candidate's per-call result.
+//! `--settings` picks the named solver/gate settings (default: the app's current
+//! defaults; `historical_pre_km_range` reproduces the recorded 0.491 run).
 
 use minimappr_mesh_sim::bakeoff_candidate_fix::BakeoffCandidate;
 use minimappr_mesh_sim::bakeoff_config::{PointBakeoffConfig, SeedSplit, HELD_OUT_SEED_BASE, ONSET_GRID_RANGE_MULTIPLES_TRIED};
 use minimappr_mesh_sim::bakeoff_localizers::{run_bakeoff_scene, run_point_bakeoff};
 use minimappr_mesh_sim::bakeoff_report::render_markdown;
+use minimappr_mesh_sim::bakeoff_settings_profile::BakeoffSettingsProfile;
 
 const DEFAULT_TUNING_SEED_COUNT: u64 = 40;
 const DEFAULT_HELD_OUT_SEED_COUNT: u64 = 200;
@@ -27,6 +31,7 @@ struct Options {
     markdown_path: Option<String>,
     single_seed: Option<u64>,
     held_out_base: u64,
+    settings_profile: BakeoffSettingsProfile,
 }
 
 fn parse_options() -> Options {
@@ -37,6 +42,7 @@ fn parse_options() -> Options {
         markdown_path: None,
         single_seed: None,
         held_out_base: HELD_OUT_SEED_BASE,
+        settings_profile: BakeoffSettingsProfile::default(),
     };
     let mut arguments = std::env::args().skip(1);
     while let Some(flag) = arguments.next() {
@@ -48,6 +54,13 @@ fn parse_options() -> Options {
             "--markdown" => options.markdown_path = Some(value()),
             "--held-out-base" => options.held_out_base = value().parse().expect("--held-out-base takes an integer"),
             "--seed" => options.single_seed = Some(value().parse().expect("--seed takes an integer")),
+            "--settings" => {
+                let label = value();
+                options.settings_profile = BakeoffSettingsProfile::from_label(&label).unwrap_or_else(|| {
+                    let known: Vec<&str> = BakeoffSettingsProfile::ALL.iter().map(|profile| profile.label()).collect();
+                    panic!("--settings {label}: expected one of {known:?}")
+                });
+            }
             other => panic!("unknown flag {other}"),
         }
     }
@@ -83,7 +96,7 @@ fn print_single_seed(seed: u64, config: &PointBakeoffConfig) {
 
 fn main() {
     let options = parse_options();
-    let config = PointBakeoffConfig::default();
+    let config = PointBakeoffConfig::for_settings_profile(options.settings_profile);
     if let Some(seed) = options.single_seed {
         print_single_seed(seed, &config);
         return;

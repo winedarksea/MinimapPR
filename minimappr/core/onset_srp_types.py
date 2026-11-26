@@ -105,6 +105,9 @@ class LocalizedOnsetCluster:
     # the layout centroid); None interval = range not judged (single array or profile off).
     height_resolution: str | None = None
     range_interval_m: tuple[float, float] | None = None
+    # Near edge of a far-open range interval (profile still rising at the search limit): the
+    # source is at least this far along the bearing; None = range bounded on both sides or not judged.
+    range_lower_bound_m: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

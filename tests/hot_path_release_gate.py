@@ -15,6 +15,9 @@ Metrics written to the result JSON:
 * solve latency: trigger packet accepted -> pair-bearing localization result on
   the DSP stream (p50 / p95);
 * peak RSS of the sidecar and the app (sampled);
+* known calls reaching stored detections: distinct scenario calls a stored
+  detection (``/api/v1/detections``) is attributed to by event time, and
+  classification backlog drops (app classification drops + stage backpressure);
 * raw-audio disk writes: bytes / files created or grown under the data, spool
   and sidecar storage dirs, excluding the SQLite DB and detection snippets
   (which are reported on their own: kept detections may write snippets).
@@ -285,7 +288,8 @@ def _run_once(checkout_root: Path, work_dir: Path, scenario: HotPathScenario, si
         rss_sampler.watch("sidecar", server.sidecar_pid)
         rss_sampler.start()
         files_before = snapshot_file_sizes(server.watched_directories())
-        posts = build_post_schedule(scenario, start_time_ns=time.time_ns())
+        scenario_start_time_ns = time.time_ns()
+        posts = build_post_schedule(scenario, start_time_ns=scenario_start_time_ns)
         run_start = time.monotonic()
         senders = [
             _NodeSender(server.sidecar_port, [p for p in posts if p.node_id == node.node_id], run_start)
@@ -313,11 +317,13 @@ def _run_once(checkout_root: Path, work_dir: Path, scenario: HotPathScenario, si
         server.stop()
     # Full endpoint payloads stay next to the run for diagnosis; the result keeps a summary.
     (work_dir / "endpoint_snapshots.json").write_text(json.dumps(endpoint_snapshots, indent=1, default=str), encoding="utf-8")
+    (work_dir / "detections.json").write_text(json.dumps(detections, indent=1, default=str), encoding="utf-8")
     accepted_ns_by_post: dict[tuple[str, int], int] = {}
     for sender in senders:
         accepted_ns_by_post.update(sender.accepted_monotonic_ns_by_post)
     return GateRunCapture(
         scenario=scenario,
+        scenario_start_time_ns=scenario_start_time_ns,
         posts=posts,
         accepted_monotonic_ns_by_post=accepted_ns_by_post,
         post_round_trip_ms=[ms for sender in senders for ms in sender.round_trip_ms],
@@ -338,6 +344,7 @@ def run_hot_path_release_gate(
     """Run the scenario ``repeat_count`` times against ``checkout_root``; metrics are per-metric medians."""
     checkout_root = checkout_root.resolve()
     sidecar_binary = build_rust_sidecar_binary_in(checkout_root)
+    gate_config = HotPathGateConfig()
     runs = []
     for run_index in range(repeat_count):
         run_dir = work_dir / f"run-{run_index}"
@@ -357,9 +364,7 @@ def run_hot_path_release_gate(
         "scenario": scenario.to_json_dict(),
         "repeat_count": repeat_count,
         "observer_complete": all(observer_was_complete(run["components"]) for run in runs),
-        "metrics": aggregate_repeated_run_metrics(
-            [run["metrics"] for run in runs], HotPathGateConfig().metric_tolerances
-        ),
+        "metrics": aggregate_repeated_run_metrics([run["metrics"] for run in runs], gate_config.metric_tolerances),
         "runs": runs,
     }
 

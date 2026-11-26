@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 
 from minimappr.core.onset_classification_node import classification_capable_cluster
@@ -134,6 +136,7 @@ def test_flat_far_profile_becomes_bearing_projected_with_honest_radial_spread() 
     assert support.interval_m[0] <= support.peak_range_m <= support.interval_m[1]
     radial_std = np.sqrt(np.asarray(judged.covariance_m2)[0][0])
     assert radial_std > 300.0
+    assert support.open_far_side and judged.range_lower_bound_m == support.interval_m[0] < 70.0
 
 
 def test_peaked_profile_keeps_range_and_pulls_runaway_lm_back() -> None:
@@ -146,6 +149,69 @@ def test_peaked_profile_keeps_range_and_pulls_runaway_lm_back() -> None:
     )
     assert judged.range_projection_mode == RANGE_REFINED
     assert abs(np.linalg.norm(judged.position_m) - 12.0) < 1.0
+    assert not support.open_near_side and not support.open_far_side
+    assert judged.range_lower_bound_m is None
+
+
+# Server defaults (OnsetSrpClusteringConfig), cone included: the review's probe settings.
+STANDARD_PROFILE = RangeProfileSettings(
+    min_range_m=0.5, max_range_m=1000.0, sample_count=96, cone_half_angle_deg=3.0, cone_step_deg=1.0,
+    support_ratio=0.9, max_interval_ratio=2.0, interval_floor_m=10.0,
+)
+
+
+def _rising_tail(points: np.ndarray) -> np.ndarray:
+    return np.linalg.norm(points, axis=1)
+
+
+def _support_with_limit(score_points, max_range_m: float, admissible_mask=None):
+    settings = dataclasses.replace(STANDARD_PROFILE, max_range_m=max_range_m)
+    return range_support_along_bearing(
+        np.array([50.0, 0, 0]), np.zeros(3), score_points=score_points, settings=settings, admissible_mask=admissible_mask
+    )
+
+
+def _judge(support):
+    return judge_range_from_profile(
+        position_m=np.array([50.0, 0, 0]), covariance_m2=np.eye(3).tolist(), range_projection_mode=RANGE_REFINED,
+        range_observability=0.9, origin_m=np.zeros(3), support=support,
+    )
+
+
+def test_review_probe_rising_tail_clipped_at_search_limit_is_a_lower_bound_not_a_range() -> None:
+    # Review probe: still rising at 1000 m gave 923-1000 m, which passes the width test alone.
+    support = _support_with_limit(_rising_tail, 1000.0)
+    near_m, far_m = support.interval_m
+    assert abs(near_m - 923.0) < 1.0 and far_m == 1000.0 and far_m <= 2.0 * near_m
+    assert support.open_far_side and not support.open_near_side
+    assert not support.observable
+    judged = _judge(support)
+    assert judged.range_projection_mode == RANGE_BEARING_PROJECTED
+    assert judged.range_lower_bound_m == near_m
+    assert judged.range_interval_m == support.interval_m
+
+
+def test_moving_the_search_limit_never_makes_a_rising_tail_observable() -> None:
+    for max_range_m in (100.0, 250.0, 923.0, 1000.0, 1500.0, 5000.0, 20000.0):
+        support = _support_with_limit(_rising_tail, max_range_m)
+        assert support.open_far_side and not support.observable, (max_range_m, support.interval_m)
+        assert support.range_lower_bound_m == support.interval_m[0]
+
+
+def test_flat_profile_is_open_both_sides_without_a_lower_bound() -> None:
+    support = _support_with_limit(lambda points: np.ones(len(points)), 1000.0)
+    assert support.open_near_side and support.open_far_side and not support.observable
+    judged = _judge(support)
+    assert judged.range_projection_mode == RANGE_BEARING_PROJECTED
+    assert judged.range_lower_bound_m is None
+
+
+def test_admissibility_prior_closes_the_far_side_of_a_rising_tail() -> None:
+    # Beyond 400 m every cone sample is inadmissible (e.g. above the canopy): the prior ends the interval.
+    support = _support_with_limit(
+        _rising_tail, 1000.0, admissible_mask=lambda points: np.linalg.norm(points, axis=1) <= 400.0
+    )
+    assert not support.open_far_side and support.observable and support.interval_m[1] <= 400.0
 
 
 def _cluster(position, mode, interval=None, status=CLUSTER_STATUS_ACCEPTED, node="n1"):

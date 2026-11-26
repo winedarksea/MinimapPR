@@ -741,6 +741,21 @@ class BirdEntityBearing(BaseModel):
     range_max_m: float | None = None
 
 
+class DetectionSolveBearing(BirdEntityBearing):
+    """Solve-time bearing on a detection (``feature_summary["localization_solve_bearing"]``).
+
+    Origin is the contributing-sensor centroid the solver projected from (not
+    the reporting node), so every reporter of one solve states the same ray;
+    ``origin_node_id`` names the reporter. Half width is the covariance's
+    tangential spread; ``range_observable`` False means the stored position is
+    a placeholder along the ray.
+    """
+
+    elevation_deg: float
+    range_projection_mode: str | None = None
+    range_observable: bool
+
+
 class BirdEntityUncertaintyEllipse(BaseModel):
     semi_major_m: float
     semi_minor_m: float

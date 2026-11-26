@@ -223,11 +223,6 @@ KNOWN_PIPELINE_GAPS: dict[str, str] = {
 # Cells that both passed and failed across full-matrix runs (opt-in only):
 # non-strict, so they neither hide nor break the run.
 KNOWN_FLAKY_CELLS: dict[str, str] = {
-    "100m-four_node_spread-gps_locked-hand_measured": (
-        f"flaky after M4 ({_SPREAD_FAR_FIELD}): passes when tetra-b reports (65 m off, bearing right, inside the "
-        "now-widened covariance), stored omni (render fallback) when tetra-d reports; 1 of 3 runs on the M4 head "
-        "passed, so it left the default diagonal (100m-single_tetra-gps_locked-hand_measured took its place)"
-    ),
     "1m-planar_point_coplanar-gps_locked-gps": "flaky: the 6-sensor solve's range claim comes and goes run to run",
     "1m-four_node_spread-ntp_timed-hand_measured": (
         "flaky: sometimes stored omni (passes), sometimes a 0.4-1.2 m-off 3-D fix with stated std 0.05-0.08 m"
@@ -400,3 +395,70 @@ def test_range_matrix_diagonal_cell(monkeypatch, tmp_path: Path, cell_id: str) -
 )
 def test_range_matrix_full_cell(monkeypatch, tmp_path: Path, cell_id: str) -> None:
     _run_and_assert_cell(monkeypatch, tmp_path, CELLS_BY_ID[cell_id])
+
+
+# ---- reporter independence ----------------------------------------------------------------
+
+# Was reporter-dependent: an absolute-RMS trigger on the nearest node (tetra-d)
+# kept the frame-anchored window, which ended before the farther nodes'
+# arrivals (garbage solve, omni render fallback), while tetra-b's relative
+# trigger started its window at the onset. Both gates now start it at the onset.
+REPORTER_INDEPENDENCE_CELL_ID = "100m-four_node_spread-gps_locked-hand_measured"
+REPORTER_INDEPENDENCE_BEARING_TOLERANCE_DEG = 1.0
+
+
+def _event_solve_bearings(event_detections: list[dict]) -> list[dict]:
+    return [
+        detection["feature_summary"]["localization_solve_bearing"]
+        for detection in event_detections
+        if (detection.get("feature_summary") or {}).get("localization_solve_bearing") is not None
+    ]
+
+
+@pytest.mark.skipif(os.environ.get(FULL_MATRIX_ENV) != "1", reason=f"full range matrix is opt-in ({FULL_MATRIX_ENV}=1)")
+def test_range_matrix_cell_does_not_depend_on_the_reporting_node(tmp_path: Path) -> None:
+    from tests.range_matrix_lead_reporter import lead_reporter_uploads
+    from tests.range_matrix_live_run import run_range_matrix_cell
+
+    cell = CELLS_BY_ID[REPORTER_INDEPENDENCE_CELL_ID]
+    guaranteed, _max_honest = EXPECTED_PASS_CLASSES[cell.cell_id]
+    bearings_by_reporter: dict[str, dict] = {}
+    for reported in realize_cell(cell).reported_nodes:
+        lead_node_id = reported.scene_node.node_id
+        run_directory = tmp_path / lead_node_id
+        run_directory.mkdir()
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            lead_reporter_uploads(monkeypatch, lead_node_id)
+            result = run_range_matrix_cell(monkeypatch, run_directory, cell)
+        outcome = result.outcome
+        event_detections = result.event_detections or []
+        # The forcing itself must have worked, or the comparison says nothing.
+        assert {detection.get("source_node_id") for detection in event_detections} == {lead_node_id}, (
+            lead_node_id,
+            outcome.detection_lines,
+        )
+        assert not outcome.violations, (lead_node_id, outcome.violations, outcome.detection_lines)
+        assert outcome.achieved_class >= guaranteed, (lead_node_id, outcome.detection_lines)
+        bearings = _event_solve_bearings(event_detections)
+        assert bearings, (lead_node_id, outcome.detection_lines)
+        bearings_by_reporter[lead_node_id] = bearings[0]
+        print(
+            f"[range-matrix] reporter {lead_node_id}: bearing {bearings[0]['bearing_deg']:.2f} deg "
+            f"+-{bearings[0]['half_width_deg']:.2f}, elevation {bearings[0]['elevation_deg']:.2f} deg, "
+            f"range {bearings[0]['range_projection_mode']}; {outcome.detection_lines}"
+        )
+    reference_node_id, reference = next(iter(bearings_by_reporter.items()))
+    for lead_node_id, bearing in bearings_by_reporter.items():
+        bearing_difference_deg = abs((bearing["bearing_deg"] - reference["bearing_deg"] + 180.0) % 360.0 - 180.0)
+        assert bearing_difference_deg <= REPORTER_INDEPENDENCE_BEARING_TOLERANCE_DEG, (
+            lead_node_id,
+            reference_node_id,
+            bearing,
+            reference,
+        )
+        assert bearing["elevation_deg"] == pytest.approx(
+            reference["elevation_deg"], abs=REPORTER_INDEPENDENCE_BEARING_TOLERANCE_DEG
+        )
+        assert bearing["origin_position_m"] == pytest.approx(reference["origin_position_m"])
+        assert bearing["range_projection_mode"] == reference["range_projection_mode"]
+        assert bearing["range_observable"] == reference["range_observable"]

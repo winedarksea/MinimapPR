@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use super::*;
 use minimappr_core::stage1::noise_floor_relative_trigger::{
-    NoiseFloorRelativeTrigger, RelativeTriggerConfig,
+    peak_short_block_rms, NoiseFloorRelativeTrigger, RelativeTriggerConfig,
 };
 
 const NANOSECONDS_PER_SECOND_F64: f64 = 1_000_000_000.0;
@@ -47,6 +47,9 @@ pub(crate) struct LocalizationEventTrigger {
     /// `<= 0` disables the energy check, so every frame passes the absolute gate.
     absolute_rms_gate: f32,
     noise_floor_relative_enabled: bool,
+    /// `Some(block seconds)` when the short-block excess candidate is on
+    /// (only consulted with the relative trigger on).
+    short_block_seconds: Option<f64>,
     node_noise_floors: NoiseFloorRelativeTrigger,
     last_dispatched_trigger_by_stream: HashMap<String, DispatchedTrigger>,
     /// Per node: the firmware boot session and receipt time of its last frame,
@@ -94,6 +97,10 @@ impl LocalizationEventTrigger {
             noise_floor_relative_enabled: config
                 .localization_solve
                 .localization_trigger_noise_floor_relative_enabled,
+            short_block_seconds: config
+                .localization_solve
+                .localization_trigger_short_block_excess_enabled
+                .then_some(config.localization_solve.localization_trigger_short_block_seconds),
             node_noise_floors: NoiseFloorRelativeTrigger::new(relative_trigger_config),
             last_dispatched_trigger_by_stream: HashMap::new(),
             node_floor_sessions: HashMap::new(),
@@ -165,10 +172,19 @@ impl LocalizationEventTrigger {
             .fold(0.0, f64::max);
         // The bar this frame is judged against, before the frame moves the floor.
         let trigger_level_rms = self.node_noise_floors.trigger_level_rms(node_id);
-        let relatively_loud = self
-            .node_noise_floors
-            .observe(node_id, frame_rms, frame_seconds)
-            && self.noise_floor_relative_enabled;
+        // Off (or relative off): `None`, so the floors evolve exactly as before.
+        let frame_peak_short_block_rms = self
+            .short_block_seconds
+            .filter(|_| self.noise_floor_relative_enabled)
+            .map(|block_seconds| {
+                peak_short_block_rms(channels, f64::from(sample_rate_hz), block_seconds)
+            });
+        let relatively_loud = self.node_noise_floors.observe_with_short_blocks(
+            node_id,
+            frame_rms,
+            frame_seconds,
+            frame_peak_short_block_rms,
+        ) && self.noise_floor_relative_enabled;
         let onset_offset_seconds = trigger_level_rms
             .filter(|_| relatively_loud)
             .and_then(|level_rms| event_onset_offset_seconds(channels, sample_rate_hz, level_rms));

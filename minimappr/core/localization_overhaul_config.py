@@ -55,6 +55,10 @@ DEFAULT_LOCALIZATION_TRIGGER_NOISE_FLOOR_RELATIVE_ENABLED = True
 # Shared with the Python-ingest ``trigger_noise_floor_relative_snr_db`` so both
 # ingest paths admit the same events by default.
 DEFAULT_NOISE_FLOOR_RELATIVE_TRIGGER_SNR_DB = 8.0
+# Short-block excess candidate (both ingest paths, default off): 5 ms resolves a
+# chip inside a 20 ms frame while a block still holds 240 samples at 48 kHz, so
+# its noise-RMS spread stays ~0.4 dB (docs/faint_call_admission_results.md).
+DEFAULT_TRIGGER_SHORT_BLOCK_SECONDS = 0.005
 # The relative trigger only admits windows >= its SNR above the floor, so a
 # solver floor 3 dB above the noise floor never rejects an admitted faint event
 # while still rejecting dead or muted channels.
@@ -107,6 +111,13 @@ DEFAULT_SIDECAR_GEOMETRY_RECONCILE_INTERVAL_SECONDS = 30.0
 DEFAULT_LOCALIZED_HANDOFF_DUPLICATE_MERGE_MAX_SEPARATION_M = 15.0
 DEFAULT_POSITION_OBSERVATION_QUEUE_MAX_ITEMS = 1024
 DEFAULT_POINT_NETWORK_CLIP_CLASSIFICATION_ENABLED = True
+# The sidecar renders omni audio (fallback "low_localization_confidence") below
+# this solve confidence; Settings.min_localization_confidence, forwarded to Rust.
+DEFAULT_MIN_LOCALIZATION_CONFIDENCE = 0.20
+# An omni-audio render's srp_phat solve joins the spatial/tracker path only at or
+# above this. Defaults to the sidecar's own render threshold: promoting every
+# sub-threshold steering direction put noise-only solves onto tracks (E5/E7).
+DEFAULT_OMNI_AUDIO_BEARING_MIN_LOCALIZATION_CONFIDENCE = DEFAULT_MIN_LOCALIZATION_CONFIDENCE
 
 # An unclassified fix may start a track that stays hidden until classified, or
 # must wait for a classification before any track starts.
@@ -134,6 +145,8 @@ RUST_FORWARDED_LOCALIZATION_SETTING_KEYS: tuple[str, ...] = (
     "localization_timeline_drift_slew_fraction",
     "localization_trigger_noise_floor_relative_enabled",
     "localization_trigger_noise_floor_relative_db",
+    "localization_trigger_short_block_excess_enabled",
+    "localization_trigger_short_block_seconds",
     "localization_solver_floor_relative_db",
     "localization_sensor_registry_stale_seconds",
     "localization_coverage_delivery_margin_seconds",
@@ -150,6 +163,7 @@ PYTHON_ONLY_LOCALIZATION_OVERHAUL_SETTING_KEYS: tuple[str, ...] = (
     "position_observation_unclassified_track_policy",
     *POSITION_OBSERVATION_P5_SETTING_KEYS,
     "point_network_clip_classification_enabled",
+    "omni_audio_bearing_min_localization_confidence",
 )
 LOCALIZATION_OVERHAUL_SETTING_KEYS: tuple[str, ...] = (
     RUST_FORWARDED_LOCALIZATION_SETTING_KEYS + PYTHON_ONLY_LOCALIZATION_OVERHAUL_SETTING_KEYS
@@ -210,6 +224,9 @@ def localization_overhaul_setting_errors(settings) -> list[str]:
         errors.append("localization_solver_floor_relative_db must be finite")
     if settings.localization_timestamp_step_confirm_frames < 1:
         errors.append("localization_timestamp_step_confirm_frames must be >= 1")
+    omni_audio_bearing_floor = settings.omni_audio_bearing_min_localization_confidence
+    if not (math.isfinite(omni_audio_bearing_floor) and 0.0 <= omni_audio_bearing_floor <= 1.0):
+        errors.append("omni_audio_bearing_min_localization_confidence must be in [0, 1]")
     slew_fraction = settings.localization_timeline_drift_slew_fraction
     if not (math.isfinite(slew_fraction) and 0.0 <= slew_fraction <= 1.0):
         errors.append("localization_timeline_drift_slew_fraction must be in [0, 1] (0 disables the slew)")

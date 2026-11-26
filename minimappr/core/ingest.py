@@ -28,7 +28,7 @@ from minimappr.config import FusionConfig, LocalizationConfig
 from minimappr.core.audio_buffer import MultiSensorBuffer
 from minimappr.core.geo import LocalCoordinateFrame
 from minimappr.core.ingest_health import IngestHealthClassifier, runner_stats_from_timing_diagnostics
-from minimappr.core.ingest_relative_trigger import NoiseFloorRelativeTrigger
+from minimappr.core.ingest_relative_trigger import NoiseFloorRelativeTrigger, peak_short_block_rms
 from minimappr.core.ingest_same_event_gate import IngestTrigger, SameEventTriggerGate, default_same_event_gate
 from minimappr.core.live_ingest_state import FrameIdentity, LiveIngestState
 from minimappr.core.node_registry import NodeRegistry
@@ -159,11 +159,16 @@ class IngestProcessor:
         node_position_kde_rejection_streak_reset: int = 60,
         gps_2d_altitude_mode: str = "site_origin",
         relative_trigger: NoiseFloorRelativeTrigger | None = None,
+        relative_trigger_short_block_seconds: float | None = None,
         same_event_gate: SameEventTriggerGate | None = None,
     ) -> None:
         self._localization_config = localization_config
         # Field Mode W3-attribution: optional noise-floor-relative trigger, OR'd with trigger_rms.
         self._relative_trigger = relative_trigger
+        # Short-block excess candidate (None = off): only consulted with the relative trigger on.
+        self._relative_trigger_short_block_seconds = (
+            relative_trigger_short_block_seconds if relative_trigger is not None else None
+        )
         self._fusion_config = fusion_config
         self._registry = registry
         self._buffer = buffer
@@ -578,7 +583,9 @@ class IngestProcessor:
         # Concurrent-ingest audit measured this at ~1 ms on a 32-channel frame —
         # not catastrophic, but worth keeping off the event loop alongside the
         # other to_thread'd hot-path numpy work.
-        frame_energy = await asyncio.to_thread(trigger_rms, processed)
+        frame_energy, frame_peak_short_block_rms = await asyncio.to_thread(
+            self._frame_trigger_levels, processed, frame.sample_rate_hz
+        )
         await self._publish_audio_summary_if_due(
             node_id=normalized_node.id,
             sensor_ids=list(runtime.sensor_ids),
@@ -619,7 +626,10 @@ class IngestProcessor:
         )
 
         relatively_loud = self._relative_trigger is not None and self._relative_trigger.observe(
-            normalized_node.id, frame_energy, processed.shape[1] / frame.sample_rate_hz
+            normalized_node.id,
+            frame_energy,
+            processed.shape[1] / frame.sample_rate_hz,
+            frame_peak_short_block_rms,
         )
         triggered = False
         if (
@@ -666,6 +676,13 @@ class IngestProcessor:
             sequence_gap_count=sequence_gap_count,
             trigger=trigger if triggered else None,
         )
+
+    def _frame_trigger_levels(self, processed: np.ndarray, sample_rate_hz: int) -> tuple[float, float | None]:
+        """Strongest-channel frame RMS, and the loudest short block when that candidate is on."""
+        frame_energy = trigger_rms(processed)
+        if self._relative_trigger_short_block_seconds is None:
+            return frame_energy, None
+        return frame_energy, peak_short_block_rms(processed, sample_rate_hz, self._relative_trigger_short_block_seconds)
 
     async def _publish_audio_summary_if_due(
         self,

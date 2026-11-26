@@ -51,6 +51,11 @@ pub struct LocalizationSolveConfig {
     pub localization_timeline_drift_slew_fraction: f64,
     pub localization_trigger_noise_floor_relative_enabled: bool,
     pub localization_trigger_noise_floor_relative_db: f32,
+    /// Also judge each frame's loudest `localization_trigger_short_block_seconds`
+    /// block against the node floor (OR'd; only with the relative trigger on),
+    /// so a call shorter than a frame is not diluted by its quiet remainder.
+    pub localization_trigger_short_block_excess_enabled: bool,
+    pub localization_trigger_short_block_seconds: f64,
     /// Reference-channel RMS floor relative to the node's tracked noise floor.
     /// Kept under the relative trigger's margin so a window the trigger admits
     /// is not then rejected by the solver.
@@ -91,6 +96,8 @@ impl Default for LocalizationSolveConfig {
             localization_timeline_drift_slew_fraction: 0.5,
             localization_trigger_noise_floor_relative_enabled: true,
             localization_trigger_noise_floor_relative_db: 8.0,
+            localization_trigger_short_block_excess_enabled: false,
+            localization_trigger_short_block_seconds: 0.005,
             localization_solver_floor_relative_db: 3.0,
             localization_sensor_registry_stale_seconds: 120.0,
             localization_coverage_delivery_margin_seconds: 1.0,
@@ -214,6 +221,21 @@ pub struct LocalizationSolveArgs {
 
     #[arg(
         long,
+        env = "MINIMAPPR_LOCALIZATION_TRIGGER_SHORT_BLOCK_EXCESS_ENABLED",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    localization_trigger_short_block_excess_enabled: bool,
+
+    #[arg(
+        long,
+        env = "MINIMAPPR_LOCALIZATION_TRIGGER_SHORT_BLOCK_SECONDS",
+        default_value_t = 0.005
+    )]
+    localization_trigger_short_block_seconds: f64,
+
+    #[arg(
+        long,
         env = "MINIMAPPR_LOCALIZATION_SOLVER_FLOOR_RELATIVE_DB",
         default_value_t = 3.0,
         allow_negative_numbers = true
@@ -290,6 +312,9 @@ impl LocalizationSolveArgs {
                 .localization_trigger_noise_floor_relative_enabled,
             localization_trigger_noise_floor_relative_db: self
                 .localization_trigger_noise_floor_relative_db,
+            localization_trigger_short_block_excess_enabled: self
+                .localization_trigger_short_block_excess_enabled,
+            localization_trigger_short_block_seconds: self.localization_trigger_short_block_seconds,
             localization_solver_floor_relative_db: self.localization_solver_floor_relative_db,
             localization_sensor_registry_stale_seconds: self
                 .localization_sensor_registry_stale_seconds,

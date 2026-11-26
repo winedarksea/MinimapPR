@@ -164,6 +164,9 @@ pub struct LocalizedOnsetCluster {
     pub height_resolution: Option<String>,
     /// SRP-supported range interval (m from the layout centroid); None = not judged.
     pub range_interval_m: Option<(f64, f64)>,
+    /// Near edge of a far-open range interval (profile still rising at the search
+    /// limit); None = range bounded on both sides or not judged.
+    pub range_lower_bound_m: Option<f64>,
     /// Per-node level evidence for attribution (S5); None unless requested.
     pub attribution_evidence: Option<ClusterAttributionEvidence>,
 }

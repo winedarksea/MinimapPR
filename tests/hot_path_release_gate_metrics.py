@@ -12,9 +12,10 @@ from tests.hot_path_release_gate_probes import (
     account_raw_audio_forwarding,
     node_id_for_stream_key,
 )
-from tests.hot_path_release_gate_scenario import HotPathScenario, ScheduledPost
+from tests.hot_path_release_gate_scenario import HotPathScenario, ScheduledPost, call_arrival_windows_seconds
 
 NANOSECONDS_PER_MILLISECOND = 1_000_000
+NANOSECONDS_PER_SECOND = 1_000_000_000
 LATENCY_PERCENTILES = (50, 95)
 SQLITE_SUFFIXES = (".db", ".db-wal", ".db-shm", ".sqlite3", ".sqlite3-wal", ".sqlite3-shm")
 CONFIG_SUFFIXES = (".yml", ".yaml", ".json")
@@ -25,6 +26,8 @@ class GateRunCapture:
     """Everything one run observed; filled by the runner, consumed by ``assemble_gate_metrics``."""
 
     scenario: HotPathScenario
+    # Wall-clock ns of the scenario's sample 0 (frame timestamps are built from it).
+    scenario_start_time_ns: int
     posts: list[ScheduledPost]
     accepted_monotonic_ns_by_post: dict[tuple[str, int], int]
     post_round_trip_ms: list[float]
@@ -86,6 +89,55 @@ def app_counters(fusion_status: dict, diagnostics: dict) -> dict[str, int]:
     }
 
 
+@dataclass(frozen=True)
+class KnownCallDetectionAccounting:
+    known_call_count: int
+    detected_known_call_count: int
+    # Stored detections attributable to no call (outside the scenario's calls, or no event time).
+    unmatched_detection_count: int
+
+
+def account_known_call_detections(
+    scenario: HotPathScenario, scenario_start_time_ns: int, detections: list
+) -> KnownCallDetectionAccounting:
+    """Count the scenario's known calls that reached at least one stored detection.
+
+    Each detection is attributed to the call whose arrival window is nearest
+    its event time (``timestamp_ns``), if within half the call interval.
+    Stored event times are quantized to the analysis block, not the onset:
+    measured offsets from the arrival window run from ~0.6 s early to ~0.5 s
+    late, so a tight window would reject real calls; nearest-call attribution
+    is the resolution the server's timestamps support. Counting calls rather
+    than rows keeps duplicate rows of one call (omni + localized) from
+    counting twice; detections outside the scenario's calls stay unmatched.
+    """
+    attribution_limit_ns = int(scenario.event_interval_seconds / 2.0 * NANOSECONDS_PER_SECOND)
+    windows_ns = [
+        (
+            scenario_start_time_ns + int(start_s * NANOSECONDS_PER_SECOND),
+            scenario_start_time_ns + int(end_s * NANOSECONDS_PER_SECOND),
+        )
+        for start_s, end_s in call_arrival_windows_seconds(scenario)
+    ]
+    if not windows_ns:
+        # No calls to attribute to: every stored detection is unmatched.
+        return KnownCallDetectionAccounting(0, 0, len(detections))
+    detected_call_indices: set[int] = set()
+    unmatched_detection_count = 0
+    for detection in detections:
+        event_time_ns = detection.get("timestamp_ns") if isinstance(detection, dict) else None
+        if event_time_ns is None:
+            unmatched_detection_count += 1
+            continue
+        distances_ns = [max(start_ns - int(event_time_ns), int(event_time_ns) - end_ns, 0) for start_ns, end_ns in windows_ns]
+        nearest_index = min(range(len(windows_ns)), key=distances_ns.__getitem__)
+        if distances_ns[nearest_index] <= attribution_limit_ns:
+            detected_call_indices.add(nearest_index)
+        else:
+            unmatched_detection_count += 1
+    return KnownCallDetectionAccounting(len(windows_ns), len(detected_call_indices), unmatched_detection_count)
+
+
 def classify_disk_writes(written_bytes_by_path: dict[str, int], snippet_root: str) -> tuple[dict[str, int], dict[str, int]]:
     """Split new/grown files into (raw audio, detection snippets).
 
@@ -106,6 +158,7 @@ def classify_disk_writes(written_bytes_by_path: dict[str, int], snippet_root: st
 def assemble_gate_metrics(capture: GateRunCapture) -> tuple[dict, dict]:
     """Return (metrics compared by the gate, components kept for diagnosis)."""
     scenario = capture.scenario
+    known_calls = account_known_call_detections(scenario, capture.scenario_start_time_ns, capture.detections)
     total_sample_count = int(round(scenario.duration_seconds * scenario.sample_rate_hz))
     posted_spans_by_node: dict[str, list[tuple[int, int]]] = {node.node_id: [] for node in scenario.nodes}
     for post in capture.posts:
@@ -144,6 +197,7 @@ def assemble_gate_metrics(capture: GateRunCapture) -> tuple[dict, dict]:
         "raw_audio_disk_files_written": len(raw_audio_writes),
         "detection_snippet_bytes_written": int(sum(snippet_writes.values())),
         "detection_count": len(capture.detections),
+        "known_call_detection_count": known_calls.detected_known_call_count,
         "classification_backlog_drop_count": counters["classification_drops"] + counters["stage_drops_backpressure"],
         "classification_max_completed_lag_seconds": (capture.fusion_status.get("realtime") or {}).get(
             "max_completed_lag_seconds"
@@ -166,6 +220,9 @@ def assemble_gate_metrics(capture: GateRunCapture) -> tuple[dict, dict]:
         "observer_malformed_events": capture.observations.malformed_event_count,
         "observer_stream_error": capture.observations.stream_error,
         "raw_audio_written_paths": sorted(raw_audio_writes)[:20],
+        "scenario_start_time_ns": capture.scenario_start_time_ns,
+        "scenario_known_call_count": known_calls.known_call_count,
+        "unmatched_detection_count": known_calls.unmatched_detection_count,
     }
     return metrics, components
 
@@ -183,7 +240,8 @@ def aggregate_repeated_run_metrics(per_run_metrics: list[dict], tolerances: dict
     """Per-metric aggregate over repeated runs.
 
     Median damps shared-machine timing noise; metrics whose tolerance asks for
-    the worst case (zero-tolerance counters) take the max so one bad run fails.
+    the worst case take the worst run (max for counters, min for floor metrics
+    such as known-call detections) so one bad run fails.
     """
     tolerances = tolerances or {}
     merged: dict = {}
@@ -194,5 +252,5 @@ def aggregate_repeated_run_metrics(per_run_metrics: list[dict], tolerances: dict
             continue
         tolerance = tolerances.get(metric_name)
         worst_case = tolerance is not None and tolerance.aggregate_worst_case_across_runs
-        merged[metric_name] = float(max(values)) if worst_case else float(statistics.median(values))
+        merged[metric_name] = tolerance.worst_run_value(values) if worst_case else float(statistics.median(values))
     return merged

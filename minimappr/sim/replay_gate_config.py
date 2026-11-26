@@ -136,9 +136,21 @@ class HotPathMetricTolerance:
     # Zero-tolerance counters take the worst run: a packet gap or disk write in
     # one of N repeats is a real regression that a median would hide.
     aggregate_worst_case_across_runs: bool = False
+    # Direction of "worse" for that worst run: counters worsen upward (max); a
+    # floor metric such as known-call detections worsens downward (min), so one
+    # run that lost every call fails instead of hiding under the median.
+    higher_is_better: bool = False
     # Wall-clock and allocator metrics only compare on the same hardware; on a
     # different machine they are reported but not gated.
     depends_on_machine: bool = False
+
+    def __post_init__(self) -> None:
+        if self.higher_is_better and self.gated:
+            # The baseline comparison is an upper bound; a floor metric is judged elsewhere.
+            raise ValueError("higher_is_better metrics must be gated=False")
+
+    def worst_run_value(self, values: list[float]) -> float:
+        return float(min(values)) if self.higher_is_better else float(max(values))
 
     def allowed_maximum(self, baseline_value: float) -> float:
         allowed = baseline_value * (1.0 + self.max_relative_increase) + self.max_absolute_increase
@@ -172,8 +184,13 @@ def _default_hot_path_tolerances() -> dict[str, HotPathMetricTolerance]:
         "raw_audio_out_of_order_span_count": HotPathMetricTolerance(gated=False),
         "solve_count": HotPathMetricTolerance(gated=False),
         "detection_count": HotPathMetricTolerance(gated=False),
+        # Judged against HotPathGateConfig's absolute floor, not the baseline:
+        # a baseline that lost every call must not license a candidate to.
+        # Worst run = fewest calls stored: a zero-call run in three must fail.
+        "known_call_detection_count": HotPathMetricTolerance(gated=False, higher_is_better=True, **counter),
         "detection_snippet_bytes_written": HotPathMetricTolerance(gated=False),
-        "classification_backlog_drop_count": HotPathMetricTolerance(gated=False),
+        # Judged against HotPathGateConfig's absolute budget; worst run, like the other drop counters.
+        "classification_backlog_drop_count": HotPathMetricTolerance(gated=False, **counter),
         "classification_max_completed_lag_seconds": HotPathMetricTolerance(gated=False),
     }
 
@@ -186,6 +203,15 @@ class HotPathGateConfig:
     # A candidate that lost this fraction of the baseline's solves is not
     # measuring the same workload; its latency percentiles would be misleading.
     min_candidate_solve_count_fraction: float = 0.5
+    # A healthy solve stream whose render handoff loses every classification
+    # stores nothing; solve and latency metrics alone pass that. The slow
+    # classifier deliberately backlogs, so only a few of the full scenario's
+    # 27 calls are stored (baseline commit: 4-7 per run); the floor asks that
+    # the classification path delivers at all, not a recall figure.
+    min_candidate_known_call_detection_count: int = 1
+    # Drop-oldest classification backlog: each drop is a lost call. Same slack
+    # as the ingest queue-drop counter; the recorded baseline drops none.
+    max_candidate_classification_backlog_drop_count: int = 2
 
 
 @dataclass(frozen=True)

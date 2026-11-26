@@ -194,9 +194,10 @@ def load_localized_render_manifest_bundle(
 
     if isinstance(localization_payload, dict) and isinstance(localization_payload.get("position_m"), list):
         localization_fields = sidecar_localization_request_fields(localization_payload)
-        # The classifier render's fallback contract overrides the retained solver
-        # diagnostics. An omni PCM render must be reported at its node, not at a
-        # speculative localization vector carried alongside it.
+        # The render's audio modality: an omni fallback render is omni PCM. The
+        # retained solve is kept; the handoff decides its spatial status
+        # (core/handoff_spatial_status.py: a qualified srp_phat bearing is gated
+        # like a localized render, anything else is placed at the node).
         reporting_modality: Literal["localized", "omni"] = (
             "omni"
             if render_kind == "birdnet_omni_fallback" or fallback_reason is not None

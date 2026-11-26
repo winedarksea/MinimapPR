@@ -32,6 +32,14 @@ from minimappr.api.rust_dsp_manifests import LocalizedClassifierRenderRequest
 from minimappr.api.rust_solve_contract_degradation import SOLVE_CONTRACT_VIOLATION_FALLBACK_REASON
 from minimappr.core.bounded_recent_ids import BoundedRecentIds
 from minimappr.core.fusion_stage_carriers import EventCandidate, LocalizationBranch, LocalizedCandidate
+from minimappr.core.handoff_spatial_status import (
+    CLASSIFICATION_AUDIO_MODALITY_FEATURE_KEY,
+    LOCALIZATION_SOLVE_BEARING_FEATURE_KEY,
+    handoff_spatial_modality,
+    omni_audio_bearing_below_confidence_floor,
+    render_audio_modality,
+    solve_time_bearing,
+)
 from minimappr.core.localized_handoff_geometry import (
     SOLVE_REJECTED_LEGACY_SENSOR_MAP_UNAVAILABLE,
     legacy_pair_indices_exceed_registry_sensors,
@@ -66,7 +74,6 @@ if TYPE_CHECKING:
     from minimappr.core.fusion_node import FusionNode
 
 RUST_CLASSIFIER_RENDER_AUDIO_QUALITY_SOURCE = "rust_classifier_render"
-BIRDNET_OMNI_FALLBACK_RENDER_KIND = "birdnet_omni_fallback"
 
 
 @dataclass(slots=True)
@@ -78,6 +85,7 @@ class _HandoffSolve:
     geometry: HandoffSolveGeometry
     estimate: HandoffLocalizationEstimate
     gating: HandoffGatingOutcome
+    # Spatial status after the gates; the clip's own modality is ``render_audio_modality``.
     reporting_modality: str
     rust_extra_features: dict[str, Any]
 
@@ -104,8 +112,16 @@ class LocalizedRenderHandoff:
             host._record_silent_drop(
                 stage="localization", reason=SOLVE_CONTRACT_VIOLATION_FALLBACK_REASON, source_node_id=solve.node.id
             )
+        audio_modality = render_audio_modality(payload)
+        solve.rust_extra_features[CLASSIFICATION_AUDIO_MODALITY_FEATURE_KEY] = audio_modality
+        if omni_audio_bearing_below_confidence_floor(
+            payload, min_localization_confidence=host.settings.omni_audio_bearing_min_localization_confidence
+        ):
+            host._metrics.omni_audio_render_bearing_below_confidence_floor_count += 1
         if solve.reporting_modality == "omni":
             replace_estimate_with_node_position(host, solve.estimate, solve.registered_node)
+        elif audio_modality == "omni":
+            host._metrics.omni_audio_render_bearing_carried_count += 1
         localized_product = await self._localized_product_for_solve(payload, solve, normalized_audio)
         host._record_degraded_audio_quality_metrics(
             candidate=localized_product.candidate,
@@ -178,14 +194,16 @@ class LocalizedRenderHandoff:
         node = self._node_with_local_position(payload)
         counts_solve_outcome = self._first_processing_of_solve(payload)
 
-        # A render may retain the DSP localization payload for diagnostics even
-        # after the sidecar deliberately selected an omni render (e.g. a
-        # low-confidence SRP-PHAT). The render contract is authoritative so an
-        # ill-conditioned solve cannot become a far-away localized track.
-        reporting_modality = payload.reporting_modality
-        if payload.render_kind == BIRDNET_OMNI_FALLBACK_RENDER_KIND or payload.fallback_reason is not None:
-            reporting_modality = "omni"
-        if reporting_modality == "omni" and node.position_m is None:
+        # The clip's audio modality is not the solve's spatial status: an omni
+        # fallback render whose solve still carries a steering direction and
+        # reaches omni_audio_bearing_min_localization_confidence is re-solved
+        # and gated exactly like a localized render. Below the floor it stays
+        # omni at the node, as the sidecar rendered it.
+        reporting_modality = handoff_spatial_modality(
+            payload,
+            omni_audio_bearing_min_localization_confidence=host.settings.omni_audio_bearing_min_localization_confidence,
+        )
+        if render_audio_modality(payload) == "omni" and node.position_m is None:
             raise ValueError("Omni classifier render requires node.position_m")
 
         registered_node, geometry = await self._register_node_and_resolve_geometry(
@@ -247,6 +265,7 @@ class LocalizedRenderHandoff:
             normalized_audio=audio,
             rust_extra_features=solve.rust_extra_features,
         )
+        self._record_solve_time_bearing(solve, localized_product)
         self.collaborators.provenance_recorder.record_handoff_provenance(
             payload=payload,
             geometry=solve.geometry,
@@ -254,6 +273,26 @@ class LocalizedRenderHandoff:
             reporting_modality=solve.reporting_modality,
         )
         return localized_product
+
+    def _record_solve_time_bearing(self, solve: "_HandoffSolve", localized_product: LocalizedCandidate) -> None:
+        """The gated solve's ray, before bearing fusion, on a placed solve only
+        (an omni outcome sits at its node and states no direction)."""
+        centroid_m = solve.gating.contributing_centroid_m
+        if solve.reporting_modality != "localized" or centroid_m is None:
+            return
+        bearing = solve_time_bearing(
+            reporting_node_id=solve.node.id,
+            contributing_centroid_m=centroid_m,
+            position_m=solve.estimate.position_m,
+            covariance_m2=solve.estimate.position_covariance_m2,
+            range_projection_mode=solve.estimate.range_projection_mode,
+            coordinate_frame=self._host.coordinate_frame,
+            settings=self._host.settings,
+        )
+        if bearing is not None:
+            localized_product.extra_classification_features[LOCALIZATION_SOLVE_BEARING_FEATURE_KEY] = (
+                bearing.model_dump(mode="json")
+            )
 
     def _node_with_local_position(self, payload: LocalizedClassifierRenderRequest) -> NodeSpec:
         metadata = dict(payload.node.metadata)
