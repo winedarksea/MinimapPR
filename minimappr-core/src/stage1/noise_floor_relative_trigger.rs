@@ -10,6 +10,13 @@
 //! (~0 dB on steady noise, several dB in gusts), so fluctuating ambience does
 //! not trigger continuously. Callers OR it with their absolute gate. O(1) per
 //! frame; non-finite levels are ignored; per-node state is LRU-capped.
+//!
+//! Short-block excess (default off at every caller): a call shorter than a
+//! frame, or straddling two, is diluted by the frame's quiet remainder. When
+//! the caller passes the frame's loudest short block (`peak_short_block_rms`),
+//! it is judged against the same floor with its own fluctuation allowance and
+//! OR'd with the frame decision; the floor always follows the frame level.
+//! Same semantics as the Python reference.
 
 use std::collections::BTreeMap;
 
@@ -41,6 +48,8 @@ struct NodeFloorState {
     observed_seconds: f64,
     /// Slow mean of max(level − floor, 0) over non-triggering frames.
     mean_excess_db: f64,
+    /// Same, for the loudest short block (only fed when the caller passes one).
+    mean_short_block_excess_db: f64,
     last_used_sequence: u64,
 }
 
@@ -49,6 +58,42 @@ pub struct NoiseFloorRelativeTrigger {
     config: RelativeTriggerConfig,
     floor_by_node: BTreeMap<String, NodeFloorState>,
     use_sequence: u64,
+}
+
+/// Samples per short block: `floor(seconds * rate + 0.5)`, at least 1 (the
+/// Python reference rounds the same way, not half-to-even).
+pub fn short_block_samples(sample_rate_hz: f64, block_seconds: f64) -> usize {
+    ((block_seconds * sample_rate_hz + 0.5).floor()).max(1.0) as usize
+}
+
+fn mean_square(samples: &[f32]) -> f64 {
+    samples.iter().map(|sample| f64::from(*sample) * f64::from(*sample)).sum::<f64>() / samples.len() as f64
+}
+
+/// Largest RMS over any channel's non-overlapping `block_seconds` blocks.
+/// Blocks start at sample 0; a remainder is covered by one extra block ending
+/// at the last sample, so every block has full length (equal noise variance).
+/// A channel no longer than one block contributes its whole-frame RMS.
+pub fn peak_short_block_rms<C: AsRef<[f32]>>(channels: &[C], sample_rate_hz: f64, block_seconds: f64) -> f64 {
+    let block_samples = short_block_samples(sample_rate_hz, block_seconds);
+    let mut peak_mean_square = 0.0_f64;
+    for channel in channels {
+        let samples = channel.as_ref();
+        if samples.is_empty() {
+            continue;
+        }
+        if block_samples >= samples.len() {
+            peak_mean_square = peak_mean_square.max(mean_square(samples));
+            continue;
+        }
+        for block in samples.chunks_exact(block_samples) {
+            peak_mean_square = peak_mean_square.max(mean_square(block));
+        }
+        if samples.len() % block_samples != 0 {
+            peak_mean_square = peak_mean_square.max(mean_square(&samples[samples.len() - block_samples..]));
+        }
+    }
+    peak_mean_square.sqrt()
 }
 
 fn one_pole_smoothing(step_seconds: f64, time_constant_seconds: f64) -> f64 {
@@ -86,7 +131,22 @@ impl NoiseFloorRelativeTrigger {
     /// Update the node's floor with this frame; true when the frame stands
     /// `snr_db` (+ the fluctuation allowance) above the floor before it.
     pub fn observe(&mut self, node_id: &str, frame_rms: f64, frame_seconds: f64) -> bool {
+        self.observe_with_short_blocks(node_id, frame_rms, frame_seconds, None)
+    }
+
+    /// `observe`, OR'd with the frame's loudest short block (when given)
+    /// standing `snr_db` + its own fluctuation allowance above the floor.
+    pub fn observe_with_short_blocks(
+        &mut self,
+        node_id: &str,
+        frame_rms: f64,
+        frame_seconds: f64,
+        peak_short_block_rms: Option<f64>,
+    ) -> bool {
         if !frame_rms.is_finite() || !frame_seconds.is_finite() {
+            return false;
+        }
+        if peak_short_block_rms.is_some_and(|rms| !rms.is_finite()) {
             return false;
         }
         let config = self.config;
@@ -96,7 +156,13 @@ impl NoiseFloorRelativeTrigger {
         let Some(state) = self.floor_by_node.get_mut(node_id) else {
             self.floor_by_node.insert(
                 node_id.to_string(),
-                NodeFloorState { floor_db: level_db, observed_seconds: frame_seconds, mean_excess_db: 0.0, last_used_sequence: sequence },
+                NodeFloorState {
+                    floor_db: level_db,
+                    observed_seconds: frame_seconds,
+                    mean_excess_db: 0.0,
+                    mean_short_block_excess_db: 0.0,
+                    last_used_sequence: sequence,
+                },
             );
             if self.floor_by_node.len() > MAX_TRACKED_NODE_FLOORS {
                 self.evict_least_recently_used();
@@ -105,14 +171,26 @@ impl NoiseFloorRelativeTrigger {
         };
         state.last_used_sequence = sequence;
         let excess_db = level_db - state.floor_db;
+        let warmed_up = state.observed_seconds >= config.warmup_seconds;
         let required_db = config.snr_db + config.fluctuation_multiplier * state.mean_excess_db;
-        let triggered = state.observed_seconds >= config.warmup_seconds && frame_rms > config.minimum_rms && excess_db >= required_db;
+        let mut triggered = warmed_up && frame_rms > config.minimum_rms && excess_db >= required_db;
+        let short_block_excess_db = peak_short_block_rms.map(|peak_rms| {
+            DECIBELS_PER_AMPLITUDE_DECADE * peak_rms.max(config.minimum_rms).log10() - state.floor_db
+        });
+        if let (Some(peak_rms), Some(block_excess_db)) = (peak_short_block_rms, short_block_excess_db) {
+            let block_required_db = config.snr_db + config.fluctuation_multiplier * state.mean_short_block_excess_db;
+            triggered = triggered || (warmed_up && peak_rms > config.minimum_rms && block_excess_db >= block_required_db);
+        }
         let step_seconds = frame_seconds.max(0.0);
         let time_constant = if excess_db < 0.0 { config.fall_seconds } else { config.rise_seconds };
         state.floor_db += one_pole_smoothing(step_seconds, time_constant) * excess_db;
         if !triggered {
             let excess_smoothing = one_pole_smoothing(step_seconds, config.rise_seconds);
             state.mean_excess_db += excess_smoothing * (excess_db.max(0.0) - state.mean_excess_db);
+            if let Some(block_excess_db) = short_block_excess_db {
+                state.mean_short_block_excess_db +=
+                    excess_smoothing * (block_excess_db.max(0.0) - state.mean_short_block_excess_db);
+            }
         }
         state.observed_seconds += frame_seconds;
         triggered
@@ -158,5 +236,36 @@ mod tests {
         assert_eq!(trigger.tracked_node_count(), 0);
         // The first frame after forgetting seeds the floor and never triggers.
         assert!(!trigger.observe("n", 1.0, frame_seconds));
+    }
+
+    #[test]
+    fn short_block_peak_tiles_full_blocks_and_covers_the_remainder() {
+        // 10 samples, 4-sample blocks: [0..4), [4..8) and the tail block [6..10).
+        let mut channel = vec![0.0_f32; 10];
+        channel[9] = 2.0;
+        let peak = peak_short_block_rms(&[channel.clone()], 4.0, 1.0);
+        assert!((peak - (4.0_f64 / 4.0).sqrt()).abs() < 1e-12);
+        // A block no shorter than the frame is the whole-frame RMS.
+        let whole = peak_short_block_rms(&[channel], 4.0, 5.0);
+        assert!((whole - (4.0_f64 / 10.0).sqrt()).abs() < 1e-12);
+        assert_eq!(peak_short_block_rms::<Vec<f32>>(&[], 48_000.0, 0.005), 0.0);
+    }
+
+    #[test]
+    fn short_block_excess_admits_a_chip_the_frame_mean_dilutes_and_is_otherwise_inert() {
+        let frame_seconds = 0.02;
+        let mut frame_only = NoiseFloorRelativeTrigger::new(RelativeTriggerConfig::default());
+        let mut with_blocks = NoiseFloorRelativeTrigger::new(RelativeTriggerConfig::default());
+        for _ in 0..200 {
+            assert!(!frame_only.observe("n", 1e-4, frame_seconds));
+            // Steady noise: the block peak sits ~1 dB over the frame mean.
+            assert!(!with_blocks.observe_with_short_blocks("n", 1e-4, frame_seconds, Some(1.12e-4)));
+        }
+        // A 5 ms chip 12 dB over the floor: ~6.7 dB diluted to the 20 ms frame mean.
+        let chip_block_rms = 1e-4 * 10f64.powf(12.0 / 20.0);
+        let chip_frame_rms = (1e-8 * 0.75 + chip_block_rms * chip_block_rms * 0.25).sqrt();
+        assert!(!frame_only.observe("n", chip_frame_rms, frame_seconds));
+        assert!(with_blocks.observe_with_short_blocks("n", chip_frame_rms, frame_seconds, Some(chip_block_rms)));
+        assert!(!with_blocks.observe_with_short_blocks("n", 1e-4, frame_seconds, Some(f64::NAN)));
     }
 }

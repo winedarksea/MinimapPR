@@ -492,6 +492,9 @@ class FusionNode:
                 if settings.trigger_noise_floor_relative_enabled
                 else None
             ),
+            relative_trigger_short_block_seconds=(
+                settings.trigger_short_block_seconds if settings.trigger_short_block_excess_enabled else None
+            ),
             same_event_gate=same_event_gate_from_settings(settings),
         )
         self._classification_orchestrator = ClassificationOrchestrator(

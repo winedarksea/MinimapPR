@@ -255,9 +255,20 @@ def build_pipeline_graph(
                         suffix=" x mean excess",
                     )
                 )
+                if settings.trigger_short_block_excess_enabled:
+                    gate_params.append(
+                        _param(
+                            "Short-block excess",
+                            float(settings.trigger_short_block_seconds),
+                            "trigger_short_block_seconds",
+                            suffix=" s blocks",
+                        )
+                    )
             # --- end Field Mode W3-attribution ---
             if omni_min_rms is not None:
                 gate_params.append(_param("Omni min RMS", float(omni_min_rms)))
+            if settings.omni_scan_clearest_channel_gate_enabled:
+                gate_params.append(_param("Omni gate channel", "clearest", "omni_scan_clearest_channel_gate_enabled"))
             gate_params.extend(_settings_params(settings, _LOCALIZATION_OVERHAUL_GATE_PARAM_SPECS))
             add_node(
                 id=gate_id,
@@ -694,6 +705,8 @@ _EVENT_SPAN_GEOMETRY_PARAM_SPECS: tuple[tuple[str, str, str], ...] = (
 _LOCALIZATION_OVERHAUL_GATE_PARAM_SPECS: tuple[tuple[str, str, str], ...] = (
     ("Sidecar relative trigger", "localization_trigger_noise_floor_relative_enabled", ""),
     ("Sidecar trigger over floor", "localization_trigger_noise_floor_relative_db", " dB"),
+    ("Sidecar short-block excess", "localization_trigger_short_block_excess_enabled", ""),
+    ("Sidecar short block", "localization_trigger_short_block_seconds", " s"),
 )
 _LOCALIZATION_OVERHAUL_SOLVE_PARAM_SPECS: tuple[tuple[str, str, str], ...] = (
     ("Max solve sensors", "localization_max_solve_sensors", ""),
