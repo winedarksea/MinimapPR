@@ -32,4 +32,5 @@ object FieldRunEventTypes {
     const val WRITER_OVERFLOW = "writer_overflow"
     const val SESSION_ROUND = "session_round"
     const val SELF_CHIRP = "self_chirp"
+    const val ACTIVE_MICROPHONES = "active_microphones"
 }

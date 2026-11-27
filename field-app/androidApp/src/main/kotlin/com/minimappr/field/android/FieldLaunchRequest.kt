@@ -29,6 +29,8 @@ object FieldLaunchExtras {
     const val BAND_HIGH_HZ = "band_high_hz"
     const val DURATION_S = "duration_s"
     const val CHANNEL = "channel"
+    /** Comma-separated per-emission rotation, e.g. `left,right,both`. */
+    const val CHANNEL_CYCLE = "channel_cycle"
     const val SOURCE = "source"
     const val LEVEL_DBFS = "level_dbfs"
     const val LEAD_MS = "lead_ms"
@@ -105,6 +107,7 @@ private fun parseChirpLab(extras: Bundle, configuration: FieldAppConfiguration):
         channel = ChirpLabWireNames.channel(extras.getString(FieldLaunchExtras.CHANNEL)) ?: defaults.channel,
         captureSource = ChirpLabCaptureSource.fromWireName(extras.getString(FieldLaunchExtras.SOURCE)) ?: defaults.captureSource,
         levelDbfs = extras.number(FieldLaunchExtras.LEVEL_DBFS) ?: defaults.levelDbfs,
+        channelCycle = ChirpLabWireNames.channelCycle(extras.getString(FieldLaunchExtras.CHANNEL_CYCLE)) ?: defaults.channelCycle,
     )
 }
 
@@ -139,6 +142,9 @@ fun FieldLaunchRequest.toExtras(): Bundle = Bundle().apply {
             putString(FieldLaunchExtras.CHANNEL, ChirpLabWireNames.channelName(parameters.channel))
             putString(FieldLaunchExtras.SOURCE, parameters.captureSource.wireName)
             putDouble(FieldLaunchExtras.LEVEL_DBFS, parameters.levelDbfs)
+            if (parameters.channelCycle.isNotEmpty()) {
+                putString(FieldLaunchExtras.CHANNEL_CYCLE, ChirpLabWireNames.channelCycleName(parameters.channelCycle))
+            }
         }
         is FieldLaunchRequest.Session -> request.parameters.let { parameters ->
             putString(FieldLaunchExtras.SESSION_ROLE, parameters.role.wireName)

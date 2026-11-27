@@ -66,11 +66,11 @@ pub fn validate_phone(directory: &Path, label: &str, outcome: &mut ValidationOut
         }
     }
     let emissions = bundle.emissions();
-    let played = emissions.iter().filter(|e| e.3).count();
+    let played = emissions.iter().filter(|e| e.played).count();
     if played == 0 {
         outcome.errors.push(format!("{label}: no played emissions in events.jsonl"));
     }
-    if emissions.iter().any(|e| e.2.is_none()) {
+    if emissions.iter().any(|e| e.target_ns.is_none()) {
         outcome.warnings.push(format!("{label}: some emissions have no target_ns (no AudioTrack timestamp yet)"));
     }
     let gaps = bundle.events.iter().filter(|e| matches!(e, BundleEvent::CaptureGap { .. })).count();
@@ -87,14 +87,20 @@ pub fn validate_phone(directory: &Path, label: &str, outcome: &mut ValidationOut
     if bundle.wall_clock_mapping().is_none() {
         outcome.warnings.push(format!("{label}: no wall_ms on capture timestamps: cross-phone pairing assumes simultaneous starts"));
     }
+    let microphone_events = bundle.events.iter().filter(|e| matches!(e, BundleEvent::ActiveMicrophones { .. })).count();
+    if microphone_events == 0 {
+        outcome.notes.push(format!("{label}: no active_microphones events (app predates mic-path logging)"));
+    }
     if bundle.session.platform_name.is_empty() {
         outcome.warnings.push(format!("{label}: session.json has no platform_name"));
     }
     outcome.notes.push(format!(
-        "{label}: {} {} (SDK {}), {:.1} s audio, {played} emissions, waveform {} {:.0}-{:.0} Hz, channel {}, anchors {}",
+        "{label}: {} {} (SDK {}), {:.1} s audio, {played} emissions, waveform {} {:.0}-{:.0} Hz, channel {}{}, anchors {}",
         bundle.session.device.manufacturer, bundle.session.platform_name, bundle.session.device.sdk_int, bundle.duration_s(),
         bundle.session.schedule.waveform.kind, bundle.session.schedule.waveform.band_low_hz, bundle.session.schedule.waveform.band_high_hz,
-        bundle.session.schedule.channel, bundle.capture_timeline.as_ref().map_or(0, |t| t.anchor_count())
+        bundle.session.schedule.channel,
+        if bundle.session.schedule.channel_cycle.is_empty() { String::new() } else { format!(" (cycle {})", bundle.session.schedule.channel_cycle.join(",")) },
+        bundle.capture_timeline.as_ref().map_or(0, |t| t.anchor_count())
     ));
 }
 

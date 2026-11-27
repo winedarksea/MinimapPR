@@ -29,7 +29,8 @@ use super::session_messages::{
 };
 
 pub const FIELD_PROTOCOL_MAJOR_VERSION: u16 = 1;
-pub const FIELD_PROTOCOL_MINOR_VERSION: u16 = 0;
+/// 1: `ChirpArrivalReport.reporter_attitude` appended.
+pub const FIELD_PROTOCOL_MINOR_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireHeader {

@@ -49,7 +49,10 @@ class ChirpLabController(
     private val runDirectory = File(outputRootDirectory, parameters.runId)
     private val sampleRateHz = configuration.capture.captureSampleRateHz
     private val timeline = FrameTimeline(sampleRateHz)
-    private val chirpPcm = chirpPlaybackPcm16(parameters.waveform, parameters.channel, parameters.levelDbfs)
+    /** One pre-built PCM per channel the run plays; emission k picks [ChirpLabRunParameters.channelForEmission]. */
+    private val chirpPcmByChannel = parameters.emissionChannels.associateWith { channel ->
+        chirpPlaybackPcm16(parameters.waveform, channel, parameters.levelDbfs)
+    }
     private val detector = FieldChirpDetector(parameters.waveform, speedOfSoundForTemperature(SELF_CHIRP_DETECTOR_TEMPERATURE_C))
     private val planner = ChirpLabEmissionPlanner(
         timeline.framesForMilliseconds(parameters.periodMilliseconds.toLong()),
@@ -116,7 +119,11 @@ class ChirpLabController(
      * k a true period index.
      */
     private fun scheduleEmission(duplexRig: AndroidDuplexAudioRig, selfMonitor: SelfChirpMonitor, emission: PlannedChirpLabEmission, leadFrames: Long) {
-        duplexRig.playback.scheduleChirpAtOutputFrame(emission.emissionIndex, emission.outputFrameIndex, chirpPcm) { played, _, predictedNs ->
+        val channel = parameters.channelForEmission(emission.emissionIndex)
+        val pcm = chirpPcmByChannel.getValue(channel)
+        duplexRig.playback.scheduleChirpAtOutputFrame(
+            emission.emissionIndex, emission.outputFrameIndex, pcm, ChirpLabWireNames.channelName(channel),
+        ) { played, _, predictedNs ->
             if (played) {
                 emissionsPlayed.incrementAndGet()
                 if (predictedNs != null) selfMonitor.expectEmission(emission.emissionIndex, predictedNs)
@@ -180,7 +187,8 @@ class ChirpLabController(
                 put("band_high_hz", parameters.waveform.bandHighHz)
                 put("duration_s", parameters.waveform.durationS)
             }
-            put("channel", ChirpLabWireNames.channelName(parameters.channel))
+            put("channel", ChirpLabWireNames.channelName(parameters.channelForEmission(0)))
+            putStrings("channel_cycle", parameters.channelCycle.map(ChirpLabWireNames::channelName))
             put("level_dbfs", parameters.levelDbfs)
         },
         paths = duplexRig.audioPathFacts(parameters.captureSource.wireName),

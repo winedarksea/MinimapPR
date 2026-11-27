@@ -60,6 +60,7 @@ mod node_split_brain_tests;
 pub mod readiness_selection;
 pub mod round_diagnostics;
 pub mod session_clock_alignment;
+pub mod speaker_geometry;
 pub mod srp_seed_refiner;
 
 use crate::protocol::{FieldMessage, NodeId};

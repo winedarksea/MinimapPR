@@ -151,7 +151,8 @@ mod tests {
             output_frame_index: 96_000 + index * 192_000,
             emission_t_ns: 0,
             predicted_sample: None,
-            arrival: Some(ScannedArrival { sample_index: capture_sample, snr_db: 60.0, doppler_skew_samples: 0.0, peak_fraction: 0.1 }),
+            channel: None,
+            arrival: Some(ScannedArrival::clean(capture_sample, 60.0)),
         }
     }
 

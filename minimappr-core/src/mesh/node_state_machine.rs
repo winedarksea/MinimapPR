@@ -6,7 +6,7 @@
 
 use crate::protocol::detection_messages::{ClipOnset, DetectionEvent, SensorFrameSample};
 use crate::protocol::mesh_messages::{ClassificationRota, NodeStatusChange};
-use crate::protocol::session_messages::{ChirpArrival, ChirpArrivalReport, GnssFix, Heartbeat, JoinRequest, NodeDescriptor};
+use crate::protocol::session_messages::{ChirpArrival, ChirpArrivalReport, DeviceAttitude, GnssFix, Heartbeat, JoinRequest, NodeDescriptor};
 use crate::protocol::wire_codes::{
     FrequencyBandHz, MotionState, NodeStatusChangeCode, PhonePlacement, SessionChangeReasonCode, SessionId, SessionRole,
     SpeciesScore,
@@ -54,6 +54,8 @@ pub enum DeviceStatusChange {
     Motion(MotionState),
     Placement(PhonePlacement),
     GnssFix(GnssFix),
+    /// Rotation-sensor attitude (sampled off the audio path, ~1 Hz).
+    Attitude(DeviceAttitude),
     /// The host role on this device sheds classification (hot hotspot host).
     ShedClassification,
 }
@@ -164,6 +166,8 @@ pub struct FieldNodeStateMachine {
     placement: PhonePlacement,
     overrun_count: u32,
     latest_fix: Option<GnssFix>,
+    /// Latest attitude and the session ms it arrived at.
+    latest_attitude: Option<(MeshMilliseconds, DeviceAttitude)>,
     /// Own clock model from the latest logged `ClockModel`.
     pub(super) own_clock: Option<NodeClockMapping>,
     /// Device sample of the last local invalidation; older models are void.
@@ -198,6 +202,7 @@ impl FieldNodeStateMachine {
             placement: PhonePlacement::Handheld,
             overrun_count: 0,
             latest_fix: None,
+            latest_attitude: None,
             own_clock: None,
             invalidated_after_sample: None,
             rota: None,
@@ -256,7 +261,7 @@ impl FieldNodeStateMachine {
         actions
     }
 
-    fn on_device_status(&mut self, change: DeviceStatusChange, device_sample_index_now: u64) -> Vec<NodeAction> {
+    fn on_device_status(&mut self, change: DeviceStatusChange, device_sample_index_now: u64, now_ms: MeshMilliseconds) -> Vec<NodeAction> {
         match change {
             DeviceStatusChange::InputRouteChanged => self.invalidate_clock(NodeStatusChangeCode::InputRouteChanged, device_sample_index_now),
             DeviceStatusChange::AudioSessionInterrupted => {
@@ -301,6 +306,10 @@ impl FieldNodeStateMachine {
                 self.latest_fix = Some(fix);
                 Vec::new()
             }
+            DeviceStatusChange::Attitude(attitude) => {
+                self.latest_attitude = Some((now_ms, attitude));
+                Vec::new()
+            }
         }
     }
 
@@ -325,7 +334,7 @@ impl FieldNodeStateMachine {
         vec![self.to_host(FieldMessage::DetectionEvent(detection))]
     }
 
-    fn on_chirp_round(&mut self, round: LocalChirpRound) -> Vec<NodeAction> {
+    fn on_chirp_round(&mut self, round: LocalChirpRound, now_ms: MeshMilliseconds) -> Vec<NodeAction> {
         let mut actions = Vec::new();
         if round.own_chirp_inaudible && !self.muted_notified {
             self.muted_notified = true;
@@ -339,9 +348,19 @@ impl FieldNodeStateMachine {
                 arrivals: round.arrivals,
                 motion_state: self.motion_state,
                 own_chirp_inaudible: round.own_chirp_inaudible,
+                reporter_attitude: self.fresh_attitude(now_ms),
             })));
         }
         actions
+    }
+
+    /// A stale attitude would rotate the speaker vector wrongly; reporting
+    /// none makes the host widen the pair's σ instead.
+    fn fresh_attitude(&self, now_ms: MeshMilliseconds) -> Option<DeviceAttitude> {
+        let maximum_age_ms = self.config.island_sync.speaker_geometry.attitude_maximum_age_ms;
+        self.latest_attitude
+            .filter(|(received_ms, _)| now_ms.saturating_sub(*received_ms) <= maximum_age_ms)
+            .map(|(_, attitude)| attitude)
     }
 
     fn on_tick(&mut self, now_ms: MeshMilliseconds, device_sample_index_now: u64) -> Vec<NodeAction> {
@@ -434,8 +453,8 @@ impl FieldNodeStateMachine {
                 Vec::new()
             }
             NodeInput::ClassifierFired(classification) => self.on_classification(classification, now_ms),
-            NodeInput::ChirpRoundHeard(round) => self.on_chirp_round(round),
-            NodeInput::DeviceStatus(change) => self.on_device_status(change, device_sample_index_now),
+            NodeInput::ChirpRoundHeard(round) => self.on_chirp_round(round, now_ms),
+            NodeInput::DeviceStatus(change) => self.on_device_status(change, device_sample_index_now, now_ms),
         }
     }
 }

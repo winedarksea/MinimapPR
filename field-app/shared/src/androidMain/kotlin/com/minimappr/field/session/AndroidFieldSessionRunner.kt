@@ -101,6 +101,7 @@ class AndroidFieldSessionRunner(
         conditionMonitor = AndroidDeviceConditionMonitor(
             context, configuration.chirpLab, eventLog, duplexRig::routedInputDescription, duplexRig::routedOutputDescription,
             onThermalHeadroom = sessionController::onThermalHeadroom,
+            onAttitude = sessionController::onAttitude,
         ).also { it.start(scope) }
         runRecording?.writeSessionJson(
             AndroidDeviceSurvey(context).sessionJson(

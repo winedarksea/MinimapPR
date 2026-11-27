@@ -36,6 +36,9 @@ pub struct ScheduleDescription {
     pub lead_ms: u64,
     pub waveform: WaveformDescription,
     pub channel: String,
+    /// Per-emission channel rotation (emission k plays `channel_cycle[k % n]`);
+    /// empty for a single-channel run.
+    pub channel_cycle: Vec<String>,
     pub level_dbfs: f64,
 }
 
@@ -82,6 +85,10 @@ pub enum BundleEvent {
     Thermal { t_ns: i64, status: i64, headroom: Option<f64> },
     Volume { t_ns: i64, music_index: i64, music_max: i64 },
     WriterOverflow { t_ns: i64, dropped_samples: u64 },
+    /// AudioRecord's recording configuration (on every
+    /// AudioRecordingCallback and periodically): which mics are live and
+    /// which pre-processing effects run, to test the mic-switch hypothesis.
+    ActiveMicrophones { t_ns: i64, state: MicrophonePathState },
     /// Anything else (newer app versions): kept so `validate` can count it.
     Other { t_ns: i64, kind: String },
 }
@@ -100,6 +107,7 @@ impl BundleEvent {
             | Self::Thermal { t_ns, .. }
             | Self::Volume { t_ns, .. }
             | Self::WriterOverflow { t_ns, .. }
+            | Self::ActiveMicrophones { t_ns, .. }
             | Self::Other { t_ns, .. } => *t_ns,
         }
     }
@@ -141,6 +149,7 @@ impl BundleEvent {
             "thermal" => Self::Thermal { t_ns, status: i("status").unwrap_or(0), headroom: f("headroom") },
             "volume" => Self::Volume { t_ns, music_index: i("music_index").unwrap_or(-1), music_max: i("music_max").unwrap_or(-1) },
             "writer_overflow" => Self::WriterOverflow { t_ns, dropped_samples: u("dropped_samples").unwrap_or(0) },
+            "active_microphones" => Self::ActiveMicrophones { t_ns, state: MicrophonePathState::from_event(&value) },
             _ => Self::Other { t_ns, kind },
         })
     }
@@ -157,9 +166,52 @@ impl BundleEvent {
             Self::Marker { t_ns, label } => serde_json::json!({"t_ns": t_ns, "type": "marker", "label": label}),
             Self::Screen { t_ns, on } => serde_json::json!({"t_ns": t_ns, "type": "screen", "on": on}),
             Self::Volume { t_ns, music_index, music_max } => serde_json::json!({"t_ns": t_ns, "type": "volume", "music_index": music_index, "music_max": music_max}),
+            Self::ActiveMicrophones { t_ns, state } => serde_json::json!({
+                "t_ns": t_ns, "type": "active_microphones",
+                "microphones": state.microphones.iter().map(|d| serde_json::json!({"description": d})).collect::<Vec<_>>(),
+                "routed_input": state.routed_input, "client_audio_source": state.client_audio_source, "client_silenced": state.client_silenced,
+                "client_effects": state.client_effects.iter().map(|n| serde_json::json!({"name": n})).collect::<Vec<_>>(),
+                "device_effects": state.device_effects.iter().map(|n| serde_json::json!({"name": n})).collect::<Vec<_>>(),
+            }),
             other => serde_json::json!({"t_ns": other.t_ns(), "type": "other"}),
         };
         value.to_string()
+    }
+}
+
+/// What `active_microphones` reports; `reason` is not part of the state so
+/// identical periodic samples compare equal.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct MicrophonePathState {
+    /// `description` (else `id`) of each active microphone.
+    pub microphones: Vec<String>,
+    pub routed_input: Option<String>,
+    pub client_audio_source: Option<i64>,
+    pub client_silenced: Option<bool>,
+    /// `name` (else `type`) of each client and device-side effect.
+    pub client_effects: Vec<String>,
+    pub device_effects: Vec<String>,
+}
+
+impl MicrophonePathState {
+    fn from_event(value: &serde_json::Value) -> Self {
+        let names = |key: &str, name_keys: &[&str]| -> Vec<String> {
+            value
+                .get(key)
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| name_keys.iter().find_map(|name_key| entry.get(*name_key).and_then(serde_json::Value::as_str).map(str::to_string)))
+                .collect()
+        };
+        Self {
+            microphones: names("microphones", &["description", "id"]),
+            routed_input: value.get("routed_input").and_then(serde_json::Value::as_str).map(str::to_string),
+            client_audio_source: value.get("client_audio_source").and_then(serde_json::Value::as_i64),
+            client_silenced: value.get("client_silenced").and_then(serde_json::Value::as_bool),
+            client_effects: names("client_effects", &["name", "type"]),
+            device_effects: names("device_effects", &["name", "type"]),
+        }
     }
 }
 
@@ -172,11 +224,26 @@ pub struct RoleAssignment {
     pub dir: String,
     /// Measured d_ii (speaker → ranging mic), if known.
     pub self_path_m: Option<f64>,
+    /// d_ii per emission channel (`left`/`right`/`both`) for channel-cycle
+    /// runs; a channel missing here falls back to `self_path_m`.
+    pub self_path_m_by_channel: BTreeMap<String, f64>,
     /// Speaker offset from the ranging mic in the world frame (m), if the
     /// pose and the per-model speaker vector are known.
     pub speaker_offset_world_m: Option<[f64; 3]>,
+    /// Per emission channel; falls back to `speaker_offset_world_m`.
+    pub speaker_offset_world_m_by_channel: BTreeMap<String, [f64; 3]>,
     /// Free text: portrait / landscape / face up …
     pub pose: String,
+}
+
+impl RoleAssignment {
+    pub fn self_path_for_channel(&self, channel: Option<&str>, default_m: f64) -> f64 {
+        channel.and_then(|c| self.self_path_m_by_channel.get(c).copied()).or(self.self_path_m).unwrap_or(default_m)
+    }
+
+    pub fn speaker_offset_for_channel(&self, channel: Option<&str>) -> Option<[f64; 3]> {
+        channel.and_then(|c| self.speaker_offset_world_m_by_channel.get(c).copied()).or(self.speaker_offset_world_m)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

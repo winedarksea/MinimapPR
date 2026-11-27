@@ -206,6 +206,89 @@ Re-analysing the 2026-11-25 A03s soak with the segmented analyser classifies 40 
 as self-pick hops. 35 longer pick-mode switches count as timeline steps. 167 rounds are left out,
 and the 291 kept range at σ 1.7 mm.
 
+## Two Pixels, rounds 2–4: channel map, picks and speaker geometry (2026-11-26 evening)
+
+Same phones, flat and screen up, tape bottom edge to bottom edge, 66–68 °F (passed as
+`--temperature-c`). Runs: `20261126_{b1*,m1_*,pads_*,topmic_*,d180_*,b4*,b5_*,b6_*,r3_*,r4_*}`.
+This supersedes the channel conclusions of the section above.
+
+**Channel map.**
+- **Pixel 7a:** Right is the earpiece (by ear). Its bottom speaker (Left) reaches the other phone
+  14 dB weaker, with a second copy ~23 samples later, and ranged 0.93–1.04 m between identical runs.
+  The first soak's 0.986 m used it, so that number was luck.
+- **Pixel 10 Pro XL:** Left is the bottom speaker: one clean arrival in every pose, level-independent
+  within 2 mm at volumes 8–18. Its earpiece (Right) self pick moved 8–26 cm between runs.
+- **Capture:** both phones record from the bottom mic. Covering the 7a's top changed levels by
+  under 1 dB.
+- **Config:** 7a → Right, Pixel 10 → Left.
+
+**Pose hazards.** A phone whose own body lies between its mic and the other phone gets remote picks
+that are wrong. This happened twice:
+- Pixel 10 reversed, on the table: ~2 ms early, through the table.
+- 7a reversed, on pads: lead 840 samples, bimodal ranges.
+
+Bottoms facing is the only clean pose measured.
+
+**Pick fixes (`first_arrival.rs`).** Both failures came from envelope sidelobes the 7a earpiece
+channel raises:
+- **Self picks.** The 7a's self recording has a second peak 24 samples (13–16 kHz) or 12 samples
+  (12–18 kHz) before the main one. It sits on the template's first autocorrelation sidelobe, raised
+  3–10 dB by the near-field channel. It is not an up/down split and not a body path.
+  - Its level depends on placement: −9 dB in round 3, the strongest peak in round 4.
+  - The old body-precursor logic picked whichever side of it the d_ii window allowed. The range
+    moved 40 mm with volume (d_ii 0.02) and was 87 mm off in round 4 (d_ii 0.20).
+  - Self picks now take the strongest peak (`SelfRecordingPick::StrongestPeak`), and d_ii only
+    enters the range equation.
+- **Remote picks.** The Pixel 10's down-half saw the raised sidelobe at −9.9 dB, 0.2 dB over the old
+  1.6× margin. The pick jumped 11 samples in 2–3 of 20 rounds (and 1 of 49 live).
+  - `sidelobe_rejection_margin` is now 2.0. Real early arrivals clear their sidelobe by 27–30 dB.
+- **Effect on old runs.** Re-analysed, Pixel 10 Left picks are byte-identical. Its earpiece runs no
+  longer break into 20 excluded rounds.
+
+**Band 12–18 kHz.** At 13–16 kHz a real second arrival ~18 samples after the first merges into the
+main lobe. The 7a earpiece range then depends on placement by ~13 mm. At 12–18 kHz the two
+placements and both distances (1.0 and 1.8 m) agree within 0.2 mm, and leakage into the 2–11 kHz
+bird band passes. The core scheduler, the Kotlin defaults and the chirp-lab driver now default to
+12–18 kHz.
+
+**d_ii and speaker vector.** The 7a's speaker vector is [0, 0.145, 0] m, estimated from the phone's
+dimensions (earpiece slot to bottom mic). d_ii is 0.095 m, an effective value chosen so that
+bottoms-facing runs read tape + v/2. The leftover pick-timing constant goes into d_ii; the
+orientation-dependent speaker term stays separate. The orientation split itself was not measured,
+because the reversed pose fails (above).
+
+**Live speaker geometry (`mesh/speaker_geometry.rs`).**
+- **Attitude:** phones report it per round (`ChirpArrivalReport.reporter_attitude`: rotation-vector
+  quaternion and heading accuracy). The protocol minor version is now 1, so both phones need the
+  same build.
+- **Correction:** the host applies the exact `correct_for_speaker_mic_offsets` only when the pair
+  bearing is known from a GPS-anchored layout, chirality is settled, and both headings are within
+  30°.
+- **Otherwise:** range σ widens by ½(|v_A|+|v_B|) and clock-offset σ by (|v_A|+|v_B|)/(2c), with no
+  guessed correction.
+- **Today it always widens:** the live path sends no GNSS fixes, and indoors both Pixels report 60°
+  heading accuracy. Their yaws are also 74° apart instead of the true ~180°.
+
+**Final check (round 4, 1.00 m, 68 °F, final build).**
+
+| Run | Range | σ |
+|---|---|---|
+| `r4_final_vol18` chirp lab, corrected | 1.0026 m | 0.5 mm |
+| `r4_final_vol12` chirp lab, corrected | 1.0029 m | 0.3 mm |
+| `r4_live_final` live LAN, 50 rounds (no correction live) | 1.0766 m (predicted 1.0751 = corrected + v/2) | 0.6 mm, 0 jumps |
+| Before the fixes: `r4_base_vol18_b13_16` (old detector) | 1.0371 m raw; the 12–18 kHz run read 1.1250 m | |
+
+**Other results.**
+- **Volume 0:** flagged inaudible on both phones (B5).
+- **Gaps:** the live sessions had no capture gaps.
+
+**Open.**
+- **GNSS in the live path.** Needed before the live correction can ever apply.
+- **Earpiece placements.** The second arrival is only 2.6 dB below the first in round 4. A placement
+  where it wins would move the 7a earpiece pick by ~18 samples (not observed).
+- **12–18 kHz checks.** A volume sweep beyond 12/18, and a 30-minute soak on the final build.
+- **Commit.** Nothing is committed.
+
 ## Gate table
 
 | Item | Status | Evidence |
@@ -214,8 +297,8 @@ and the 291 kept range at σ 1.7 mm.
 | θ residual < 50 µs over 30 min | PASS (Pixel 7a + Pixel 10 Pro XL); FAIL with the A03s | pixels_soak_1m: heartbeat p95 9.0 µs, linear-fit RMS 5.7 µs over 1824 s. soak_1m (A03s): self-pick hops |
 | Self onset stable within 10 µs | PASS on one surface (both Pixels); FAIL (A03s) | pixels_soak_1m: self σ 0.3 / 1.0 µs, given the right d_ii for an earpiece. soak_1m: A03s hops ±240 µs. A2 (surface changes) not run |
 | Locked-screen playback (Android 17) | PASS (Pixel 7a, Pixel 10 Pro XL, SDK 37); A03s 5/465 missed | pixels_soak_1m: 0/458 missed on each Pixel. soak_1m |
-| Muted phone flagged inaudible | not run | |
-| Bird-band leakage | PASS | soak_1m: −0.2 dB over floor, 2–11 kHz |
+| Muted phone flagged inaudible | PASS (Pixel 7a, Pixel 10 Pro XL) | b5_vol0: `muted_phone_inaudible` on both |
+| Bird-band leakage | PASS (13–16 and 12–18 kHz) | soak_1m: −0.2 dB over floor, 2–11 kHz; r4_final: ≤ 1.1 dB at 12–18 kHz |
 | Three phone models | Three models measured (Pixel 7a, SM-A037F, Pixel 10 Pro XL), never three at once | |
 
 ## Bundle schema

@@ -44,6 +44,38 @@ class ChirpLabPlanningTest {
     }
 
     @Test
+    fun channelCycleRotatesByPeriodIndexSoSkippedSlotsKeepTheSchedule() {
+        val spec = FieldChirpWaveformSpec(FieldChirpWaveformKind.UP_DOWN_HYPERBOLIC, 13_000.0, 16_000.0, 0.05)
+        val cycled = ChirpLabRunParameters(
+            runId = "r", role = ChirpLabRole.B, periodMilliseconds = 4_000, leadMilliseconds = 300, waveform = spec,
+            channel = FieldStereoChannel.LEFT, captureSource = ChirpLabCaptureSource.DEFAULT, levelDbfs = -6.0,
+            channelCycle = listOf(FieldStereoChannel.LEFT, FieldStereoChannel.RIGHT, FieldStereoChannel.BOTH),
+        )
+        assertEquals(
+            listOf(FieldStereoChannel.LEFT, FieldStereoChannel.RIGHT, FieldStereoChannel.BOTH, FieldStereoChannel.LEFT),
+            (0L..3L).map(cycled::channelForEmission),
+        )
+        // Slot 4 skipped: slot 5 still plays what k = 5 schedules.
+        assertEquals(FieldStereoChannel.BOTH, cycled.channelForEmission(5))
+        assertEquals(3, cycled.emissionChannels.size)
+        val single = cycled.copy(channel = FieldStereoChannel.RIGHT, channelCycle = emptyList())
+        assertEquals(FieldStereoChannel.RIGHT, single.channelForEmission(7))
+        assertEquals(listOf(FieldStereoChannel.RIGHT), single.emissionChannels)
+        val repeated = cycled.copy(channelCycle = listOf(FieldStereoChannel.LEFT, FieldStereoChannel.RIGHT, FieldStereoChannel.LEFT))
+        assertEquals(listOf(FieldStereoChannel.LEFT, FieldStereoChannel.RIGHT), repeated.emissionChannels, "one PCM per distinct channel")
+    }
+
+    @Test
+    fun channelCycleWireNamesRoundTripAndRejectUnknownNames() {
+        val cycle = ChirpLabWireNames.channelCycle(" left, right ,both")
+        assertEquals(listOf(FieldStereoChannel.LEFT, FieldStereoChannel.RIGHT, FieldStereoChannel.BOTH), cycle)
+        assertEquals("left,right,both", ChirpLabWireNames.channelCycleName(cycle!!))
+        assertNull(ChirpLabWireNames.channelCycle("left,top"))
+        assertNull(ChirpLabWireNames.channelCycle(""))
+        assertNull(ChirpLabWireNames.channelCycle(null))
+    }
+
+    @Test
     fun ringBufferKeepsTheDeviceTimelineAcrossGapsAndForgetsOldAudio() {
         val ring = CaptureRingBuffer(capacitySamples = 10)
         ring.append(CaptureBlock(0, shortArrayOf(1, 2, 3)))

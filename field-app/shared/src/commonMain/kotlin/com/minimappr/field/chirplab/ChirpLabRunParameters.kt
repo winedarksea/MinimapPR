@@ -53,6 +53,16 @@ object ChirpLabWireNames {
     }
 
     fun channelName(channel: FieldStereoChannel): String = channel.name.lowercase()
+
+    /** `left,right,both` → channels in order; null when any name is unknown or the list is empty. */
+    fun channelCycle(names: String?): List<FieldStereoChannel>? {
+        val parts = names?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }.orEmpty()
+        if (parts.isEmpty()) return null
+        val channels = parts.map { channel(it) ?: return null }
+        return channels
+    }
+
+    fun channelCycleName(channels: List<FieldStereoChannel>): String = channels.joinToString(",") { channelName(it) }
 }
 
 data class ChirpLabRunParameters(
@@ -64,8 +74,28 @@ data class ChirpLabRunParameters(
     val channel: FieldStereoChannel,
     val captureSource: ChirpLabCaptureSource,
     val levelDbfs: Double,
+    /**
+     * Per-emission channel rotation inside one stream: emission k plays
+     * `channelCycle[k % n]`. Every channel then shares one output latency,
+     * so the analyser can compare speakers to the sample (stream restarts
+     * move self latency by thousands of samples). Empty = always [channel].
+     */
+    val channelCycle: List<FieldStereoChannel> = emptyList(),
 ) {
     val periodOffsetMilliseconds: Int get() = (periodMilliseconds * role.periodOffsetFraction).toInt()
+
+    /** Distinct channels this run plays, in first-use order. */
+    val emissionChannels: List<FieldStereoChannel> get() = channelCycle.ifEmpty { listOf(channel) }.distinct()
+
+    /**
+     * Keyed by the period index k (not a play count), so a skipped slot
+     * never shifts the rotation and the analyser can trust each emission's
+     * logged channel against the schedule.
+     */
+    fun channelForEmission(emissionIndex: Long): FieldStereoChannel {
+        val cycle = channelCycle.ifEmpty { return channel }
+        return cycle[(emissionIndex % cycle.size).toInt()]
+    }
 
     companion object {
         fun defaults(configuration: FieldChirpLabConfiguration, runId: String, role: ChirpLabRole = ChirpLabRole.A) =

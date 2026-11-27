@@ -204,3 +204,91 @@ fn leading_edge_fraction_above_one_falls_back_to_the_peak() {
         .unwrap();
     assert!((arrival.sample_index - 2_000.0).abs() < 1.0, "{arrival:?}");
 }
+
+/// Two self-channel arrivals 24 samples apart (the Pixel 7a earpiece at
+/// its bottom mic, 13–16 kHz): the strongest one is picked whatever d_ii
+/// says, so d_ii no longer moves the pick.
+#[test]
+fn self_pick_is_the_strongest_peak_independent_of_d_ii() {
+    let chirp = template();
+    let separation = 24;
+    for (early_gain, late_gain, expected_start) in [(1.0f32, 0.73f32, 3_000usize), (0.35, 1.0, 3_024)] {
+        let mut signal = noise(12_000, 0.005, 7);
+        add_copy(&mut signal, &chirp, 3_000, early_gain);
+        add_copy(&mut signal, &chirp, 3_000 + separation, late_gain);
+        for self_path_length_m in [Some(0.02), Some(0.20), None] {
+            let arrival = detector()
+                .detect(&signal, 0..8_000, ArrivalContext::SelfRecording { self_path_length_m })
+                .unwrap();
+            assert!(
+                (arrival.sample_index - expected_start as f64).abs() < 3.0,
+                "gains {early_gain}/{late_gain}, d_ii {self_path_length_m:?}: {arrival:?}"
+            );
+            assert_eq!(arrival.lead_before_strongest_samples, 0.0);
+        }
+    }
+}
+
+/// The pre-field policy skips a strongest early peak for a later one when
+/// d_ii puts the early one inside the body-precursor window — the
+/// 2026-11-26 r4 failure the default policy avoids.
+#[test]
+fn body_precursor_policy_skips_a_strongest_early_arrival() {
+    let chirp = template();
+    let mut signal = noise(12_000, 0.005, 8);
+    add_copy(&mut signal, &chirp, 3_000, 1.0);
+    add_copy(&mut signal, &chirp, 3_024, 0.73);
+    let config = FirstArrivalConfig {
+        self_recording_pick: SelfRecordingPick::EarliestOutsideBodyPrecursor,
+        ..FirstArrivalConfig::default()
+    };
+    let arrival = FirstArrivalDetector::new(&chirp, config, SAMPLE_RATE_HZ)
+        .detect(&signal, 0..8_000, ArrivalContext::SelfRecording { self_path_length_m: Some(0.20) })
+        .unwrap();
+    assert!(arrival.precursor_rejected);
+    assert!(arrival.sample_index > 3_015.0, "{arrival:?}");
+}
+
+/// Envelope of one arrival at `peak` from the template's own
+/// autocorrelation, with the leading first sidelobe scaled by `lift_db`.
+fn envelope_with_lifted_leading_sidelobe(detector: &FirstArrivalDetector, peak: usize, lift_db: f64) -> Vec<f32> {
+    let autocorrelation = &detector.autocorrelation_envelope;
+    let main_lobe = detector.main_lobe_width_samples();
+    let first_sidelobe_lag = main_lobe
+        + (main_lobe..autocorrelation.len() - 1)
+            .position(|lag| autocorrelation[lag + 1] < autocorrelation[lag])
+            .unwrap();
+    let mut envelope = vec![1e-4f32; peak * 2];
+    for (lag, value) in autocorrelation.iter().enumerate().take(peak) {
+        envelope[peak + lag] = envelope[peak + lag].max(*value);
+        let lift = if (main_lobe..2 * first_sidelobe_lag - main_lobe).contains(&lag) {
+            amplitude_ratio(lift_db) as f32
+        } else {
+            1.0
+        };
+        envelope[peak - lag] = envelope[peak - lag].max(*value * lift);
+    }
+    envelope
+}
+
+#[test]
+fn remote_pick_ignores_a_transducer_lifted_first_sidelobe() {
+    let detector = detector();
+    let peak = 4_000;
+    // +4.7 dB: the worst lift the 7a earpiece put on remote picks.
+    let lifted = envelope_with_lifted_leading_sidelobe(&detector, peak, 4.7);
+    let arrival = detector
+        .detect_in_envelope(&lifted, 0..2 * peak, ArrivalContext::RemoteEmitter)
+        .unwrap();
+    assert_eq!(arrival.lead_before_strongest_samples, 0.0, "{arrival:?}");
+    // The old 1.6× margin took the lifted sidelobe as an earlier arrival.
+    let old_margin = FirstArrivalDetector::new(
+        &template(),
+        FirstArrivalConfig { sidelobe_rejection_margin: 1.6, ..FirstArrivalConfig::default() },
+        SAMPLE_RATE_HZ,
+    );
+    let old = old_margin
+        .detect_in_envelope(&lifted, 0..2 * peak, ArrivalContext::RemoteEmitter)
+        .unwrap();
+    assert!(old.lead_before_strongest_samples > 0.0, "{old:?}");
+}

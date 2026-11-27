@@ -33,6 +33,12 @@ data class FieldCaptureConfiguration(
      * `capture_timestamp_step_threshold_s` and the core anchor's jump gate.
      */
     val silentCaptureDropThresholdMilliseconds: Long = 15,
+    /**
+     * `active_microphones` is logged on every AudioRecordingCallback and at
+     * least this often, so a mic or effect switch the callback misses still
+     * shows up within one period.
+     */
+    val activeMicrophonesLogIntervalMilliseconds: Long = 10_000,
 )
 
 data class FieldPlaybackConfiguration(
@@ -70,8 +76,9 @@ data class FieldNodeConfiguration(
 data class FieldChirpLabConfiguration(
     val defaultPeriodMilliseconds: Int = 4_000,
     val defaultLeadMilliseconds: Int = 300,
-    val defaultBandLowHz: Double = 13_000.0,
-    val defaultBandHighHz: Double = 16_000.0,
+    /** Matches the core scheduler's `chirp_band_hz` (12–18 kHz since 2026-11-26). */
+    val defaultBandLowHz: Double = 12_000.0,
+    val defaultBandHighHz: Double = 18_000.0,
     val defaultChirpDurationSeconds: Double = 0.05,
     val defaultLevelDbfs: Double = -6.0,
     /** Self-chirp search window either side of the predicted capture frame. */

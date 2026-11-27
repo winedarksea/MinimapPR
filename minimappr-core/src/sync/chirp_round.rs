@@ -240,6 +240,7 @@ pub fn clock_offset_constraints(
                 slot_gap_s: m.slot_gap_s,
                 motion_energy: motion_energy.get(i).copied().unwrap_or(0.0)
                     + motion_energy.get(j).copied().unwrap_or(0.0),
+                additional_sigma_s: 0.0,
             }
         })
         .collect()

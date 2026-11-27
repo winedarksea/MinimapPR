@@ -65,6 +65,12 @@ impl SplitPartDetector {
         self.waveform_length
     }
 
+    /// The first part's self-recording precursor window (all parts share the
+    /// band, hence the main-lobe width that sets it).
+    pub fn precursor_lead_window_samples(&self, self_path_length_m: Option<f64>) -> Option<f64> {
+        self.parts.first().map(|(_, detector)| detector.precursor_lead_window_samples(self_path_length_m))
+    }
+
     /// `search_lags` are waveform-start lags; every part must be detected.
     pub fn detect(
         &self,

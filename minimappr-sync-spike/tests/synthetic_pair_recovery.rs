@@ -4,6 +4,11 @@
 //! a body-conducted precursor on the self path, noise, timestamp jitter
 //! and NTP-level wall-clock error. The analyser must recover the range to
 //! 5 mm and the clock offset to a linear model within 2 µs.
+//!
+//! A second run rotates phone B between two speakers inside one stream
+//! (the Pixel 10's bottom speaker on its mic and earpiece 0.16 m behind it):
+//! per-channel d_ii and speaker offsets must give the same range for both,
+//! and the channel evidence must recover the self- and cross-path Δ.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,7 +32,23 @@ const BODY_SOUND_SPEED_MPS: f64 = 5_000.0;
 /// Body precursor level relative to the airborne self arrival (hard table).
 const PRECURSOR_GAIN: f32 = 0.2;
 
+/// One speaker: self path to the phone's own mic, and how much further it
+/// sits from the other phone than the mic does (colinear layout).
+struct EmissionChannel {
+    name: &'static str,
+    self_path_m: f64,
+    axial_offset_m: f64,
+}
+
+const SINGLE_RIGHT: &[EmissionChannel] = &[EmissionChannel { name: "right", self_path_m: SELF_PATH_M, axial_offset_m: 0.0 }];
+const EARPIECE_SELF_PATH_M: f64 = 0.16;
+const BOTTOM_AND_EARPIECE: &[EmissionChannel] = &[
+    EmissionChannel { name: "left", self_path_m: SELF_PATH_M, axial_offset_m: 0.0 },
+    EmissionChannel { name: "right", self_path_m: EARPIECE_SELF_PATH_M, axial_offset_m: EARPIECE_SELF_PATH_M },
+];
+
 struct SyntheticPhone {
+    channels: &'static [EmissionChannel],
     directory_name: &'static str,
     role: &'static str,
     platform: &'static str,
@@ -48,6 +69,10 @@ impl SyntheticPhone {
     /// True time output frame `frame` leaves the speaker (shared crystal).
     fn playback_true_s(&self, frame: u64) -> f64 {
         self.playback_start_true_s + frame as f64 / self.rate_hz()
+    }
+
+    fn channel_of(&self, emission_index: usize) -> &EmissionChannel {
+        &self.channels[emission_index % self.channels.len()]
     }
 
     fn emission_frames(&self) -> Vec<u64> {
@@ -93,13 +118,14 @@ fn write_wav(path: &Path, samples: &[f32], truncate_header: bool) {
 fn arrivals_at(listener: usize, phones: &[SyntheticPhone], c: f64) -> Vec<(f64, f32)> {
     let mut arrivals = Vec::new();
     for (emitter_index, emitter) in phones.iter().enumerate() {
-        for frame in emitter.emission_frames() {
+        for (emission_index, frame) in emitter.emission_frames().into_iter().enumerate() {
             let emitted = emitter.playback_true_s(frame);
+            let channel = emitter.channel_of(emission_index);
             if emitter_index == listener {
-                arrivals.push((emitted + SELF_PATH_M / c, 0.5));
-                arrivals.push((emitted + SELF_PATH_M / BODY_SOUND_SPEED_MPS, 0.5 * PRECURSOR_GAIN));
+                arrivals.push((emitted + channel.self_path_m / c, 0.5));
+                arrivals.push((emitted + channel.self_path_m / BODY_SOUND_SPEED_MPS, 0.5 * PRECURSOR_GAIN));
             } else {
-                arrivals.push((emitted + DISTANCE_M / c, 0.06));
+                arrivals.push((emitted + (DISTANCE_M + channel.axial_offset_m) / c, 0.06));
             }
         }
     }
@@ -154,7 +180,7 @@ fn render_phone(directory: &Path, index: usize, phones: &[SyntheticPhone], fine_
             output_frame_index: frame,
             target_ns: Some(true_to_local_ns(presented) + 400_000),
             played: true,
-            channel: Some("right".into()),
+            channel: Some(phone.channel_of(emission_index).name.into()),
         });
     }
     events.sort_by_key(BundleEvent::t_ns);
@@ -165,21 +191,22 @@ fn render_phone(directory: &Path, index: usize, phones: &[SyntheticPhone], fine_
         "device": {"manufacturer": "synthetic", "model": phone.platform, "sdk_int": 37, "fingerprint": "test"},
         "schedule": {"period_ms": (PERIOD_S * 1e3) as u64, "offset_ms": (phone.schedule_offset_s * 1e3) as u64, "lead_ms": 300,
             "waveform": {"kind": "updown_hfm", "band_low_hz": 13000.0, "band_high_hz": 16000.0, "duration_s": 0.05},
-            "channel": "right", "level_dbfs": -6.0},
+            "channel": phone.channels[0].name, "level_dbfs": -6.0,
+            "channel_cycle": if phone.channels.len() > 1 { phone.channels.iter().map(|c| c.name).collect::<Vec<_>>() } else { Vec::new() }},
         "capture": {"requested_source": "unprocessed", "actual_source": "unprocessed", "buffer_size_frames": 960, "sample_rate_hz": 48000},
         "started_ns": true_to_local_ns(phone.capture_start_true_s),
     });
     fs::write(phone_directory.join("session.json"), serde_json::to_string_pretty(&session).unwrap()).unwrap();
 }
 
-fn render_run() -> PathBuf {
-    let directory = std::env::temp_dir().join(format!("sync_spike_synthetic_{}", std::process::id()));
+fn render_run(name: &str, b_channels: &'static [EmissionChannel], b_role: serde_json::Value) -> PathBuf {
+    let directory = std::env::temp_dir().join(format!("sync_spike_synthetic_{name}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&directory);
     fs::create_dir_all(&directory).unwrap();
     let phones = [
-        SyntheticPhone { directory_name: "pixel7a", role: "A", platform: "pixel_7a", capture_start_true_s: 0.21, playback_start_true_s: 0.43,
+        SyntheticPhone { channels: SINGLE_RIGHT, directory_name: "pixel7a", role: "A", platform: "pixel_7a", capture_start_true_s: 0.21, playback_start_true_s: 0.43,
             rate_ppm: 60.0, monotonic_offset_ns: 9_876_543_210_123, wall_error_ms: 18.0, schedule_offset_s: 0.0, truncate_wav_header: false },
-        SyntheticPhone { directory_name: "sm_a037f", role: "B", platform: "sm-a037f", capture_start_true_s: 0.87, playback_start_true_s: 1.02,
+        SyntheticPhone { channels: b_channels, directory_name: "sm_a037f", role: "B", platform: "sm-a037f", capture_start_true_s: 0.87, playback_start_true_s: 1.02,
             rate_ppm: -60.0, monotonic_offset_ns: 123_456_789_000, wall_error_ms: -25.0, schedule_offset_s: 0.5 * PERIOD_S, truncate_wav_header: true },
     ];
     let band = ChirpBand { low_hz: 13_000.0, high_hz: 16_000.0 };
@@ -190,8 +217,8 @@ fn render_run() -> PathBuf {
     let manifest = serde_json::json!({
         "label": "synthetic_7m3", "matrix_run": "A5", "tape_distance_m": DISTANCE_M, "temperature_c": TEMPERATURE_C,
         "roles": {
-            "A": {"serial": "synthetic-a", "dir": "pixel7a", "self_path_m": SELF_PATH_M},
-            "B": {"serial": "synthetic-b", "dir": "sm_a037f", "self_path_m": SELF_PATH_M},
+            "A": {"serial": "synthetic-a", "dir": "pixel7a", "self_path_m": SELF_PATH_M, "speaker_offset_world_m": [0.0, 0.0, 0.0]},
+            "B": b_role,
         },
     });
     fs::write(directory.join("run_manifest.json"), serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
@@ -200,7 +227,8 @@ fn render_run() -> PathBuf {
 
 #[test]
 fn synthetic_pair_recovers_range_and_clock() {
-    let directory = render_run();
+    let b_role = serde_json::json!({"serial": "synthetic-b", "dir": "sm_a037f", "self_path_m": SELF_PATH_M});
+    let directory = render_run("single", SINGLE_RIGHT, b_role);
     let validation = validate_run(&directory);
     assert!(validation.is_usable(), "{validation:?}");
     assert!(validation.warnings.iter().any(|w| w.contains("WAV header")), "truncated header must be flagged: {validation:?}");
@@ -229,6 +257,49 @@ fn synthetic_pair_recovers_range_and_clock() {
     write_run_outputs(&report, &gates, &directory.join("analysis")).unwrap();
     assert!(directory.join("analysis/report.md").exists());
     if std::env::var_os("SYNC_SPIKE_PRINT_REPORT").is_some() {
+        println!("{}", fs::read_to_string(directory.join("analysis/report.md")).unwrap());
+    }
+    fs::remove_dir_all(directory).ok();
+}
+
+#[test]
+fn channel_cycle_ranges_both_speakers_and_maps_their_offsets() {
+    let b_role = serde_json::json!({
+        "serial": "synthetic-b", "dir": "sm_a037f",
+        "self_path_m_by_channel": {"left": SELF_PATH_M, "right": EARPIECE_SELF_PATH_M},
+        // B sits on +x; its earpiece is 0.16 m further from A than its mic.
+        "speaker_offset_world_m_by_channel": {"left": [0.0, 0.0, 0.0], "right": [EARPIECE_SELF_PATH_M, 0.0, 0.0]},
+    });
+    let directory = render_run("cycle", BOTTOM_AND_EARPIECE, b_role);
+    assert!(validate_run(&directory).is_usable());
+    let config = AnalysisConfig::default();
+    let report = analyse_run(&directory, &config).expect("analysis");
+    assert_eq!(report.rounds_excluded_for_capture_breaks, 0, "channel offsets must not read as capture breaks");
+    let b = &report.phones[1];
+    assert_eq!(b.capture_continuity.self_interval_break_count + b.capture_continuity.self_pick_outlier_count, 0, "{:?}", b.capture_continuity);
+    assert!(b.onset.overall_sigma_us.unwrap() < 5.0, "aligned onset σ {:?} µs", b.onset.overall_sigma_us);
+    assert!(report.speaker_correction_applied);
+    assert_eq!(report.distance_by_channel.len(), 2, "{:?}", report.distance_by_channel);
+    for pair in &report.distance_by_channel {
+        let error = pair.statistics.error_vs_tape_m.unwrap();
+        assert!(error.abs() < 0.005, "B {} range error {error} m ({pair:?})", pair.b_channel);
+    }
+    let c = speed_of_sound();
+    let evidence = report.channel_evidence.iter().find(|e| e.emitter_role == "B").unwrap();
+    assert_eq!(evidence.reference_channel, "left");
+    let right = evidence.channels.iter().find(|ch| ch.channel == "right").unwrap();
+    let self_mm = right.self_offset.as_ref().unwrap().offset_mm;
+    let cross_mm = right.remote_offset.as_ref().unwrap().offset_mm;
+    let expected_self_mm = (EARPIECE_SELF_PATH_M - SELF_PATH_M) * 1e3;
+    assert!((self_mm - expected_self_mm).abs() < 3.0, "self Δ {self_mm} mm, expected {expected_self_mm} (c {c})");
+    assert!((cross_mm - EARPIECE_SELF_PATH_M * 1e3).abs() < 3.0, "cross Δ {cross_mm} mm, expected 160");
+    // Self picks are the strongest peak (core `SelfRecordingPick::StrongestPeak`),
+    // so the −14 dB body precursor never moves them and no longer has to clear
+    // the earliest-peak tests that the precursor-lead d_ii suggestion relies on.
+    assert_eq!(right.self_picks.not_strongest_count, 0, "{:?}", right.self_picks);
+    if std::env::var_os("SYNC_SPIKE_PRINT_REPORT").is_some() {
+        let gates = evaluate_run(&report, &config.gates);
+        write_run_outputs(&report, &gates, &directory.join("analysis")).unwrap();
         println!("{}", fs::read_to_string(directory.join("analysis/report.md")).unwrap());
     }
     fs::remove_dir_all(directory).ok();

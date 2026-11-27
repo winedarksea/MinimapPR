@@ -10,6 +10,7 @@
 //! Variance model (offset error from an unobserved displacement δx is
 //! δx / (2c)):
 //!   σ² = σ_pick² + (v_unobserved · gap / 2c)² + (k_motion · energy / 2c)²
+//!        + σ_additional²  (known per-constraint terms, e.g. speaker geometry)
 
 use nalgebra::{DMatrix, DVector};
 
@@ -53,6 +54,9 @@ pub struct ClockOffsetConstraint {
     pub slot_gap_s: f64,
     /// Linear-acceleration energy of both phones between their slots.
     pub motion_energy: f64,
+    /// Known extra 1σ added in quadrature, e.g. an uncorrected speaker–mic
+    /// geometry bias (`mesh::speaker_geometry`); 0 when none.
+    pub additional_sigma_s: f64,
 }
 
 impl ClockGraphConfig {
@@ -61,7 +65,11 @@ impl ClockGraphConfig {
         let gap_term = self.unobserved_motion_speed_mps * constraint.slot_gap_s.abs() / two_c;
         let motion_term =
             self.displacement_per_motion_energy_m * constraint.motion_energy.max(0.0) / two_c;
-        (self.pick_offset_sigma_s.powi(2) + gap_term.powi(2) + motion_term.powi(2)).sqrt()
+        (self.pick_offset_sigma_s.powi(2)
+            + gap_term.powi(2)
+            + motion_term.powi(2)
+            + constraint.additional_sigma_s.powi(2))
+        .sqrt()
     }
 }
 
@@ -266,6 +274,7 @@ mod tests {
             offset_j_minus_i_s: TRUE_OFFSETS_S[j] - TRUE_OFFSETS_S[i] + error_s,
             slot_gap_s,
             motion_energy,
+            additional_sigma_s: 0.0,
         }
     }
 

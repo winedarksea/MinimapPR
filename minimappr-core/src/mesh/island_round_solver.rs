@@ -5,6 +5,9 @@
 //!
 //! Emitters flagged muted are removed from the emission list, so a silent
 //! phone is excluded from ranging instead of being mis-ranged against noise.
+//!
+//! Before the clock graph and layout, each pair's speaker–mic geometry is
+//! corrected or its σ widened (`speaker_geometry`).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -13,9 +16,10 @@ use crate::protocol::session_messages::ChirpArrivalReport;
 use crate::protocol::wire_codes::MotionState;
 use crate::protocol::NodeId;
 use crate::sync::chirp_round::{clock_offset_constraints, ChirpRoundObservation, RoundRateCompensation};
-use crate::sync::clock_graph::solve_clock_graph;
+use crate::sync::clock_graph::{solve_clock_graph, ClockOffsetConstraint};
 
 use super::config::{IslandSyncConfig, DEVICE_SAMPLE_RATE_HZ};
+use super::speaker_geometry::{PairSpeakerGeometryOutcome, RoundSpeakerGeometry};
 
 /// Linear-acceleration energy assigned to a phone reported walking. With
 /// the clock graph's 0.1 m per unit this models ~1 m of displacement over a
@@ -37,6 +41,9 @@ pub struct IslandRoundInput<'round> {
     pub self_path_lengths_m: &'round BTreeMap<NodeId, f64>,
     pub muted_emitters: &'round BTreeSet<NodeId>,
     pub preferred_reference: Option<NodeId>,
+    /// Speaker vectors, attitudes and known pair bearings; the default
+    /// (no speaker vectors) leaves every pair as measured.
+    pub speaker_geometry: &'round RoundSpeakerGeometry,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +58,8 @@ pub struct IslandRoundSolution {
     pub layout_sigmas_m: BTreeMap<NodeId, f64>,
     /// Participants reported walking: in the clock graph, not in the layout.
     pub walking_nodes: BTreeSet<NodeId>,
+    /// How each ranged pair's speaker geometry was handled (first, second).
+    pub speaker_geometry_outcomes: Vec<(NodeId, NodeId, PairSpeakerGeometryOutcome)>,
 }
 
 fn local_seconds(index: u64, fraction: f32) -> f64 {
@@ -147,6 +156,13 @@ pub fn solve_island_round(
     if measurements.is_empty() {
         return None;
     }
+    let speaker_outcomes: Vec<PairSpeakerGeometryOutcome> = measurements
+        .iter_mut()
+        .map(|m| {
+            let (first, second) = (participants[m.first_participant], participants[m.second_participant]);
+            input.speaker_geometry.adjust_pair(first, second, &mut m.result, config)
+        })
+        .collect();
     // Walking phones (plan: "down-weighted or skipped") stay in the clock
     // graph as heavily down-weighted vertices, but neither their offsets nor
     // their positions are taken from a round they walked through: at
@@ -172,16 +188,23 @@ pub fn solve_island_round(
             _ => 0.0,
         })
         .collect();
-    let first_pass = clock_offset_constraints(&measurements, reference_time_s, rates.as_deref(), &[], &motion_energy);
+    // Both passes carry each pair's speaker-geometry σ (constraints are in measurement order).
+    let with_speaker_sigma = |mut constraints: Vec<ClockOffsetConstraint>| {
+        for (constraint, outcome) in constraints.iter_mut().zip(&speaker_outcomes) {
+            constraint.additional_sigma_s = outcome.additional_offset_sigma_s;
+        }
+        constraints
+    };
+    let first_pass = with_speaker_sigma(clock_offset_constraints(&measurements, reference_time_s, rates.as_deref(), &[], &motion_energy));
     let coarse = solve_clock_graph(participants.len(), reference_index, &first_pass, &config.clock_graph).ok()?;
     let coarse_offsets: Vec<f64> = coarse.offsets_s.iter().map(|offset| offset.unwrap_or(0.0)).collect();
-    let constraints = clock_offset_constraints(
+    let constraints = with_speaker_sigma(clock_offset_constraints(
         &measurements,
         reference_time_s,
         rates.as_deref(),
         &coarse_offsets,
         &motion_energy,
-    );
+    ));
     let solution = solve_clock_graph(participants.len(), reference_index, &constraints, &config.clock_graph).ok()?;
     let clock_offsets = participants
         .iter()
@@ -195,12 +218,18 @@ pub fn solve_island_round(
         .collect();
     let ranges: Vec<RangeMeasurement> = measurements
         .iter()
-        .map(|m| RangeMeasurement {
+        .zip(&speaker_outcomes)
+        .map(|(m, outcome)| RangeMeasurement {
             node_i: m.first_participant,
             node_j: m.second_participant,
             distance_m: m.result.distance_m,
-            sigma_m: config.range_sigma_m,
+            sigma_m: outcome.range_sigma_m,
         })
+        .collect();
+    let speaker_geometry_outcomes = measurements
+        .iter()
+        .zip(&speaker_outcomes)
+        .map(|(m, outcome)| (participants[m.first_participant], participants[m.second_participant], *outcome))
         .collect();
     let ranged_pairs = measurements
         .iter()
@@ -253,6 +282,7 @@ pub fn solve_island_round(
         layout_positions_m,
         layout_sigmas_m,
         walking_nodes: walking.iter().map(|&index| participants[index]).collect(),
+        speaker_geometry_outcomes,
     })
 }
 

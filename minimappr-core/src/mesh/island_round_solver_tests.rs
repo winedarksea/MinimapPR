@@ -60,6 +60,7 @@ fn round_reports(stall: Option<(usize, f64)>, config: &IslandSyncConfig) -> (Vec
             arrivals,
             motion_state: MotionState::Still,
             own_chirp_inaudible: false,
+            reporter_attitude: None,
         });
     }
     (emission_order, reports)
@@ -76,6 +77,7 @@ fn solve(stall: Option<(usize, f64)>, config: &IslandSyncConfig) -> IslandRoundS
             self_path_lengths_m: &BTreeMap::new(),
             muted_emitters: &BTreeSet::new(),
             preferred_reference: Some(NodeId(0)),
+            speaker_geometry: &RoundSpeakerGeometry::default(),
         },
         config,
     )

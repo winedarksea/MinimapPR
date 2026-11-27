@@ -135,6 +135,15 @@ class FieldSessionController(
         if (!closed.value) dispatch(device.reportThermalHeadroom(monotonicNanoTime(), headroomFraction))
     }
 
+    /**
+     * Rotation-vector attitude (body → ENU, magnetic north). The node attaches
+     * the latest fresh one to its chirp-round reports so the host can correct
+     * or bound the speaker–mic geometry of each ranged pair.
+     */
+    fun onAttitude(quaternionWxyz: List<Float>, headingAccuracyRadians: Float?) {
+        if (!closed.value) dispatch(device.reportAttitude(monotonicNanoTime(), quaternionWxyz, headingAccuracyRadians, false))
+    }
+
     private fun dispatch(actions: List<FieldDeviceAction>) {
         for (action in actions) {
             when (action) {

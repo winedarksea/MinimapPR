@@ -90,7 +90,13 @@ def command_start(config: LabConfig, arguments: argparse.Namespace) -> int:
         "lead_ms": arguments.lead_ms,
     }
     per_role = {
-        role: {"role": role, "channel": getattr(arguments, f"channel_{role.lower()}") or device.chirp_channel, "source": getattr(arguments, f"source_{role.lower()}")}
+        role: {
+            "role": role,
+            "channel": getattr(arguments, f"channel_{role.lower()}") or device.chirp_channel,
+            "source": getattr(arguments, f"source_{role.lower()}"),
+            # None is skipped by start_activity: the app then plays `channel` only.
+            "channel_cycle": getattr(arguments, f"channel_cycle_{role.lower()}"),
+        }
         for role, device in both_devices(config)
     }
     for role, device in both_devices(config):
@@ -153,6 +159,30 @@ def command_stop(config: LabConfig, arguments: argparse.Namespace) -> int:
     return 0
 
 
+STEREO_CHANNELS = ("left", "right", "both")
+
+
+def channel_cycle(text: str) -> str:
+    """argparse type: `left,right,both` → the same string, validated."""
+    names = [name.strip() for name in text.split(",") if name.strip()]
+    unknown = [name for name in names if name not in STEREO_CHANNELS]
+    if not names or unknown:
+        raise argparse.ArgumentTypeError(f"channel cycle needs names from {STEREO_CHANNELS}, got {text!r}")
+    return ",".join(names)
+
+
+def parse_channel_values(pairs: list[str], components: int) -> dict[str, object]:
+    """`right=0.16` or `right=0.16,0,0` (repeatable) → {channel: value}."""
+    values: dict[str, object] = {}
+    for pair in pairs:
+        channel, _, text = pair.partition("=")
+        numbers = [float(part) for part in text.split(",")]
+        if channel not in STEREO_CHANNELS or len(numbers) != components:
+            raise SystemExit(f"expected channel=value with {components} number(s) and channel in {STEREO_CHANNELS}: {pair!r}")
+        values[channel] = numbers[0] if components == 1 else numbers
+    return values
+
+
 def parse_marker_surfaces(pairs: list[str]) -> dict[str, str]:
     surfaces = {}
     for pair in pairs:
@@ -187,6 +217,12 @@ def command_pull(config: LabConfig, arguments: argparse.Namespace) -> int:
         speaker_offset = getattr(arguments, f"speaker_offset_{role.lower()}")
         if speaker_offset is not None:
             roles[role]["speaker_offset_world_m"] = speaker_offset
+        self_path_by_channel = parse_channel_values(getattr(arguments, f"self_path_by_channel_{role.lower()}"), 1)
+        if self_path_by_channel:
+            roles[role]["self_path_m_by_channel"] = self_path_by_channel
+        speaker_offset_by_channel = parse_channel_values(getattr(arguments, f"speaker_offset_by_channel_{role.lower()}"), 3)
+        if speaker_offset_by_channel:
+            roles[role]["speaker_offset_world_m_by_channel"] = speaker_offset_by_channel
     manifest = {
         "label": arguments.label or run.get("label", run_id),
         "matrix_run": arguments.matrix_run,
@@ -219,12 +255,14 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--run-id")
     start.add_argument("--period-ms", type=int, default=4_000)
     start.add_argument("--waveform", choices=["updown_hfm", "hfm", "lfm"], default="updown_hfm")
-    start.add_argument("--band", type=float, nargs=2, default=[13_000.0, 16_000.0], metavar=("LOW_HZ", "HIGH_HZ"))
+    start.add_argument("--band", type=float, nargs=2, default=[12_000.0, 18_000.0], metavar=("LOW_HZ", "HIGH_HZ"))
     start.add_argument("--duration-s", type=float, default=0.05)
     start.add_argument("--level-dbfs", type=float, default=-6.0)
     start.add_argument("--lead-ms", type=int, default=300)
     for role in ("a", "b"):
         start.add_argument(f"--channel-{role}", choices=["left", "right", "both"], help="default: the phone's bottom-speaker channel from devices.json")
+        start.add_argument(f"--channel-cycle-{role}", type=channel_cycle, metavar="CH,CH,...",
+                           help="rotate channels per emission inside one stream (emission k plays item k %% n), e.g. left,right,both")
         start.add_argument(f"--source-{role}", choices=["unprocessed", "voice_recognition", "mic", "camcorder", "default"], default="voice_recognition")
     mark = sub.add_parser("mark")
     mark.add_argument("label")
@@ -246,6 +284,10 @@ def build_parser() -> argparse.ArgumentParser:
     for role in ("a", "b"):
         pull.add_argument(f"--speaker-offset-{role}", type=float, nargs=3, metavar=("X", "Y", "Z"),
                           help="speaker minus ranging mic in the run frame (A's mic at the origin, B's at +x tape), m")
+        pull.add_argument(f"--self-path-by-channel-{role}", action="append", default=[], metavar="CH=M",
+                          help="d_ii for one channel of a channel-cycle run, repeatable (falls back to --self-path)")
+        pull.add_argument(f"--speaker-offset-by-channel-{role}", action="append", default=[], metavar="CH=X,Y,Z",
+                          help="speaker offset for one channel, repeatable (falls back to --speaker-offset)")
     pull.add_argument("--marker-surface", action="append", default=[], help="label=surface, repeatable")
     pull.add_argument("--notes", default="")
     analyse = sub.add_parser("analyse")

@@ -18,6 +18,36 @@ pub struct ScannedArrival {
     pub doppler_skew_samples: f64,
     /// Largest |sample| over the chirp span (≈1 = clipped).
     pub peak_fraction: f32,
+    /// Detector diagnostics, first part (up sweep): strongest peak minus
+    /// pick, samples (negative after a limiter-boosted precursor).
+    pub lead_before_strongest_samples: f64,
+    /// Lag of a rejected self precursor from the airborne peak, from the
+    /// first part that rejected one.
+    pub rejected_precursor_lead_samples: Option<f64>,
+    /// Smallest picked/strongest envelope ratio over the parts, dB: how far
+    /// above the −10 dB earliest-peak acceptance the pick sat (0 = the
+    /// strongest peak was the pick).
+    pub first_arrival_margin_db: f64,
+    pub precursor_rejected: bool,
+    pub double_arrival_suspected: bool,
+}
+
+#[cfg(test)]
+impl ScannedArrival {
+    /// A single clean arrival (pick = strongest peak), for unit tests.
+    pub fn clean(sample_index: f64, snr_db: f64) -> Self {
+        Self {
+            sample_index,
+            snr_db,
+            doppler_skew_samples: 0.0,
+            peak_fraction: 0.1,
+            lead_before_strongest_samples: 0.0,
+            rejected_precursor_lead_samples: None,
+            first_arrival_margin_db: 0.0,
+            precursor_rejected: false,
+            double_arrival_suspected: false,
+        }
+    }
 }
 
 pub fn waveform_from_description(description: &WaveformDescription, sample_rate_hz: f64) -> Result<ChirpWaveform, String> {
@@ -48,6 +78,11 @@ impl ArrivalScanner {
         self.waveform_length
     }
 
+    /// Self-recording precursor rejection window for this d_ii, samples.
+    pub fn precursor_lead_window_samples(&self, self_path_length_m: f64) -> Option<f64> {
+        self.detector.precursor_lead_window_samples(Some(self_path_length_m))
+    }
+
     /// Search waveform starts within `centre ± half_window` samples.
     pub fn detect_near(&self, audio: &[f32], centre_sample: f64, half_window_samples: f64, context: ArrivalContext) -> Option<ScannedArrival> {
         let first = (centre_sample - half_window_samples).max(0.0) as usize;
@@ -65,11 +100,22 @@ impl ArrivalScanner {
         let arrival = self.detector.detect(slice, 0..lag_count.min(usable_lags), context).ok()?;
         let span_start = (arrival.sample_index.max(0.0) as usize).min(slice.len());
         let span_end = (span_start + self.waveform_length).min(slice.len());
+        let first_part = arrival.part_arrivals.first()?;
+        let first_arrival_margin_db = arrival
+            .part_arrivals
+            .iter()
+            .map(|part| 20.0 * (part.picked_amplitude.max(f32::MIN_POSITIVE) as f64 / part.strongest_amplitude.max(f32::MIN_POSITIVE) as f64).log10())
+            .fold(0.0, f64::min);
         Some(ScannedArrival {
             sample_index: first as f64 + arrival.sample_index,
             snr_db: arrival.snr_db,
             doppler_skew_samples: arrival.doppler_skew_samples,
             peak_fraction: slice[span_start..span_end].iter().fold(0.0f32, |peak, s| peak.max(s.abs())),
+            lead_before_strongest_samples: first_part.lead_before_strongest_samples,
+            rejected_precursor_lead_samples: arrival.part_arrivals.iter().find_map(|part| part.rejected_precursor_lead_samples),
+            first_arrival_margin_db,
+            precursor_rejected: arrival.part_arrivals.iter().any(|part| part.precursor_rejected),
+            double_arrival_suspected: arrival.part_arrivals.iter().any(|part| part.double_arrival_suspected),
         })
     }
 

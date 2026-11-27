@@ -1,23 +1,28 @@
-//! Matched-filter first-arrival picking with structural-precursor rejection.
+//! Matched-filter first-arrival picking.
 //!
 //! Remote chirps: reflections off trunks and the ground can be stronger
 //! than the direct path, so the pick is the *earliest* envelope peak that
 //! clears the noise floor and a level relative to the strongest peak — and
 //! that cannot be explained as a sidelobe of the strongest peak (the
-//! template's own autocorrelation sidelobes are tabulated once).
+//! template's own autocorrelation sidelobes are tabulated once). Real
+//! transducers raise the first sidelobe above the template's: the Pixel 7a
+//! earpiece lifts it by up to 4.7 dB (13–16 kHz remote picks), which the old
+//! 1.6× (+4.1 dB) margin let through on one sweep half every few rounds —
+//! an 11-sample (40 mm) remote jump (2026-11-26 field runs r3_dii20_*).
 //!
-//! Self-recordings: sound crosses the phone body at ~5,000 m/s, so a weak
-//! structural copy of the phone's own chirp arrives before the airborne
-//! one (plan, "Watch for sound through the phone body"). On the self
-//! channel the airborne path at d_ii is the strongest arrival and nothing
-//! but the body path can arrive earlier, so any earlier peak that leads
-//! the strongest by no more than the body/air lead time is rejected as
-//! that precursor — whatever its level: the input limiter compresses the
-//! loud airborne path but not the quieter precursor, so after limiting a
-//! −14 dB precursor (phone on a hard table) can come out within a few dB
-//! of the airborne peak (seen in the simulator, near mic). Self picks are
-//! timed at the envelope peak: there is no multipath to dodge at 1–30 cm,
-//! and a merged precursor would drag a leading edge early.
+//! Self recordings (default `SelfRecordingPick::StrongestPeak`): the pick
+//! is the strongest peak. The earliest-peak search is wrong here: at 1–30
+//! cm there is no weaker earlier path worth finding, while the near-field
+//! speaker→mic channel lifts sidelobes up to +10 dB over the template's
+//! (Pixel 7a earpiece, 12–18 kHz), far past any usable margin. The older
+//! body-path precursor policy (`EarliestOutsideBodyPrecursor`: earlier
+//! peaks within the body/air lead of d_ii rejected, a limiter-boosted
+//! strongest precursor skipped for a later "airborne" peak) is kept for
+//! comparison; in the field it failed: on the 7a earpiece the peak it took
+//! for a body precursor is the placement-stable arrival — it became the
+//! strongest peak after a re-placement and the policy skipped it for a copy
+//! 24 samples later (−87 mm), and the window coupled d_ii to the pick.
+//! Self picks are timed at the envelope peak.
 //!
 //! Everything here works on any template, including a short click template
 //! for clap-based or audible fallback sync.
@@ -49,10 +54,22 @@ pub struct FirstArrivalConfig {
     /// emission (bottom speaker + earpiece ~15 cm apart ≈ 440 µs).
     pub double_arrival_maximum_separation_s: f64,
     pub double_arrival_relative_level_db: f64,
+    pub self_recording_pick: SelfRecordingPick,
     /// Two copies closer than the main-lobe width merge into one broad
     /// peak; a half-amplitude width this many times the template's flags it.
     pub double_arrival_width_ratio: f64,
     pub timing: ArrivalTiming,
+}
+
+/// Which peak a self recording (a phone hearing its own chirp) is timed at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelfRecordingPick {
+    /// The strongest envelope peak; d_ii only enters the range equation.
+    StrongestPeak,
+    /// Earliest comparable peak outside the body/air precursor window of
+    /// d_ii, skipping a limiter-boosted strongest precursor (pre-field
+    /// policy; see the module notes for why it is not the default).
+    EarliestOutsideBodyPrecursor,
 }
 
 /// How the arrival time is read off the picked envelope peak.
@@ -79,12 +96,16 @@ impl Default for FirstArrivalConfig {
             minimum_snr_db: 14.0,
             first_arrival_relative_level_db: -10.0,
             maximum_lead_before_strongest_s: 0.03,
-            sidelobe_rejection_margin: 1.6,
+            // +6 dB over the template sidelobe: clears the 7a earpiece's
+            // +4.7 dB (worst seen on remote picks, 2026-11-26) while a true
+            // earlier copy above −10 dB still passes beyond ~2 main lobes.
+            sidelobe_rejection_margin: 2.0,
             precursor_lead_tolerance_s: 60e-6,
             air_sound_speed_mps: 343.0,
             double_arrival_maximum_separation_s: 0.8e-3,
             double_arrival_relative_level_db: -6.0,
             double_arrival_width_ratio: 1.5,
+            self_recording_pick: SelfRecordingPick::StrongestPeak,
         }
     }
 }
@@ -109,7 +130,14 @@ pub struct ChirpArrival {
     /// Strongest peak minus pick, samples (negative when the strongest peak
     /// was a limiter-boosted self-recording precursor before the pick).
     pub lead_before_strongest_samples: f64,
+    /// Self recording: an earlier peak cleared the acceptance and sidelobe
+    /// tests but was not picked (under `StrongestPeak`, any such peak; under
+    /// `EarliestOutsideBodyPrecursor`, one taken as the body precursor).
     pub precursor_rejected: bool,
+    /// Lag (samples) between that earlier peak and the pick: diagnostics
+    /// for self channels with two comparable arrivals (the 7a earpiece's
+    /// sit 24 samples apart at 13–16 kHz, their level ratio set by placement).
+    pub rejected_precursor_lead_samples: Option<f64>,
     pub double_arrival_suspected: bool,
 }
 
@@ -195,7 +223,9 @@ impl FirstArrivalDetector {
             * self.sample_rate_hz
     }
 
-    fn precursor_lead_window_samples(&self, self_path_length_m: Option<f64>) -> f64 {
+    /// Earlier peaks within this lag of the strongest are treated as the
+    /// body-path precursor for a self recording with this d_ii.
+    pub fn precursor_lead_window_samples(&self, self_path_length_m: Option<f64>) -> f64 {
         // Interference with the airborne main lobe can move the apparent
         // precursor peak up to a main-lobe width earlier than its true lead.
         self.body_air_lead_samples(self_path_length_m)
@@ -284,15 +314,23 @@ impl FirstArrivalDetector {
         let maximum_lead =
             (self.config.maximum_lead_before_strongest_s * self.sample_rate_hz) as usize;
         let search_start = strongest_index.saturating_sub(maximum_lead).max(start);
-        let precursor_window = match context {
-            ArrivalContext::SelfRecording { self_path_length_m } => {
-                Some(self.precursor_lead_window_samples(self_path_length_m))
-            }
+        let self_policy = match context {
+            ArrivalContext::SelfRecording { .. } => Some(self.config.self_recording_pick),
             ArrivalContext::RemoteEmitter => None,
         };
+        let precursor_window = match context {
+            ArrivalContext::SelfRecording { self_path_length_m }
+                if self_policy == Some(SelfRecordingPick::EarliestOutsideBodyPrecursor) =>
+            {
+                Some(self.precursor_lead_window_samples(self_path_length_m))
+            }
+            _ => None,
+        };
+        let strongest_only = self_policy == Some(SelfRecordingPick::StrongestPeak);
 
         let mut picked_index = strongest_index;
         let mut precursor_rejected = false;
+        let mut rejected_precursor_lead_samples = None;
         for index in search_start..strongest_index {
             let value = envelope[index];
             if value < acceptance || !is_local_peak(envelope, index) {
@@ -303,22 +341,31 @@ impl FirstArrivalDetector {
             if (value as f64) < sidelobe as f64 * self.config.sidelobe_rejection_margin {
                 continue;
             }
+            if strongest_only {
+                // Diagnostics only: the earliest comparable earlier peak.
+                precursor_rejected = true;
+                rejected_precursor_lead_samples = Some(lag as f64);
+                break;
+            }
             if let Some(window) = precursor_window {
                 if (lag as f64) <= window {
                     precursor_rejected = true;
+                    rejected_precursor_lead_samples.get_or_insert(lag as f64);
                     continue;
                 }
             }
             picked_index = index;
             break;
         }
-        // Self-recording: if limiting made the precursor the strongest peak,
+        // EarliestOutsideBodyPrecursor only: if limiting made the precursor the strongest peak,
         // the airborne path is the first comparable peak one body/air lead
         // after it. Skipped when an earlier peak was already rejected as the
         // precursor: then the strongest peak *is* the airborne path, and a
         // later peak is a reflection.
         let later_lags = match context {
-            ArrivalContext::SelfRecording { self_path_length_m } if !precursor_rejected => {
+            ArrivalContext::SelfRecording { self_path_length_m }
+                if precursor_window.is_some() && !precursor_rejected =>
+            {
                 self.airborne_after_precursor_lags(self_path_length_m)
             }
             _ => None,
@@ -337,6 +384,7 @@ impl FirstArrivalDetector {
             if let Some(index) = later_airborne {
                 picked_index = index;
                 precursor_rejected = true;
+                rejected_precursor_lead_samples = Some((index - strongest_index) as f64);
             }
         }
 
@@ -361,6 +409,7 @@ impl FirstArrivalDetector {
             // Negative when the pick follows a limiter-boosted precursor.
             lead_before_strongest_samples: strongest_index as f64 - picked_index as f64,
             precursor_rejected,
+            rejected_precursor_lead_samples,
             double_arrival_suspected,
         })
     }

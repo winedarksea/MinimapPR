@@ -90,6 +90,24 @@ pub struct ChirpArrival {
     pub peak_to_noise_db: f32,
 }
 
+/// A phone's attitude near a chirp round, so the host can rotate the
+/// per-model speaker vector into the world frame (speaker–mic geometry
+/// correction in `mesh::speaker_geometry`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DeviceAttitude {
+    /// Unit quaternion (w, x, y, z) taking body-frame vectors (Android
+    /// sensor frame: x right, y up the screen, z out of the screen) into
+    /// east-north-up: v_enu = q · v_body · q*. This is Android's rotation
+    /// vector (`SensorManager.getQuaternionFromVector`).
+    pub body_to_east_north_up_wxyz: [f32; 4],
+    /// Platform heading-error estimate, radians (Android rotation vector
+    /// `values[4]`); `None` when the sensor does not report one.
+    pub heading_accuracy_rad: Option<f32>,
+    /// False when "north" is magnetic north (Android rotation vectors); the
+    /// host then adds its declination uncertainty to the heading error.
+    pub heading_is_true_north: bool,
+}
+
 /// Node -> host: what it heard in a round, plus its own emission time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChirpArrivalReport {
@@ -101,6 +119,11 @@ pub struct ChirpArrivalReport {
     pub motion_state: MotionState,
     /// Raised when its own slot was silent (muted phone).
     pub own_chirp_inaudible: bool,
+    /// Appended in protocol minor 1 (append-only rule, `field_message`).
+    /// The reporter's latest attitude if fresh enough; `None` without a
+    /// rotation sensor.
+    #[serde(default)]
+    pub reporter_attitude: Option<DeviceAttitude>,
 }
 
 /// Host -> session: current membership of one acoustic island.

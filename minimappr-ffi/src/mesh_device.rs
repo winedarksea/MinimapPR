@@ -23,7 +23,7 @@ use minimappr_core::mesh::host_transport_policy::{CellLinkQuality, SessionTransp
 use minimappr_core::mesh::node_state_machine::{DeviceStatusChange, FieldNodeStateMachine, NodeInput, NodeUserNotice};
 use minimappr_core::mesh::onset_clip_set_localizer::{OnsetClipLocalizerConfig, OnsetClipSetLocalizer};
 use minimappr_core::mesh::session_clock_alignment::{SessionClockAlignment, SessionClockAlignmentConfig};
-use minimappr_core::protocol::session_messages::NodeDescriptor;
+use minimappr_core::protocol::session_messages::{DeviceAttitude, NodeDescriptor};
 use minimappr_core::protocol::wire_codes::NodeKind;
 use minimappr_core::protocol::{NodeId, SessionId};
 
@@ -407,6 +407,26 @@ impl FieldMeshDevice {
 
     pub fn report_thermal_headroom(&self, local_now_ns: i64, headroom_fraction: f32) -> Vec<FieldDeviceAction> {
         self.device_status(local_now_ns, DeviceStatusChange::ThermalHeadroom(headroom_fraction))
+    }
+
+    /// Rotation-vector attitude, sampled off the audio path (~1 Hz); the
+    /// node attaches the latest fresh one to its round reports.
+    /// `quaternion_wxyz`: body (x right, y up the screen, z out) → ENU, as
+    /// `SensorManager.getQuaternionFromVector` returns it. North is magnetic
+    /// unless `heading_is_true_north`. `heading_accuracy_rad`: the sensor's
+    /// `values[4]`, `None` when it reports none.
+    pub fn report_attitude(
+        &self,
+        local_now_ns: i64,
+        quaternion_wxyz: Vec<f32>,
+        heading_accuracy_rad: Option<f32>,
+        heading_is_true_north: bool,
+    ) -> Result<Vec<FieldDeviceAction>, FieldFfiError> {
+        let body_to_east_north_up_wxyz: [f32; 4] = quaternion_wxyz.as_slice().try_into().map_err(|_| FieldFfiError::InvalidArgument {
+            detail: format!("attitude quaternion needs 4 components, got {}", quaternion_wxyz.len()),
+        })?;
+        let attitude = DeviceAttitude { body_to_east_north_up_wxyz, heading_accuracy_rad, heading_is_true_north };
+        Ok(self.device_status(local_now_ns, DeviceStatusChange::Attitude(attitude)))
     }
 
     pub fn next_device_sample_index(&self) -> u64 {

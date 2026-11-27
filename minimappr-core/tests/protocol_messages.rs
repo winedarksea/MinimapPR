@@ -6,7 +6,7 @@ use minimappr_core::protocol::session_messages::*;
 use minimappr_core::protocol::wire_codes::*;
 use minimappr_core::protocol::{
     decode_field_message_frame, DecodedFrame, FieldMessage, FieldMessageDecodeError, WireHeader,
-    FIELD_PROTOCOL_MAJOR_VERSION, KNOWN_MESSAGE_KIND_IDS,
+    FIELD_PROTOCOL_MAJOR_VERSION, FIELD_PROTOCOL_MINOR_VERSION, KNOWN_MESSAGE_KIND_IDS,
 };
 
 const SESSION: SessionId = SessionId([7; 16]);
@@ -102,6 +102,11 @@ fn one_of_every_message() -> Vec<FieldMessage> {
             }],
             motion_state: MotionState::Still,
             own_chirp_inaudible: false,
+            reporter_attitude: Some(DeviceAttitude {
+                body_to_east_north_up_wxyz: [0.5, 0.5, 0.5, 0.5],
+                heading_accuracy_rad: Some(0.2),
+                heading_is_true_north: false,
+            }),
         }),
         FieldMessage::IslandMembership(IslandMembership {
             island_id: 1,
@@ -351,7 +356,7 @@ fn every_message_kind_round_trips() {
                 message: decoded,
                 minor_version,
             } => {
-                assert_eq!(minor_version, 0);
+                assert_eq!(minor_version, FIELD_PROTOCOL_MINOR_VERSION);
                 assert_eq!(decoded, message);
             }
             other => panic!("expected known, got {other:?}"),

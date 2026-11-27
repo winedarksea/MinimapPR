@@ -5,7 +5,7 @@
 //!
 //! Flow: [`bundle_loader`] ([`capture_timeline`]) → [`round_pairing`] (picks via [`arrival_scan`])
 //! → [`capture_continuity`] → [`pair_ranging_series`] / [`clock_residuals`] / [`onset_stability`] /
-//! [`spectral_leakage`] / [`channel_map`] → [`run_analysis::RunReport`] →
+//! [`spectral_leakage`] / [`channel_map`] ([`pick_structure`]) / [`microphone_path`] → [`run_analysis::RunReport`] →
 //! [`gate_evaluation`] → [`report_writer`].
 
 pub mod analysis_config;
@@ -18,8 +18,10 @@ pub mod capture_timeline;
 pub mod channel_map;
 pub mod clock_residuals;
 pub mod gate_evaluation;
+pub mod microphone_path;
 pub mod onset_stability;
 pub mod pair_ranging_series;
+pub mod pick_structure;
 pub mod report_writer;
 pub mod round_pairing;
 pub mod run_analysis;

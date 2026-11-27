@@ -5,6 +5,7 @@ import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.media.MicrophoneInfo
 import android.os.Build
+import com.minimappr.field.audio.putMicrophoneInfo
 import com.minimappr.field.capture.unprocessedCaptureSupported
 import com.minimappr.field.json.JsonObjectBuilder
 import com.minimappr.field.json.jsonObject
@@ -71,7 +72,7 @@ class AndroidDeviceSurvey(private val context: Context) {
             put("performance_mode", paths.playbackPerformanceMode)
             put("low_latency", paths.lowLatencyRequested)
         }
-        putObjects("active_microphones", activeMicrophones.map { microphone -> { microphoneJson(microphone) } })
+        putObjects("active_microphones", activeMicrophones.map { microphone -> { putMicrophoneInfo(microphone) } })
         put("unprocessed_supported", unprocessedCaptureSupported(context))
         putObject("near_ultrasound") {
             put("mic", audioManager.getProperty(AudioManager.PROPERTY_SUPPORT_MIC_NEAR_ULTRASOUND)?.toBooleanStrictOrNull())
@@ -85,20 +86,6 @@ class AndroidDeviceSurvey(private val context: Context) {
         }
         put("started_ns", startedNanoTime)
         put("started_wall_ms", startedWallClockMilliseconds)
-    }
-
-    private fun JsonObjectBuilder.microphoneJson(microphone: MicrophoneInfo) {
-        put("id", microphone.id)
-        put("description", microphone.description)
-        put("type", microphone.type)
-        put("address", microphone.address)
-        put("location", microphone.location)
-        put("directionality", microphone.directionality)
-        val position = microphone.position
-        putNumbers("position_m", listOf(position.x.toDouble(), position.y.toDouble(), position.z.toDouble()))
-        val orientation = microphone.orientation
-        putNumbers("orientation", listOf(orientation.x.toDouble(), orientation.y.toDouble(), orientation.z.toDouble()))
-        put("sensitivity_dbfs_at_94db_spl", microphone.sensitivity)
     }
 }
 

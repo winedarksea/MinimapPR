@@ -20,6 +20,7 @@ use super::island_round_solver::{solve_island_round, IslandRoundInput};
 use super::island_sync_engine::IslandSyncEngine;
 use super::local_tangent_plane::LocalTangentPlane;
 use super::round_diagnostics::{build_round_diagnostics, RoundDiagnostics, RoundDiagnosticsInput};
+use super::speaker_geometry::RoundSpeakerGeometry;
 use super::{MeshMilliseconds, MessageRecipient, OutboundMessage};
 
 /// Scheduler key for present nodes not yet in any island.
@@ -279,6 +280,7 @@ impl HostSyncPipeline {
                 .collect();
             let mut members: Vec<NodeId> = island.members.iter().copied().filter(|node| !gapped.contains(node)).collect();
             let preferred_reference = island.reference_node;
+            let speaker_geometry = RoundSpeakerGeometry::for_island_round(&round.reports, membership, island.layout.as_ref(), sync);
             let solve = |members: Vec<NodeId>| {
                 solve_island_round(
                     &IslandRoundInput {
@@ -288,6 +290,7 @@ impl HostSyncPipeline {
                         self_path_lengths_m: &self_paths,
                         muted_emitters: &self.muted_nodes,
                         preferred_reference,
+                        speaker_geometry: &speaker_geometry,
                     },
                     sync,
                 )

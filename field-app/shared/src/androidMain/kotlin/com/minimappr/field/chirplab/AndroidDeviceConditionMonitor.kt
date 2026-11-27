@@ -26,6 +26,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 private const val QUATERNION_COMPONENTS = 4
+/** Rotation-vector `values[4]`: estimated heading accuracy, radians (−1 if unavailable). */
+private const val HEADING_ACCURACY_VALUE_INDEX = 4
 private const val MICROSECONDS_PER_MILLISECOND = 1_000
 private const val NANOSECONDS_PER_MILLISECOND = 1_000_000L
 /** getThermalHeadroom forecast horizon; 10 s matches the poll cadence. */
@@ -33,9 +35,17 @@ private const val THERMAL_FORECAST_SECONDS = 10
 
 /**
  * Logs the run conditions the analyser needs to explain outliers:
- * attitude (rotation vector, 1 Hz), screen on/off, audio route changes,
- * thermal status/headroom (also forwarded to the session device) and media
- * volume changes. All callbacks only append to the non-blocking event log.
+ * attitude (rotation vector, 1 Hz; also forwarded to the session device
+ * for the speaker–mic geometry correction), screen on/off, audio route
+ * changes, thermal status/headroom (also forwarded) and media volume
+ * changes. All callbacks only append to the non-blocking event log or hand
+ * a small value to the session device; none touch the audio threads.
+ *
+ * Attitude convention: `SensorManager.getQuaternionFromVector` gives the
+ * unit quaternion (w, x, y, z) rotating the device frame (x right, y up the
+ * screen, z out of the screen) into east-north-up, with north = magnetic
+ * north (no declination applied). Heading accuracy is the sensor's own
+ * estimate (`values[4]`), null when the sensor does not report one.
  */
 class AndroidDeviceConditionMonitor(
     private val context: Context,
@@ -44,6 +54,7 @@ class AndroidDeviceConditionMonitor(
     private val routedInputDescription: () -> String?,
     private val routedOutputDescription: () -> String?,
     private val onThermalHeadroom: (Float) -> Unit = {},
+    private val onAttitude: (quaternionWxyz: List<Float>, headingAccuracyRadians: Float?) -> Unit = { _, _ -> },
 ) {
     private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -61,10 +72,13 @@ class AndroidDeviceConditionMonitor(
             if (event.timestamp - lastAttitudeLoggedNs < configuration.attitudeSampleIntervalMilliseconds * NANOSECONDS_PER_MILLISECOND) return
             lastAttitudeLoggedNs = event.timestamp
             SensorManager.getQuaternionFromVector(quaternion, event.values)
+            val headingAccuracyRadians = event.values.getOrNull(HEADING_ACCURACY_VALUE_INDEX)?.takeIf { it.isFinite() && it >= 0f }
             eventLog.append(FieldRunEventTypes.ATTITUDE) {
                 putNumbers("quaternion", quaternion.map { it.toDouble() })
                 put("sensor", attitudeSensorName)
+                put("heading_accuracy_rad", headingAccuracyRadians)
             }
+            onAttitude(quaternion.toList(), headingAccuracyRadians)
         }
 
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit

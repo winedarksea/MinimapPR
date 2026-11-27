@@ -12,11 +12,16 @@ use crate::arrival_scan::{waveform_from_description, ArrivalScanner};
 use crate::bundle_loader::PhoneBundle;
 use crate::bundle_schema::{RunManifest, DEFAULT_AIR_TEMPERATURE_C};
 use crate::capture_continuity::{capture_continuity, continuous_rounds, CaptureContinuity};
-use crate::channel_map::{dominant_orientation, ChannelMapObservation};
+use crate::channel_map::{channel_aligned_self_picks, dominant_orientation, emitter_channel_evidence, ChannelMapObservation, EmitterChannelEvidence, EmitterPicks};
 use crate::clock_residuals::{clock_residual_report, ClockResidualReport};
 use crate::onset_stability::{onset_stability, OnsetStabilityReport};
-use crate::pair_ranging_series::{distance_statistics, implied_mean_self_path_m, median_of, range_rounds, CompensationMode, DistanceStatistics, RangedRound, SpeakerGeometry};
-use crate::round_pairing::{pair_rounds, pick_remote_arrivals, pick_self_arrivals, PhonePicks};
+use crate::microphone_path::{microphone_path_summary, MicrophonePathSummary};
+use crate::pair_ranging_series::{
+    distance_by_channel_pair, distance_statistics, implied_mean_self_path_m, median_of, range_rounds, ChannelPairDistance, CompensationMode, DistanceStatistics, MicLayout,
+    RangedRound,
+};
+use crate::pick_structure::{pick_structure, PickStructure, PickWithWindow};
+use crate::round_pairing::{cross_phone_sample_mapper, pair_rounds, pick_remote_arrivals, pick_self_arrivals, PhonePicks};
 use crate::spectral_leakage::{leakage_report, LeakageReport};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -41,6 +46,11 @@ pub struct PhoneSummary {
     pub median_remote_snr_db: Option<f64>,
     pub screen_off_events: usize,
     pub volume_zero_seen: bool,
+    /// This phone's own chirps, all channels.
+    pub self_pick_structure: PickStructure,
+    /// The other phone's chirps as heard here, all channels.
+    pub remote_pick_structure: PickStructure,
+    pub microphone_path: MicrophonePathSummary,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -63,6 +73,11 @@ pub struct RunReport {
     pub implied_mean_self_path_m: Option<f64>,
     pub clock: Option<ClockResidualReport>,
     pub channel_map: Vec<ChannelMapObservation>,
+    /// Per emitter and channel: self/cross path offsets and pick structure.
+    pub channel_evidence: Vec<EmitterChannelEvidence>,
+    /// Range split by (A channel, B channel), in `distance_by_channel_mode`.
+    pub distance_by_channel: Vec<ChannelPairDistance>,
+    pub distance_by_channel_mode: String,
     #[serde(skip)]
     pub ranged_rounds: Vec<RangedRound>,
 }
@@ -73,10 +88,19 @@ fn count_events(bundle: &PhoneBundle, predicate: impl Fn(&crate::bundle_schema::
 
 fn continuity_of(bundle: &PhoneBundle, picks: &PhonePicks, config: &AnalysisConfig) -> CaptureContinuity {
     let drops = bundle.capture_timeline.as_ref().map_or(&[][..], |timeline| &timeline.silent_drops[..]);
-    capture_continuity(&picks.self_picks, drops, config.self_interval_break_tolerance_samples, config.sample_rate_hz)
+    let aligned = channel_aligned_self_picks(&picks.self_picks, config.sample_rate_hz);
+    capture_continuity(&aligned, drops, config.self_interval_break_tolerance_samples, config.sample_rate_hz)
 }
 
-fn phone_summary(role: &str, bundle: &PhoneBundle, picks: &PhonePicks, scanner: &ArrivalScanner, config: &AnalysisConfig) -> PhoneSummary {
+/// What one phone needs for its pick structure: its d_ii per channel.
+struct PhoneContext<'a> {
+    role: &'a str,
+    self_path_for_channel: &'a dyn Fn(Option<&str>) -> f64,
+    speed_of_sound_mps: f64,
+}
+
+fn phone_summary(phone: &PhoneContext, bundle: &PhoneBundle, picks: &PhonePicks, scanner: &ArrivalScanner, config: &AnalysisConfig) -> PhoneSummary {
+    let role = phone.role;
     use crate::bundle_schema::BundleEvent as E;
     let self_starts: Vec<f64> = picks.self_picks.iter().filter_map(|p| p.arrival.map(|a| a.sample_index)).collect();
     let remote: Vec<_> = picks.remote_picks.iter().flatten().collect();
@@ -95,7 +119,7 @@ fn phone_summary(role: &str, bundle: &PhoneBundle, picks: &PhonePicks, scanner: 
         writer_overflows: count_events(bundle, |e| matches!(e, E::WriterOverflow { .. })),
         capture_anchor_residual_us: bundle.capture_timeline.as_ref().map(|t| t.residual_rms_ns() / 1e3),
         capture_rate_offset_ppm: bundle.capture_timeline.as_ref().and_then(|t| t.rate_offset_ppm()),
-        onset: onset_stability(&picks.self_picks, &bundle.markers(), &continuity, fs),
+        onset: onset_stability(&channel_aligned_self_picks(&picks.self_picks, fs), &bundle.markers(), &continuity, fs),
         capture_continuity: continuity,
         blind_scanned: picks.blind_scanned,
         self_leakage: leakage_report(&bundle.audio.samples, &self_starts, scanner.waveform_length(), config.leakage_band_hz, fs),
@@ -104,6 +128,24 @@ fn phone_summary(role: &str, bundle: &PhoneBundle, picks: &PhonePicks, scanner: 
         median_remote_snr_db: median_of(&remote_snrs),
         screen_off_events: count_events(bundle, |e| matches!(e, E::Screen { on: false, .. })),
         volume_zero_seen: bundle.events.iter().any(|e| matches!(e, E::Volume { music_index: 0, .. })),
+        self_pick_structure: pick_structure(
+            &picks
+                .self_picks
+                .iter()
+                .filter_map(|p| {
+                    let window = scanner.precursor_lead_window_samples((phone.self_path_for_channel)(p.channel.as_deref()));
+                    p.arrival.map(|arrival| PickWithWindow { arrival, precursor_window_samples: window })
+                })
+                .collect::<Vec<_>>(),
+            phone.speed_of_sound_mps,
+            fs,
+        ),
+        remote_pick_structure: pick_structure(
+            &remote.iter().map(|arrival| PickWithWindow { arrival: **arrival, precursor_window_samples: None }).collect::<Vec<_>>(),
+            phone.speed_of_sound_mps,
+            fs,
+        ),
+        microphone_path: microphone_path_summary(bundle),
     }
 }
 
@@ -128,29 +170,27 @@ pub fn analyse_run(run_directory: &Path, config: &AnalysisConfig) -> Result<RunR
     }
     let speed_of_sound_mps = manifest.speed_of_sound_mps();
     let scanner = scanner_for(&a, speed_of_sound_mps, config)?;
-    let self_paths = SelfPathLengths {
-        a_m: role_a.self_path_m.unwrap_or(config.default_self_path_length_m),
-        b_m: role_b.self_path_m.unwrap_or(config.default_self_path_length_m),
-    };
-    let (a_self, a_blind) = pick_self_arrivals(&a, &scanner, self_paths.a_m, config);
-    let (b_self, b_blind) = pick_self_arrivals(&b, &scanner, self_paths.b_m, config);
+    let default_self_path_m = config.default_self_path_length_m;
+    let a_self_path = |channel: Option<&str>| role_a.self_path_for_channel(channel, default_self_path_m);
+    let b_self_path = |channel: Option<&str>| role_b.self_path_for_channel(channel, default_self_path_m);
+    let self_paths = SelfPathLengths { a_m: a_self_path(None), b_m: b_self_path(None) };
+    let (a_self, a_blind) = pick_self_arrivals(&a, &scanner, a_self_path, config);
+    let (b_self, b_blind) = pick_self_arrivals(&b, &scanner, b_self_path, config);
     let (a_remote, a_offset) = pick_remote_arrivals(&a, &b, &b_self, &scanner, config);
     let (b_remote, b_offset) = pick_remote_arrivals(&b, &a, &a_self, &scanner, config);
     let a_picks = PhonePicks { self_picks: a_self, remote_picks: a_remote, blind_scanned: a_blind, remote_offset_samples: a_offset };
     let b_picks = PhonePicks { self_picks: b_self, remote_picks: b_remote, blind_scanned: b_blind, remote_offset_samples: b_offset };
     let paired = pair_rounds(&a_picks, &b_picks, config.sample_rate_hz);
     let (a_continuity, b_continuity) = (continuity_of(&a, &a_picks, config), continuity_of(&b, &b_picks, config));
-    let (rounds, rounds_excluded_for_capture_breaks) = continuous_rounds(paired, &a_continuity, &b_continuity, config.sample_rate_hz);
-    let speaker_geometry = match (manifest.tape_distance_m, role_a.speaker_offset_world_m, role_b.speaker_offset_world_m) {
-        (Some(distance), Some(speaker_a), Some(speaker_b)) => Some(SpeakerGeometry {
-            mic_a_m: [0.0, 0.0, 0.0],
-            mic_b_m: [distance, 0.0, 0.0],
-            speaker_offset_a_world_m: speaker_a,
-            speaker_offset_b_world_m: speaker_b,
-        }),
-        _ => None,
-    };
-    let ranged = range_rounds(&rounds, self_paths, speed_of_sound_mps, speaker_geometry);
+    let (mut rounds, rounds_excluded_for_capture_breaks) = continuous_rounds(paired, &a_continuity, &b_continuity, config.sample_rate_hz);
+    for round in &mut rounds {
+        let [a_channel, b_channel] = [round.channels[0].as_deref(), round.channels[1].as_deref()];
+        round.self_paths = SelfPathLengths { a_m: a_self_path(a_channel), b_m: b_self_path(b_channel) };
+        round.speaker_offsets_world_m = role_a.speaker_offset_for_channel(a_channel).zip(role_b.speaker_offset_for_channel(b_channel)).map(|(a, b)| [a, b]);
+    }
+    let mic_layout = manifest.tape_distance_m.map(|distance| MicLayout { mic_a_m: [0.0, 0.0, 0.0], mic_b_m: [distance, 0.0, 0.0] });
+    let speaker_correction_applied = mic_layout.is_some() && rounds.iter().any(|r| r.speaker_offsets_world_m.is_some());
+    let ranged = range_rounds(&rounds, speed_of_sound_mps, mic_layout);
     let distance = CompensationMode::ALL
         .iter()
         .filter_map(|mode| distance_statistics(&ranged, *mode, manifest.tape_distance_m, config.range_outlier_threshold_m))
@@ -165,7 +205,47 @@ pub fn analyse_run(run_directory: &Path, config: &AnalysisConfig) -> Result<RunR
             .unzip();
         clock_residual_report(&points, &segment_ids, mode.name(), config.heartbeat_cadence_s)
     });
-    let phones = vec![phone_summary("A", &a, &a_picks, &scanner, config), phone_summary("B", &b, &b_picks, &scanner, config)];
+    let by_channel_mode = [CompensationMode::DoubleSided, CompensationMode::TrackedRateRatio, CompensationMode::None]
+        .into_iter()
+        .find(|mode| ranged.iter().any(|r| r.result(*mode).is_some()))
+        .unwrap_or(CompensationMode::None);
+    let distance_by_channel = distance_by_channel_pair(&ranged, by_channel_mode, manifest.tape_distance_m, config.range_outlier_threshold_m);
+    let phone_a = PhoneContext { role: "A", self_path_for_channel: &a_self_path, speed_of_sound_mps };
+    let phone_b = PhoneContext { role: "B", self_path_for_channel: &b_self_path, speed_of_sound_mps };
+    let phones = vec![phone_summary(&phone_a, &a, &a_picks, &scanner, config), phone_summary(&phone_b, &b, &b_picks, &scanner, config)];
+    let (a_to_b, b_to_a) = (cross_phone_sample_mapper(&a, &b), cross_phone_sample_mapper(&b, &a));
+    let (a_window, b_window) = (
+        |channel: Option<&str>| scanner.precursor_lead_window_samples(a_self_path(channel)),
+        |channel: Option<&str>| scanner.precursor_lead_window_samples(b_self_path(channel)),
+    );
+    let channel_evidence = vec![
+        emitter_channel_evidence(
+            &EmitterPicks {
+                role: "A",
+                platform: &a.session.platform_name,
+                self_picks: &a_picks.self_picks,
+                remote_picks: &b_picks.remote_picks,
+                map_to_listener: &a_to_b,
+                precursor_window_for_channel: &a_window,
+                listener_self_picks: &b_picks.self_picks,
+            },
+            speed_of_sound_mps,
+            config.sample_rate_hz,
+        ),
+        emitter_channel_evidence(
+            &EmitterPicks {
+                role: "B",
+                platform: &b.session.platform_name,
+                self_picks: &b_picks.self_picks,
+                remote_picks: &a_picks.remote_picks,
+                map_to_listener: &b_to_a,
+                precursor_window_for_channel: &b_window,
+                listener_self_picks: &a_picks.self_picks,
+            },
+            speed_of_sound_mps,
+            config.sample_rate_hz,
+        ),
+    ];
     let channel_map = [(&a, &b, &phones[1]), (&b, &a, &phones[0])]
         .iter()
         .map(|(emitter, listener, listener_summary)| ChannelMapObservation {
@@ -175,7 +255,7 @@ pub fn analyse_run(run_directory: &Path, config: &AnalysisConfig) -> Result<RunR
             listener_platform: listener.session.platform_name.clone(),
             median_remote_snr_db: listener_summary.median_remote_snr_db,
             remote_detected: listener_summary.remote_detected,
-            remote_expected: emitter.emissions().iter().filter(|e| e.3).count(),
+            remote_expected: emitter.emissions().iter().filter(|e| e.played).count(),
         })
         .collect();
     Ok(RunReport {
@@ -188,7 +268,7 @@ pub fn analyse_run(run_directory: &Path, config: &AnalysisConfig) -> Result<RunR
         temperature_assumed: manifest.temperature_c.is_none(),
         speed_of_sound_mps,
         self_paths_m: [self_paths.a_m, self_paths.b_m],
-        speaker_correction_applied: speaker_geometry.is_some(),
+        speaker_correction_applied,
         phones,
         round_count: ranged.len(),
         rounds_excluded_for_capture_breaks,
@@ -196,6 +276,9 @@ pub fn analyse_run(run_directory: &Path, config: &AnalysisConfig) -> Result<RunR
         implied_mean_self_path_m: manifest.tape_distance_m.and_then(|tape| implied_mean_self_path_m(&ranged, tape)),
         clock,
         channel_map,
+        channel_evidence,
+        distance_by_channel,
+        distance_by_channel_mode: by_channel_mode.name().into(),
         ranged_rounds: ranged,
     })
 }
@@ -204,7 +287,9 @@ pub fn analyse_run(run_directory: &Path, config: &AnalysisConfig) -> Result<RunR
 pub fn analyse_single(phone_directory: &Path, config: &AnalysisConfig) -> Result<PhoneSummary, String> {
     let bundle = PhoneBundle::load(phone_directory)?;
     let scanner = scanner_for(&bundle, RunManifest::default().speed_of_sound_mps(), config)?;
-    let (self_picks, blind) = pick_self_arrivals(&bundle, &scanner, config.default_self_path_length_m, config);
+    let self_path = |_: Option<&str>| config.default_self_path_length_m;
+    let (self_picks, blind) = pick_self_arrivals(&bundle, &scanner, self_path, config);
     let picks = PhonePicks { self_picks, remote_picks: Vec::new(), blind_scanned: blind, remote_offset_samples: None };
-    Ok(phone_summary(&bundle.session.role, &bundle, &picks, &scanner, config))
+    let phone = PhoneContext { role: &bundle.session.role, self_path_for_channel: &self_path, speed_of_sound_mps: RunManifest::default().speed_of_sound_mps() };
+    Ok(phone_summary(&phone, &bundle, &picks, &scanner, config))
 }

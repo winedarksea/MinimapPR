@@ -33,6 +33,8 @@ private class PendingChirpSplice(
     val startFrame: Long,
     val interleavedStereo: ShortArray,
     val listener: ChirpSpliceOutcomeListener,
+    /** Logged on this splice's `emission` event (chirp lab channel cycles). */
+    val channelLabel: String,
 ) {
     val frameCount: Long get() = (interleavedStereo.size / STEREO_CHANNEL_COUNT).toLong()
     /** Set by the writer thread (under the engine lock) once its first frame is mixed. */
@@ -214,15 +216,25 @@ class AndroidChirpPlaybackEngine(
             put("output_frame_index", splice.startFrame)
             put("target_ns", predictedNs)
             put("played", played)
-            put("channel", emissionChannelLabel)
+            put("channel", splice.channelLabel)
             put("level_dbfs", emissionLevelDbfs)
         }
         splice.listener.onSpliceOutcome(played, splice.startFrame, predictedNs)
     }
 
-    /** Chirp lab: splice at an exact write-frame index (k·P + offset). */
-    fun scheduleChirpAtOutputFrame(emissionIndex: Long, outputFrameIndex: Long, pcm16StereoLittleEndian: ByteArray, listener: ChirpSpliceOutcomeListener) {
-        val splice = PendingChirpSplice(emissionIndex, outputFrameIndex, pcm16StereoLittleEndian.pcm16LittleEndianToShortArray(), listener)
+    /**
+     * Chirp lab: splice at an exact write-frame index (k·P + offset).
+     * `channelLabel` names the channel this PCM drives; it defaults to the
+     * engine's single channel.
+     */
+    fun scheduleChirpAtOutputFrame(
+        emissionIndex: Long,
+        outputFrameIndex: Long,
+        pcm16StereoLittleEndian: ByteArray,
+        channelLabel: String = emissionChannelLabel,
+        listener: ChirpSpliceOutcomeListener,
+    ) {
+        val splice = PendingChirpSplice(emissionIndex, outputFrameIndex, pcm16StereoLittleEndian.pcm16LittleEndianToShortArray(), listener, channelLabel)
         val accepted = synchronized(lock) {
             val acceptable = running && outputFrameIndex >= framesWritten + safetyMarginFrames()
             if (acceptable) pending += splice

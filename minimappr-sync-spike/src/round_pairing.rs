@@ -13,11 +13,11 @@
 //! signs, ~117 ms apart at 20 m.
 
 use minimappr_core::sync::first_arrival::ArrivalContext;
-use minimappr_core::sync::two_way_ranging::PairArrivalTimes;
+use minimappr_core::sync::two_way_ranging::{PairArrivalTimes, SelfPathLengths};
 
 use crate::analysis_config::AnalysisConfig;
 use crate::arrival_scan::{ArrivalScanner, ScannedArrival};
-use crate::bundle_loader::PhoneBundle;
+use crate::bundle_loader::{EmissionRecord, PhoneBundle};
 
 const MILLISECONDS_PER_SECOND: f64 = 1_000.0;
 /// Blind self alignment: emissions within this of a blind pick count as matched.
@@ -29,6 +29,8 @@ pub struct SelfPick {
     pub output_frame_index: u64,
     pub emission_t_ns: i64,
     pub predicted_sample: Option<f64>,
+    /// Stereo channel this emission played on (`left`/`right`/`both`).
+    pub channel: Option<String>,
     pub arrival: Option<ScannedArrival>,
 }
 
@@ -47,8 +49,17 @@ pub struct PairedRound {
     pub a_emission_index: u64,
     pub b_emission_index: u64,
     pub times: PairArrivalTimes,
-    /// A's next chirp as heard by A and by B (double-sided ranging).
+    /// A's next chirp on the same channel as heard by A and by B
+    /// (double-sided ranging). Same channel: a different speaker would move
+    /// both repeat picks by different path changes and bias the rate.
     pub repeat: Option<(f64, f64)>,
+    /// Channels of A's and B's emissions in this round.
+    pub channels: [Option<String>; 2],
+    /// d_ii for those channels; set by the run analysis before ranging.
+    pub self_paths: SelfPathLengths,
+    /// World-frame speaker offsets for those channels, when the manifest
+    /// gives them; set by the run analysis before ranging.
+    pub speaker_offsets_world_m: Option<[[f64; 3]; 2]>,
     pub snr_db: [f64; 4],
     /// A's audio time of the round (its first self pick), seconds.
     pub a_time_s: f64,
@@ -65,25 +76,38 @@ fn median(values: &mut [f64]) -> Option<f64> {
     Some(values[values.len() / 2])
 }
 
-/// Self picks on one phone.
-pub fn pick_self_arrivals(bundle: &PhoneBundle, scanner: &ArrivalScanner, self_path_m: f64, config: &AnalysisConfig) -> (Vec<SelfPick>, bool) {
+/// Self picks on one phone; `self_path_for_channel` gives each emission's
+/// d_ii (the earpiece and bottom speaker differ by ~14 cm on a Pixel 10).
+pub fn pick_self_arrivals(
+    bundle: &PhoneBundle,
+    scanner: &ArrivalScanner,
+    self_path_for_channel: impl Fn(Option<&str>) -> f64,
+    config: &AnalysisConfig,
+) -> (Vec<SelfPick>, bool) {
     let fs = config.sample_rate_hz;
-    let context = ArrivalContext::SelfRecording { self_path_length_m: Some(self_path_m) };
-    let emissions: Vec<_> = bundle.emissions().into_iter().filter(|e| e.3).collect();
+    let emissions: Vec<EmissionRecord> = bundle.emissions().into_iter().filter(|e| e.played).collect();
     let predicted: Vec<Option<f64>> = emissions
         .iter()
-        .map(|(_, _, target_ns, _, _)| Some(bundle.capture_timeline.as_ref()?.frame_at_ns((*target_ns)? as f64)))
+        .map(|emission| Some(bundle.capture_timeline.as_ref()?.frame_at_ns(emission.target_ns? as f64)))
         .collect();
     let have_predictions = predicted.iter().any(Option::is_some);
     let blind_offset = if have_predictions { None } else { blind_output_to_capture_offset(bundle, scanner, &emissions, config) };
     let picks = emissions
-        .iter()
+        .into_iter()
         .zip(predicted)
-        .map(|((emission_index, output_frame_index, _, _, t_ns), predicted_sample)| {
-            let predicted_sample = predicted_sample.or_else(|| blind_offset.map(|offset| *output_frame_index as f64 + offset));
+        .map(|(emission, predicted_sample)| {
+            let predicted_sample = predicted_sample.or_else(|| blind_offset.map(|offset| emission.output_frame_index as f64 + offset));
+            let context = ArrivalContext::SelfRecording { self_path_length_m: Some(self_path_for_channel(emission.channel.as_deref())) };
             let arrival = predicted_sample
                 .and_then(|centre| scanner.detect_near(&bundle.audio.samples, centre, config.self_search_half_window_s * fs, context));
-            SelfPick { emission_index: *emission_index, output_frame_index: *output_frame_index, emission_t_ns: *t_ns, predicted_sample, arrival }
+            SelfPick {
+                emission_index: emission.emission_index,
+                output_frame_index: emission.output_frame_index,
+                emission_t_ns: emission.t_ns,
+                predicted_sample,
+                channel: emission.channel,
+                arrival,
+            }
         })
         .collect();
     (picks, !have_predictions)
@@ -94,7 +118,7 @@ pub fn pick_self_arrivals(bundle: &PhoneBundle, scanner: &ArrivalScanner, self_p
 fn blind_output_to_capture_offset(
     bundle: &PhoneBundle,
     scanner: &ArrivalScanner,
-    emissions: &[(u64, u64, Option<i64>, bool, i64)],
+    emissions: &[EmissionRecord],
     config: &AnalysisConfig,
 ) -> Option<f64> {
     let fs = config.sample_rate_hz;
@@ -106,16 +130,26 @@ fn blind_output_to_capture_offset(
         (0.25 * period_samples).max(scanner.waveform_length() as f64) as usize,
     );
     let tolerance = BLIND_ALIGNMENT_TOLERANCE_S * fs;
-    let first_output = emissions.first()?.1 as f64;
+    let first_output = emissions.first()?.output_frame_index as f64;
     blind
         .iter()
         .map(|pick| pick.sample_index - first_output)
         .max_by_key(|offset| {
             emissions
                 .iter()
-                .filter(|e| blind.iter().any(|pick| (pick.sample_index - (e.1 as f64 + offset)).abs() < tolerance))
+                .filter(|e| blind.iter().any(|pick| (pick.sample_index - (e.output_frame_index as f64 + offset)).abs() < tolerance))
                 .count()
         })
+}
+
+/// Emitter capture sample → listener capture sample through both phones'
+/// wall clocks (NTP-level), or identity when either lacks them.
+pub fn cross_phone_sample_mapper(emitter: &PhoneBundle, listener: &PhoneBundle) -> impl Fn(f64) -> f64 {
+    let wall_clocks = emitter.wall_clock_mapping().zip(listener.wall_clock_mapping());
+    move |emitter_sample: f64| match &wall_clocks {
+        Some((from, to)) => to.frame_at_wall_ns(from.wall_ns_at_frame(emitter_sample)),
+        None => emitter_sample,
+    }
 }
 
 /// Remote picks on `listener` of `emitter`'s chirps.
@@ -129,12 +163,7 @@ pub fn pick_remote_arrivals(
     let fs = config.sample_rate_hz;
     let period_s = emitter.session.schedule.period_ms.max(1) as f64 / MILLISECONDS_PER_SECOND;
     let wall_clocks = emitter.wall_clock_mapping().zip(listener.wall_clock_mapping());
-    let map_across = |emitter_sample: f64| -> f64 {
-        match &wall_clocks {
-            Some((from, to)) => to.frame_at_wall_ns(from.wall_ns_at_frame(emitter_sample)),
-            None => emitter_sample,
-        }
-    };
+    let map_across = cross_phone_sample_mapper(emitter, listener);
     // With wall clocks the mapping is good to NTP accuracy, so a narrow
     // window keeps the listener's own (much louder) chirps out even when
     // the two schedules drifted close; without them the start skew is
@@ -181,7 +210,12 @@ pub fn pair_rounds(a: &PhonePicks, b: &PhonePicks, sample_rate_hz: f64) -> Vec<P
         });
         let Some((j, a_hears_b)) = candidate else { continue };
         let Some(b_self) = b.self_picks.get(j).and_then(|pick| pick.arrival) else { continue };
-        let repeat = b.remote_picks.get(k + 1).copied().flatten().map(|b_next| (seconds(a_next.sample_index), seconds(b_next.sample_index)));
+        let a_channel = a.self_picks[k].channel.clone();
+        let repeat = (k + 1..a.self_picks.len()).find(|&m| a.self_picks[m].channel == a_channel).and_then(|m| {
+            let a_repeat = a.self_picks[m].arrival?;
+            let b_repeat = b.remote_picks.get(m).copied().flatten()?;
+            Some((seconds(a_repeat.sample_index), seconds(b_repeat.sample_index)))
+        });
         rounds.push(PairedRound {
             a_emission_index: a.self_picks[k].emission_index,
             b_emission_index: b.self_picks[j].emission_index,
@@ -195,6 +229,9 @@ pub fn pair_rounds(a: &PhonePicks, b: &PhonePicks, sample_rate_hz: f64) -> Vec<P
             snr_db: [a_k.snr_db, a_hears_b.snr_db, b_hears_a_k.snr_db, b_self.snr_db],
             a_time_s: seconds(a_k.sample_index),
             capture_segment: 0,
+            channels: [a_channel, b.self_picks[j].channel.clone()],
+            self_paths: SelfPathLengths { a_m: 0.0, b_m: 0.0 },
+            speaker_offsets_world_m: None,
         });
     }
     rounds

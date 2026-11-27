@@ -29,8 +29,9 @@ class DuplexAudioStartException(message: String) : RuntimeException(message)
  *
  * Logs `capture_timestamp` (with `wall_ms`, the coarse cross-phone time
  * reference) and `capture_gap` events, from failed reads and from silent
- * drops the capture timestamps reveal (`source`); playback logs its own
- * emissions and timestamps.
+ * drops the capture timestamps reveal (`source`), and `active_microphones`
+ * ([AudioRecordingPathMonitor]); playback logs its own emissions and
+ * timestamps.
  */
 class AndroidDuplexAudioRig(
     private val context: Context,
@@ -51,6 +52,9 @@ class AndroidDuplexAudioRig(
         configuration.capture.silentCaptureDropThresholdMilliseconds * NANOSECONDS_PER_MILLISECOND,
     )
     val playback = AndroidChirpPlaybackEngine(context, configuration.playback, eventLog, emissionChannelLabel, emissionLevelDbfs)
+    private val recordingPathMonitor = AudioRecordingPathMonitor(
+        { capture.audioRecord }, eventLog, configuration.capture.activeMicrophonesLogIntervalMilliseconds,
+    )
     private val timestampSampler = AudioTimestampSampler({ capture.audioRecord }, configuration.capture.captureTimestampIntervalMilliseconds, ::handleCaptureTimestamp)
 
     var startedNanoTime: Long = 0
@@ -89,6 +93,7 @@ class AndroidDuplexAudioRig(
             ?: throw DuplexAudioStartException("AudioRecord never produced a valid MONOTONIC timestamp")
         handleCaptureTimestamp(firstCaptureTimestamp)
         timestampSampler.start(scope)
+        recordingPathMonitor.start(scope)
         if (!withPlayback) return
         if (!playback.start()) throw DuplexAudioStartException("AudioTrack could not be opened")
         playback.awaitFirstTimestamp(configuration.playback.firstPlaybackTimestampTimeoutMilliseconds)
@@ -115,6 +120,7 @@ class AndroidDuplexAudioRig(
 
     /** Playback first (its outcomes may still reach the device), then capture. */
     fun stop() {
+        recordingPathMonitor.stop()
         timestampSampler.stop()
         playback.stop()
         capture.stop()

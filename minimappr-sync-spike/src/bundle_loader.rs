@@ -126,6 +126,16 @@ impl WallClockMapping {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmissionRecord {
+    pub emission_index: u64,
+    pub output_frame_index: u64,
+    pub target_ns: Option<i64>,
+    pub played: bool,
+    pub t_ns: i64,
+    pub channel: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PhoneBundle {
     pub directory: PathBuf,
@@ -162,13 +172,19 @@ impl PhoneBundle {
         Ok(Self { directory: directory.to_path_buf(), session, audio, events, unparsed_event_lines, capture_timeline })
     }
 
-    pub fn emissions(&self) -> Vec<(u64, u64, Option<i64>, bool, i64)> {
+    pub fn emissions(&self) -> Vec<EmissionRecord> {
         self.events
             .iter()
             .filter_map(|event| match event {
-                BundleEvent::Emission { emission_index, output_frame_index, target_ns, played, t_ns, .. } => {
-                    Some((*emission_index, *output_frame_index, *target_ns, *played, *t_ns))
-                }
+                BundleEvent::Emission { emission_index, output_frame_index, target_ns, played, t_ns, channel } => Some(EmissionRecord {
+                    emission_index: *emission_index,
+                    output_frame_index: *output_frame_index,
+                    target_ns: *target_ns,
+                    played: *played,
+                    t_ns: *t_ns,
+                    // Old bundles stamped no channel per emission: the schedule's is the one played.
+                    channel: channel.clone().or_else(|| Some(self.session.schedule.channel.clone()).filter(|c| !c.is_empty())),
+                }),
                 _ => None,
             })
             .collect()

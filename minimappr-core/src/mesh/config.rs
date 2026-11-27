@@ -10,6 +10,7 @@ use crate::sync::clock_filter::ClockFilterConfig;
 use crate::sync::chirp_waveform::{ChirpWaveformKind, StereoOutputChannel, DEFAULT_CHIRP_DURATION_S};
 use crate::sync::clock_graph::ClockGraphConfig;
 
+use super::speaker_geometry::SpeakerGeometryConfig;
 use super::MeshMilliseconds;
 
 pub const DEVICE_SAMPLE_RATE_HZ: f64 = 48_000.0;
@@ -205,7 +206,11 @@ impl Default for ChirpSchedulerConfig {
             schedule_lead_time_ms: 400,
             round_listen_tail_ms: 300,
             round_report_timeout_ms: 2_000,
-            chirp_band_hz: [13_000.0, 16_000.0],
+            // 2026-11-26: 13–16 kHz left the Pixel 7a earpiece's pick 13 mm
+            // placement-dependent (a second arrival ~18 samples late merges
+            // into the 3 kHz main lobe); 12–18 kHz agreed within 0.2 mm across
+            // placements and 1.0/1.8 m, and halves the Doppler coupling.
+            chirp_band_hz: [12_000.0, 18_000.0],
             chirp_waveform_kind: ChirpWaveformKind::UpDownHyperbolic,
             chirp_duration_s: DEFAULT_CHIRP_DURATION_S,
             coarse_schedule_uncertainty_ms: 30,
@@ -252,7 +257,9 @@ pub struct IslandSyncConfig {
     /// Per-model speaker position relative to the ranging mic in the phone
     /// body frame (x right, y up the screen, z out of the screen), metres,
     /// for `correct_for_speaker_mic_offsets`. Filled from Phase 1 run A3.
+    /// Applied live by `speaker_geometry` (corrected or σ-widened).
     pub speaker_offset_body_frame_by_platform_m: BTreeMap<String, [f64; 3]>,
+    pub speaker_geometry: SpeakerGeometryConfig,
     /// Per-model stereo channel the chirp plays on, from Phase 1 run A1:
     /// the bottom speaker where it ranges cleanly, otherwise a measured
     /// earpiece (which then needs its d_ii and speaker vector above).
@@ -281,25 +288,34 @@ impl Default for IslandSyncConfig {
             walking_position_growth_mps: 1.5,
             confident_chirality_threshold: 0.9,
             relative_bearing_noise_std_deg: 8.0,
-            // Pixel 10 Pro XL chirps from its earpiece (see the channel map
-            // below): its self recording shows a body-borne precursor 22.3
-            // samples before the airborne arrival, i.e. a speaker ~0.16 m up
-            // the body from the bottom mic. Without this d_ii the precursor
-            // sits at the edge of the 2 cm default's rejection window and the
-            // self pick hops onto it (+3.9 / +7.8 cm range levels, 2026-11-26
-            // soak). Lateral offset not measured.
-            self_path_length_by_platform_m: BTreeMap::from([("pixel_10_pro_xl".to_string(), 0.16)]),
+            // Run A1 / 2026-11-26 round two (bottoms facing on pads, 1.00 and
+            // 1.80 m tape, per-emission channel cycle). Pixel 10 Pro XL: Left
+            // is the bottom speaker; it is heard as one clean arrival in every
+            // pose and its self pick needs no precursor rejection, so it keeps
+            // the 2 cm default d_ii and has no speaker vector. Its earpiece
+            // (Right) is unusable: the self pick moves 8–26 cm between runs.
+            // Pixel 7a: Right is the earpiece (by ear 2026-11-25 and 11-26);
+            // its bottom speaker (Left) reaches another phone 14 dB weaker
+            // with a second copy ~23 samples later and ranged 0.93–1.04 m
+            // between identical runs. The earpiece is heard cleanly. Since
+            // self picks take the strongest peak (first_arrival.rs), d_ii
+            // only enters the range equation, so it is an effective value:
+            // with the speaker 0.145 m up the body (earpiece slot to bottom
+            // mic, estimated from the 152 mm body), 0.095 m makes bottoms-facing
+            // 12–18 kHz runs read tape + v/2 exactly (two placements,
+            // 1.0 and 1.8 m, within 0.2 mm), i.e. what is left is the
+            // orientation-dependent speaker term, which the live solve corrects
+            // or carries as σ (speaker_geometry.rs). It is shorter than the
+            // straight earpiece-to-mic line, so it absorbs a pick-timing
+            // constant too. Not split by orientation: reversing the 7a
+            // shadows its own mic and the picks fail.
+            self_path_length_by_platform_m: BTreeMap::from([("pixel_7a".to_string(), 0.095)]),
             default_self_path_length_m: 0.02,
-            speaker_offset_body_frame_by_platform_m: BTreeMap::from([("pixel_10_pro_xl".to_string(), [0.0, 0.16, 0.0])]),
-            // Run A1. Pixel 7a: right is the earpiece (by ear, 2026-11-25), so
-            // Left. Pixel 10 Pro XL (2026-11-26, 1.000 m tape): Right is the
-            // earpiece (body precursor above, confirmed by ear). With the d_ii and speaker vector
-            // above it ranges 0.986 m, σ 0.6 mm over a 30 min soak. Left
-            // (presumably the bottom speaker) gave multi-copy arrivals and a
-            // level-dependent 5-9 cm short range, cause not found yet.
+            speaker_offset_body_frame_by_platform_m: BTreeMap::from([("pixel_7a".to_string(), [0.0, 0.145, 0.0])]),
+            speaker_geometry: SpeakerGeometryConfig::default(),
             chirp_output_channel_by_platform: BTreeMap::from([
-                ("pixel_7a".to_string(), StereoOutputChannel::Left),
-                ("pixel_10_pro_xl".to_string(), StereoOutputChannel::Right),
+                ("pixel_7a".to_string(), StereoOutputChannel::Right),
+                ("pixel_10_pro_xl".to_string(), StereoOutputChannel::Left),
             ]),
             default_chirp_output_channel: StereoOutputChannel::Right,
             clock_graph: ClockGraphConfig::default(),

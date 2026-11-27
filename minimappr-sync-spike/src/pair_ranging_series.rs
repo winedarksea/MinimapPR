@@ -49,12 +49,12 @@ impl RangedRound {
     }
 }
 
+/// Ranging mic positions in the world frame (tape layout: A at the origin,
+/// B on +x); each round brings its own channel's speaker offsets.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SpeakerGeometry {
+pub struct MicLayout {
     pub mic_a_m: [f64; 3],
     pub mic_b_m: [f64; 3],
-    pub speaker_offset_a_world_m: [f64; 3],
-    pub speaker_offset_b_world_m: [f64; 3],
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -70,11 +70,11 @@ pub struct DistanceStatistics {
 
 /// Slope of θ(t) from uncompensated rounds: (1 + slope) = B ticks per A
 /// tick. One slope across capture segments (θ steps at each break).
-pub fn offset_series_rate_ratio(rounds: &[PairedRound], self_paths: SelfPathLengths, speed_of_sound_mps: f64) -> Option<f64> {
+pub fn offset_series_rate_ratio(rounds: &[PairedRound], speed_of_sound_mps: f64) -> Option<f64> {
     let (points, segment_ids): (Vec<(f64, f64)>, Vec<usize>) = rounds
         .iter()
         .filter_map(|round| {
-            let result = range_pair(&round.times, self_paths, speed_of_sound_mps, RateCompensation::None).ok()?;
+            let result = range_pair(&round.times, round.self_paths, speed_of_sound_mps, RateCompensation::None).ok()?;
             Some(((result.offset_reference_time_on_a_s, result.clock_offset_b_minus_a_s), round.capture_segment))
         })
         .unzip();
@@ -90,27 +90,20 @@ pub fn offset_series_rate_ratio(rounds: &[PairedRound], self_paths: SelfPathLeng
     (stt > 0.0).then(|| 1.0 + sto / stt)
 }
 
-pub fn range_rounds(
-    rounds: &[PairedRound],
-    self_paths: SelfPathLengths,
-    speed_of_sound_mps: f64,
-    speaker_geometry: Option<SpeakerGeometry>,
-) -> Vec<RangedRound> {
-    let tracked_ratio = offset_series_rate_ratio(rounds, self_paths, speed_of_sound_mps);
-    let correct = |result: TwoWayRangingResult| match speaker_geometry {
-        Some(geometry) => correct_for_speaker_mic_offsets(
-            &result,
-            geometry.mic_a_m,
-            geometry.mic_b_m,
-            geometry.speaker_offset_a_world_m,
-            geometry.speaker_offset_b_world_m,
-            speed_of_sound_mps,
-        ),
-        None => result,
-    };
+/// Ranges every round with its own d_ii; the speaker correction applies
+/// when the layout and that round's speaker offsets are both known.
+pub fn range_rounds(rounds: &[PairedRound], speed_of_sound_mps: f64, mic_layout: Option<MicLayout>) -> Vec<RangedRound> {
+    let tracked_ratio = offset_series_rate_ratio(rounds, speed_of_sound_mps);
     rounds
         .iter()
         .map(|round| {
+            let self_paths = round.self_paths;
+            let correct = |result: TwoWayRangingResult| match (mic_layout, round.speaker_offsets_world_m) {
+                (Some(layout), Some([speaker_a, speaker_b])) => {
+                    correct_for_speaker_mic_offsets(&result, layout.mic_a_m, layout.mic_b_m, speaker_a, speaker_b, speed_of_sound_mps)
+                }
+                _ => result,
+            };
             let compensation_for = |mode: CompensationMode| -> Option<RateCompensation> {
                 match mode {
                     CompensationMode::None => Some(RateCompensation::None),
@@ -164,6 +157,31 @@ pub fn distance_statistics(ranged: &[RangedRound], mode: CompensationMode, tape_
         outlier_count: distances.len() - inliers.len(),
         error_vs_tape_m: tape_distance_m.map(|tape| median_m - tape),
     })
+}
+
+/// Range statistics for one (A channel, B channel) combination.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ChannelPairDistance {
+    pub a_channel: String,
+    pub b_channel: String,
+    pub statistics: DistanceStatistics,
+}
+
+/// Rounds split by the channels A and B played, in `mode`.
+pub fn distance_by_channel_pair(ranged: &[RangedRound], mode: CompensationMode, tape_distance_m: Option<f64>, outlier_threshold_m: f64) -> Vec<ChannelPairDistance> {
+    let label = |channel: &Option<String>| channel.clone().unwrap_or_else(|| "?".into());
+    let mut pairs: Vec<(String, String)> = ranged.iter().map(|r| (label(&r.round.channels[0]), label(&r.round.channels[1]))).collect();
+    pairs.sort();
+    pairs.dedup();
+    pairs
+        .into_iter()
+        .filter_map(|(a_channel, b_channel)| {
+            let members: Vec<RangedRound> =
+                ranged.iter().filter(|r| label(&r.round.channels[0]) == a_channel && label(&r.round.channels[1]) == b_channel).cloned().collect();
+            let statistics = distance_statistics(&members, mode, tape_distance_m, outlier_threshold_m)?;
+            Some(ChannelPairDistance { a_channel, b_channel, statistics })
+        })
+        .collect()
 }
 
 /// (d_AA + d_BB)/2 a tape-measured run implies: only the sum is observable
